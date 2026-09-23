@@ -22,8 +22,14 @@ import { AgentRunView } from "./components/AgentRunView";
 import { UltraRunView } from "./components/UltraRunView";
 import { ultraBegin, ultraSnapshot, ultraDecide, ultraCancel, type UltraSnapshot } from "./data/ultraRun";
 import { liveRunAvailable } from "./data/liveRun";
-import { custodyBegin, custodyStop } from "./data/custodyRun";
+import { custodyBegin, custodyDecidePlan, custodyStop } from "./data/custodyRun";
 import { rexTaskBegin } from "./data/rexTasks";
+import { FableCountdown } from "./components/FableCountdown";
+import { loadFableSessionName, saveFableSessionName, fableCreateSession } from "./data/fable";
+import { TerminalView } from "./components/TerminalView";
+import { WorkspaceEditor } from "./components/WorkspaceEditor";
+import { GitPanel } from "./components/GitPanel";
+import { CheckpointPanel } from "./components/CheckpointPanel";
 import { RexTaskList, RexTaskView } from "./components/RexTaskView";
 import {
   agentCancel,
@@ -45,14 +51,24 @@ import {
 import { loadInstalledAgentOptions } from "./components/ModelStatus";
 import { OperatorModeChip, OperatorModeGate } from "./components/OperatorModeGate";
 import { loadOperatorMode, saveOperatorMode, type OperatorMode } from "./data/operatorMode";
+import { SetupChecklist } from "./components/SetupChecklist";
 import type { InstalledAgentId } from "./data/backend";
+import { resolveExecutionPath, type ExecutionPath } from "./data/executionPath";
 
-export function shouldUseDirectUltra(
-  operatorMode: OperatorMode | null,
-  liveCapable: boolean,
-  ultra: boolean,
-): boolean {
-  return liveCapable && ultra && operatorMode === "human";
+const TOUR_KEY = "rex-tour-mode";
+
+// Reads the installed-agent selection from settings. When an installed agent
+// is selected it becomes the explicit execution path (see executionPath.ts);
+// otherwise the custody loop is the default. Read at render for the path
+// label and re-read inside onRun so the click always sees the latest choice.
+export function readInstalledAgentSelection(): { id: InstalledAgentId; label: string } | null {
+  try {
+    const selected = JSON.parse(window.localStorage.getItem("rex-model-selection") || "null") as { provider?: string; id?: string; label?: string } | null;
+    if (selected?.provider?.startsWith("installed:") && selected.id) {
+      return { id: selected.id as InstalledAgentId, label: selected.label ?? selected.id };
+    }
+  } catch { /* no selection */ }
+  return null;
 }
 
 // The hero starter composer exists only while there is no session. The moment
@@ -67,7 +83,7 @@ export default function App() {
     try { saveOperatorMode(mode); } catch { /* storage unavailable */ }
     setOperatorMode(mode);
   };
-  const [view, setView] = useState<"task" | "settings">("task");
+  const [view, setView] = useState<"task" | "settings" | "terminal" | "editor" | "git">("task");
   const [browserPhase, setBrowserPhase] = useState<"closed" | "active" | "collapsed">("closed");
   const [browserRun, setBrowserRun] = useState(0);
   const [ultra, setUltra] = useState(false);
@@ -80,13 +96,52 @@ export default function App() {
   const fastTimer = useRef<number | null>(null);
   const [task, setTask] = useState("");
   const [session, setSession] = useState<Session | null>(null);
+  // Active Fable gate session, if the user started one. The countdown is
+  // visible here; the Composer toggle creates sessions.
+  const [fableSession, setFableSession] = useState<string | null>(() => loadFableSessionName());
+  // Fable gate toggle: when on, runs create a native fable session first.
+  const [fableGate, setFableGate] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("rex-fable-gate") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleFableGate = (v: boolean) => {
+    try {
+      window.localStorage.setItem("rex-fable-gate", v ? "1" : "0");
+    } catch {
+      /* storage unavailable */
+    }
+    setFableGate(v);
+    if (!v) {
+      // Turning the gate off clears the active session from the UI.
+      // The session persists on disk; the countdown simply stops showing.
+      saveFableSessionName(null);
+      setFableSession(null);
+    }
+  };
   const [liveCapable, setLiveCapable] = useState(false);
+  const [backendProbed, setBackendProbed] = useState(false);
+  const [tourMode, setTourMode] = useState(() => {
+    try {
+      return window.localStorage.getItem(TOUR_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [checklistHot, setChecklistHot] = useState(false);
+  const checklistTimer = useRef<number | null>(null);
   const [liveRun, setLiveRun] = useState<AgentSnapshot | null>(null);
   const [custody, setCustody] = useState<{ grantId: string; phase: string; operator: string } | null>(null);
   const [rexTaskId, setRexTaskId] = useState<string | null>(null);
   const [liveStarting, setLiveStarting] = useState(false);
   const [liveDeciding, setLiveDeciding] = useState(false);
   const [liveCancelling, setLiveCancelling] = useState(false);
+  // Plan mode: the run proposes a plan and parks in awaiting_plan until the
+  // user approves it. Reset on each new run start.
+  const [planMode, setPlanMode] = useState(false);
+  const [planDeciding, setPlanDeciding] = useState(false);
   const livePoll = useRef<number | null>(null);
   const [installedRun, setInstalledRun] = useState<InstalledRunSnapshot | null>(null);
   const [installedStarting, setInstalledStarting] = useState(false);
@@ -96,9 +151,37 @@ export default function App() {
   const [nativePreviewDir, setNativePreviewDir] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
-    liveRunAvailable().then((ok) => { if (active) setLiveCapable(ok); }).catch(() => undefined);
+    liveRunAvailable()
+      .then((ok) => {
+        if (active) {
+          setLiveCapable(ok);
+          setBackendProbed(true);
+        }
+      })
+      .catch(() => {
+        if (active) setBackendProbed(true);
+      });
     return () => { active = false; };
   }, []);
+  // Re-probe on demand (the setup checklist's "check again" button): the
+  // user may have started the sidecar after the first probe.
+  const reprobeBackend = () => {
+    liveRunAvailable()
+      .then((ok) => {
+        setLiveCapable(ok);
+        setBackendProbed(true);
+      })
+      .catch(() => undefined);
+  };
+  const chooseTourMode = (on: boolean) => {
+    setTourMode(on);
+    try {
+      if (on) window.localStorage.setItem(TOUR_KEY, "1");
+      else window.localStorage.removeItem(TOUR_KEY);
+    } catch {
+      /* storage unavailable; tour mode just won't persist */
+    }
+  };
   // Deep link: #run=<id> reattaches to an existing agent loop run (e.g.
   // after a reload). Read-only viewers and the original driver share the
   // same snapshot stream.
@@ -214,21 +297,78 @@ export default function App() {
   const nativeProject = nativePreviewDir ?? new URLSearchParams(window.location.search).get("native-preview");
   const previewTask = /(?:html|react|next\.?js|vite|astro|svelte|website|ui|interface|dashboard|landing page|app)/i.test(task);
 
-  const onRun = () => {
+  // One default execution path: the custody loop. Every alternative is an
+  // explicit opt-in resolved here, so the Composer label and onRun below can
+  // never disagree about what the Run button will do.
+  const installedSelection = readInstalledAgentSelection();
+  const executionPath: ExecutionPath = resolveExecutionPath({
+    operatorMode,
+    ultra,
+    installedAgentId: installedSelection?.id ?? null,
+    installedAgentLabel: installedSelection?.label ?? null,
+    liveCapable,
+    tourMode,
+  });
+
+  const onRun = async () => {
     cancel.current?.();
     const label = task.trim();
     if (!label) return;
-    let installedBackend: InstalledAgentId | null = null;
-    try {
-      const selected = JSON.parse(window.localStorage.getItem("rex-model-selection") || "null") as { provider?: string; id?: string } | null;
-      if (selected?.provider?.startsWith("installed:") && selected.id) {
-        installedBackend = selected.id as InstalledAgentId;
+    // Re-resolve at click time: the settings selection may have changed
+    // since the last render.
+    const selection = readInstalledAgentSelection();
+    const path = resolveExecutionPath({
+      operatorMode,
+      ultra,
+      installedAgentId: selection?.id ?? null,
+      installedAgentLabel: selection?.label ?? null,
+      liveCapable,
+      tourMode,
+    });
+    if (path.kind === "unavailable") {
+      // No backend and no explicit tour: never silently animate a fake run.
+      // Pulse the setup checklist instead — it is already rendered above.
+      setChecklistHot(true);
+      if (checklistTimer.current) window.clearTimeout(checklistTimer.current);
+      checklistTimer.current = window.setTimeout(() => setChecklistHot(false), 1600);
+      beginSettle();
+      return;
+    }
+    if (path.kind === "tour") {
+      const s = newSession(label);
+      cancel.current = startMockTurn(s, label, "task", setSession, reduced);
+      if (ultra) {
+        setBrowserRun((v) => v + 1);
+        setBrowserPhase("active");
       }
-    } catch { /* no selection */ }
-    if (installedBackend) {
-      // Real installed-agent path: the vendor CLI runs the task on an
-      // isolated workspace while REX streams its events, applies the
-      // completion gate, and holds any source changes for reviewed promotion.
+      beginSettle();
+      return;
+    }
+    // Fable gate: when enabled, open a native fable session for this task
+    // before the run starts. The session's authority timer and unlock rule
+    // are enforced in Rust; the countdown appears above the run. If the
+    // gate fails to open, the run does not start ungated.
+    if (fableGate && liveCapable) {
+      const sessionName = `fable-${Date.now().toString(36)}`;
+      try {
+        await fableCreateSession(sessionName, label);
+        saveFableSessionName(sessionName);
+        setFableSession(sessionName);
+      } catch (e) {
+        console.error("Fable gate failed to open:", e);
+        setChecklistHot(true);
+        if (checklistTimer.current) window.clearTimeout(checklistTimer.current);
+        checklistTimer.current = window.setTimeout(() => setChecklistHot(false), 1600);
+        beginSettle();
+        return;
+      }
+    }
+    if (path.kind === "installed") {
+      // Settings integration: the vendor CLI runs the task on an isolated
+      // workspace while REX streams its events, applies the completion gate,
+      // and holds any source changes for reviewed promotion.
+      const installedBackend = selection?.id ?? installedSelection?.id;
+      if (!installedBackend) return;
       const options = loadInstalledAgentOptions();
       setInstalledRun(null);
       setInstalledStarting(true);
@@ -261,8 +401,10 @@ export default function App() {
         .finally(() => setInstalledStarting(false));
       return;
     }
-    if (shouldUseDirectUltra(operatorMode, liveCapable, ultra)) {
-      // Ultra path: contract -> build -> verify -> adversary -> judge.
+    if (path.kind === "ultra") {
+      // Explicit verified-pipeline mode: contract -> build -> verify ->
+      // adversary -> judge. A separate backend, chosen deliberately via the
+      // Ultra toggle — not a silent branch.
       setUltraRun(null);
       setLiveRun(null);
       setLiveStarting(true);
@@ -300,55 +442,59 @@ export default function App() {
         .finally(() => setLiveStarting(false));
       return;
     }
-    if (liveCapable) {
-      // Real path: the autonomous Rust loop plans, acts through trusted
-      // approvals, verifies its own work against gates, and stops truthfully.
-      // The operator mode picked at the gate decides who is accountable:
-      // human mode runs under a custody grant recording operator:human;
-      // agent mode opens a durable REX task an external host drives through
-      // rex-mcp, and this UI supervises with the permanent human Stop.
+    if (path.kind === "delegate") {
+      // Explicit "delegate to external host": opens a durable REX task an
+      // external host drives through rex-mcp; this UI supervises with the
+      // permanent human Stop.
       setLiveRun(null);
       setCustody(null);
       setLiveStarting(true);
       beginSettle();
-      if (operatorMode === "agent") {
-        rexTaskBegin(label, ultra)
-          .then((res) => {
-            const id = res?.task_id;
-            if (id) {
-              setRexTaskId(id);
-            } else {
-              throw new Error("rex-mcp returned no task id");
-            }
+      rexTaskBegin(label, ultra)
+        .then((res) => {
+          const id = res?.task_id;
+          if (id) {
+            setRexTaskId(id);
+          } else {
+            throw new Error("rex-mcp returned no task id");
+          }
+        })
+        .catch((e) =>
+          setLiveRun({
+            id: "run-failed",
+            task: label,
+            status: "failed",
+            terminal_reason: { kind: "provider_error", detail: String(e) },
+            provider: "gemini",
+            model: "",
+            plan: [],
+            step: 0,
+            max_steps: 0,
+            tool_calls: 0,
+            max_tool_calls: 0,
+            tokens_used: 0,
+            max_tokens: 0,
+            elapsed_ms: 0,
+            max_wall_ms: 0,
+            pending_approval: null,
+            events: [],
+            preview: null,
+            completion_summary: null,
+            error: String(e),
           })
-          .catch((e) =>
-            setLiveRun({
-              id: "run-failed",
-              task: label,
-              status: "failed",
-              terminal_reason: { kind: "provider_error", detail: String(e) },
-              provider: "gemini",
-              model: "",
-              plan: [],
-              step: 0,
-              max_steps: 0,
-              tool_calls: 0,
-              max_tool_calls: 0,
-              tokens_used: 0,
-              max_tokens: 0,
-              elapsed_ms: 0,
-              max_wall_ms: 0,
-              pending_approval: null,
-              events: [],
-              preview: null,
-              completion_summary: null,
-              error: String(e),
-            })
-          )
-          .finally(() => setLiveStarting(false));
-        return;
-      }
-      custodyBegin(label)
+        )
+        .finally(() => setLiveStarting(false));
+      return;
+    }
+    // Default: the custody autonomous loop plans, acts through trusted
+    // approvals, verifies its own work against gates, and stops truthfully.
+    {
+      // Capture the plan-mode choice for this run, then reset the checkbox so
+      // the next run starts in the default execution mode unless the user
+      // opts in again.
+      const mode = planMode;
+      setPlanMode(false);
+      custodyBegin(label, mode)
         .then((view) => {
           setCustody({ grantId: view.grant_id, phase: view.phase, operator: view.operator });
           setLiveRun(view.snapshot);
@@ -379,15 +525,7 @@ export default function App() {
           })
         )
         .finally(() => setLiveStarting(false));
-      return;
     }
-    const s = newSession(label);
-    cancel.current = startMockTurn(s, label, "task", setSession, reduced);
-    if (ultra) {
-      setBrowserRun((v) => v + 1);
-      setBrowserPhase("active");
-    }
-    beginSettle();
   };
 
   const onLiveDecision = (approved: boolean) => {
@@ -406,6 +544,19 @@ export default function App() {
       .then((snap) => setLiveRun(snap))
       .catch((e) => setLiveRun((prev) => (prev ? { ...prev, error: String(e) } : prev)))
       .finally(() => setLiveDeciding(false));
+  };
+
+  // Plan decision for a plan-gated custody run: approval resumes the run
+  // into the normal loop; rejection ends it as denied. The decision travels
+  // through the custody channel, which shares the same run registry, so the
+  // gate's trusted-UI checks still apply.
+  const onPlanDecision = (approved: boolean) => {
+    if (!liveRun || planDeciding) return;
+    setPlanDeciding(true);
+    custodyDecidePlan(liveRun.id, approved)
+      .then((snap) => setLiveRun(snap))
+      .catch((e) => setLiveRun((prev) => (prev ? { ...prev, error: String(e) } : prev)))
+      .finally(() => setPlanDeciding(false));
   };
 
   const onLiveCancel = () => {
@@ -513,10 +664,20 @@ export default function App() {
       <div className="ultra-status" role="status" aria-live="polite"><span>ULTRA</span><b>{ultra ? "Verification tier engaged" : "Verification tier offline"}</b><small>{ultra ? "Contract, adversary and clean-room judge active" : "No extra capabilities are active"}</small></div>
       <div className="mx-auto w-full max-w-[820px] px-5 pt-3 sm:px-8">
         <OperatorModeChip mode={operatorMode} onSwitch={chooseOperatorMode} />
+        {fableSession && <FableCountdown sessionName={fableSession} />}
       </div>
       <div className="fast-status" role="status" aria-live="polite"><span>FAST</span><b>{fast ? "TEMPO PROFILE ARMED" : "Fast preview off"}</b><small>Visual only · execution speed unchanged</small><i aria-hidden="true" /></div>
       <main className="main-spine mx-auto w-full max-w-[820px] px-5 pb-12 sm:px-8">
-        {view === "settings" ? (
+        {view === "terminal" ? (
+          <TerminalView />
+        ) : view === "editor" ? (
+          <WorkspaceEditor />
+        ) : view === "git" ? (
+          <>
+            <GitPanel />
+            <CheckpointPanel />
+          </>
+        ) : view === "settings" ? (
           <SettingsView
             motion={motion}
             setMotion={setMotion}
@@ -531,6 +692,15 @@ export default function App() {
           />
         ) : (
           <>
+            {backendProbed && !liveCapable && (
+              <SetupChecklist
+                hot={checklistHot}
+                tour={tourMode}
+                onTour={chooseTourMode}
+                onOpenSettings={() => setView("settings")}
+                onRecheck={reprobeBackend}
+              />
+            )}
             {hero !== "gone" && (
               <div className={`hero-wrap ${hero === "settling" ? "settling" : ""}`}>
                 <div>
@@ -543,6 +713,11 @@ export default function App() {
                       setTask={setTask}
                       state={state}
                       onRun={onRun}
+                      planMode={planMode}
+                      setPlanMode={setPlanMode}
+                      fableGate={fableGate}
+                      setFableGate={toggleFableGate}
+                      executionPath={executionPath}
                     />
                   </div>
                 </div>
@@ -586,6 +761,8 @@ export default function App() {
                 onDecide={onLiveDecision}
                 onCancel={onLiveCancel}
                 custody={custody}
+                onPlanDecision={onPlanDecision}
+                planDeciding={planDeciding}
               />
             )}
             {rexTaskId && (

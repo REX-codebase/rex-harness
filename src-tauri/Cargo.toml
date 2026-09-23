@@ -11,6 +11,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+portable-pty = "0.8"
 rex-providers = { path = "../crates/rex-providers" }
 rex-search = { path = "../crates/rex-search" }
 rex-tools = { path = "../crates/rex-tools" }
@@ -19,6 +20,7 @@ rex-preview = { path = "../crates/rex-preview" }
 rex-installed-agents = { path = "../crates/rex-installed-agents" }
 rex-custody = { path = "../crates/rex-custody" }
 rex-mcp = { path = "../crates/rex-mcp" }
+rex-fable = { path = "../crates/rex-fable" }
 
 [features]
 default = ["custom-protocol"]

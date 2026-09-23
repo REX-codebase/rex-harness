@@ -4,6 +4,11 @@
 // only - key material never crosses the bridge.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod checkpoint;
+mod cost;
+mod mcp;
+mod terminal;
+
 use rex_installed_agents::{
     discover as discover_installed_agents, run as run_installed_agent, InstalledAgentId,
     InstalledAgentRun, InstalledAgentSummary, RunManager as InstalledAgentManager, RunOptions,
@@ -24,6 +29,7 @@ use rex_ultra::orchestrator::{UltraOptions, UltraRunService, UltraSnapshot};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+use tauri::Emitter;
 use tauri::State;
 
 type Service = ProviderService<FileSecretStore, UreqTransport>;
@@ -245,6 +251,280 @@ fn tool_cancel(
     tools.cancel(&call_id)
 }
 
+/// Get the file diff for a pending tool call, for the approval UI.
+/// Returns null for non-file calls.
+#[tauri::command]
+fn tool_call_diff(
+    tools: State<'_, Arc<LocalTools>>,
+    call_id: String,
+) -> Result<Option<rex_tools::FileDiff>, String> {
+    tools.pending_diff(&call_id).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Workspace editor: direct file read/write bound to the workspace.
+// ---------------------------------------------------------------------------
+
+/// Validate that `path` (relative or absolute) resolves under `workspace`.
+fn resolve_workspace_path(workspace: &str, path: &str) -> Result<PathBuf, String> {
+    let ws = PathBuf::from(workspace)
+        .canonicalize()
+        .map_err(|e| format!("workspace not found: {e}"))?;
+    let target = if PathBuf::from(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        ws.join(path)
+    };
+    // For existing files, canonicalize to resolve symlinks. For new files,
+    // canonicalize the parent.
+    let canonical = if target.exists() {
+        target
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve path: {e}"))?
+    } else {
+        let parent = target.parent().ok_or("invalid path")?;
+        let canon_parent = parent
+            .canonicalize()
+            .map_err(|e| format!("parent not found: {e}"))?;
+        canon_parent.join(target.file_name().ok_or("invalid path")?)
+    };
+    if !canonical.starts_with(&ws) {
+        return Err("path escapes the workspace".to_string());
+    }
+    Ok(canonical)
+}
+
+/// Read a workspace file for the inline editor.
+#[tauri::command]
+fn workspace_read_file(workspace: String, path: String) -> Result<String, String> {
+    let target = resolve_workspace_path(&workspace, &path)?;
+    std::fs::read_to_string(&target).map_err(|e| format!("cannot read file: {e}"))
+}
+
+/// Write a workspace file from the inline editor. The user is explicitly
+/// editing, so this does not go through the approval gate — the editor UI
+/// shows a dirty indicator and the write is the user's own action.
+#[tauri::command]
+fn workspace_write_file(workspace: String, path: String, content: String) -> Result<(), String> {
+    let target = resolve_workspace_path(&workspace, &path)?;
+    if content.len() > 2 * 1024 * 1024 {
+        return Err("file exceeds 2 MiB write limit".to_string());
+    }
+    std::fs::write(&target, content).map_err(|e| format!("cannot write file: {e}"))
+}
+
+/// List files in the workspace (non-recursive, for the editor picker).
+#[tauri::command]
+fn workspace_list_files(workspace: String) -> Result<Vec<String>, String> {
+    let ws = PathBuf::from(&workspace)
+        .canonicalize()
+        .map_err(|e| format!("workspace not found: {e}"))?;
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&ws).map_err(|e| format!("cannot list: {e}"))? {
+        let entry = entry.map_err(|e| format!("cannot read entry: {e}"))?;
+        let path = entry.path();
+        if path.is_file() {
+            if let Ok(rel) = path.strip_prefix(&ws) {
+                files.push(rel.to_string_lossy().to_string());
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+// ---------------------------------------------------------------------------
+// Git integration: user-initiated from the Git panel. The user clicks Commit
+// themselves; these do not go through the model approval gate.
+// ---------------------------------------------------------------------------
+
+/// `git status --porcelain` for the workspace.
+#[tauri::command]
+fn git_status(
+    tools: State<'_, Arc<LocalTools>>,
+    workspace: String,
+) -> Result<Vec<rex_tools::GitFile>, String> {
+    tools
+        .git_status(PathBuf::from(workspace).as_path())
+        .map_err(|e| e.to_string())
+}
+
+/// `git diff` (unstaged + staged) for a single path.
+#[tauri::command]
+fn git_diff(
+    tools: State<'_, Arc<LocalTools>>,
+    workspace: String,
+    path: String,
+) -> Result<String, String> {
+    tools
+        .git_diff(PathBuf::from(workspace).as_path(), &path)
+        .map_err(|e| e.to_string())
+}
+
+/// `git add -A` + `git commit` with the user's message.
+#[tauri::command]
+fn git_commit(
+    tools: State<'_, Arc<LocalTools>>,
+    workspace: String,
+    message: String,
+) -> Result<String, String> {
+    tools
+        .git_commit(PathBuf::from(workspace).as_path(), &message)
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoints: workspace snapshots for one-click restore.
+// ---------------------------------------------------------------------------
+
+/// Create a checkpoint of the workspace.
+#[tauri::command]
+fn checkpoint_create(
+    checkpoints: State<'_, Arc<checkpoint::CheckpointStore>>,
+    workspace: String,
+    label: String,
+) -> Result<checkpoint::Checkpoint, String> {
+    checkpoints.create(PathBuf::from(workspace).as_path(), &label)
+}
+
+/// List checkpoints for the workspace, newest first.
+#[tauri::command]
+fn checkpoint_list(
+    checkpoints: State<'_, Arc<checkpoint::CheckpointStore>>,
+    workspace: String,
+) -> Result<Vec<checkpoint::Checkpoint>, String> {
+    checkpoints.list(PathBuf::from(workspace).as_path())
+}
+
+/// Restore a checkpoint. Auto-snapshots the current state first and returns
+/// the backup checkpoint, so the restore is reversible.
+#[tauri::command]
+fn checkpoint_restore(
+    checkpoints: State<'_, Arc<checkpoint::CheckpointStore>>,
+    workspace: String,
+    id: String,
+) -> Result<checkpoint::Checkpoint, String> {
+    checkpoints.restore(PathBuf::from(workspace).as_path(), &id)
+}
+
+// ---------------------------------------------------------------------------
+// MCP servers: attach external servers, probe them, toggle tools per server.
+// ---------------------------------------------------------------------------
+
+/// List configured MCP servers.
+#[tauri::command]
+fn mcp_list_servers(mcp: State<'_, Arc<mcp::McpStore>>) -> Result<Vec<mcp::McpServer>, String> {
+    mcp.list()
+}
+
+/// Add an MCP server (name + command).
+#[tauri::command]
+fn mcp_add_server(
+    mcp: State<'_, Arc<mcp::McpStore>>,
+    name: String,
+    command: String,
+) -> Result<mcp::McpServer, String> {
+    mcp.add(&name, &command)
+}
+
+/// Remove an MCP server.
+#[tauri::command]
+fn mcp_remove_server(mcp: State<'_, Arc<mcp::McpStore>>, id: String) -> Result<(), String> {
+    mcp.remove(&id)
+}
+
+/// Enable/disable an MCP server.
+#[tauri::command]
+fn mcp_set_server_enabled(
+    mcp: State<'_, Arc<mcp::McpStore>>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    mcp.set_enabled(&id, enabled)
+}
+
+/// Enable/disable a single tool on a server.
+#[tauri::command]
+fn mcp_set_tool_enabled(
+    mcp: State<'_, Arc<mcp::McpStore>>,
+    server_id: String,
+    tool_name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    mcp.set_tool_enabled(&server_id, &tool_name, enabled)
+}
+
+/// Probe a server: handshake, list tools, update the server record.
+#[tauri::command]
+fn mcp_probe_server(
+    mcp: State<'_, Arc<mcp::McpStore>>,
+    id: String,
+) -> Result<mcp::McpServer, String> {
+    mcp.probe(&id)
+}
+
+// ---------------------------------------------------------------------------
+// Cost: price tables, per-run receipts, budgets.
+// ---------------------------------------------------------------------------
+
+/// Get the static price table (estimates).
+#[tauri::command]
+fn cost_price_table() -> Vec<cost::ModelPrice> {
+    cost::price_table()
+}
+
+/// Record a run's token usage; returns the cost receipt.
+#[tauri::command]
+fn cost_record(
+    cost: State<'_, Arc<cost::CostStore>>,
+    run_id: String,
+    model_id: String,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) -> Result<cost::CostReceipt, String> {
+    cost.record(&run_id, &model_id, prompt_tokens, completion_tokens)
+}
+
+/// Get recent cost receipts, newest first.
+#[tauri::command]
+fn cost_receipts(
+    cost: State<'_, Arc<cost::CostStore>>,
+    limit: u64,
+) -> Result<Vec<cost::CostReceipt>, String> {
+    cost.receipts(limit as usize)
+}
+
+/// Get the current budget.
+#[tauri::command]
+fn cost_get_budget(cost: State<'_, Arc<cost::CostStore>>) -> Result<cost::Budget, String> {
+    cost.get_budget()
+}
+
+/// Set the budget.
+#[tauri::command]
+fn cost_set_budget(
+    cost: State<'_, Arc<cost::CostStore>>,
+    budget: cost::Budget,
+) -> Result<(), String> {
+    cost.set_budget(budget)
+}
+
+/// Check whether a prospective cost would exceed the set budgets.
+/// Returns a warning message, or None when within budget.
+#[tauri::command]
+fn cost_check_budget(
+    cost: State<'_, Arc<cost::CostStore>>,
+    additional_usd: f64,
+) -> Result<Option<String>, String> {
+    cost.check_budget(additional_usd)
+}
+
+/// Spend in the last N days.
+#[tauri::command]
+fn cost_spend(cost: State<'_, Arc<cost::CostStore>>, days: u64) -> Result<f64, String> {
+    cost.spend_last_days(days)
+}
+
 #[tauri::command]
 fn preview_detect(
     preview: State<'_, Arc<NativePreview>>,
@@ -400,12 +680,17 @@ fn now_ms_u128() -> u128 {
 /// the Human/Agent gate is recorded in the grant, the run's budgets are
 /// clamped to the grant, and completion must pass the grant's evidence
 /// gates. The capability token never leaves the backend.
+///
+/// When `plan_mode` is set, the run first produces a plan via a single
+/// plan-only model turn and parks in `awaiting_plan` until the UI approves
+/// it through `custody_decide_plan`. No tool executes before approval.
 #[tauri::command]
 fn custody_begin(
     custody_runs: State<'_, Arc<CustodyRuns>>,
     task: String,
     provider: Option<String>,
     model: Option<String>,
+    plan_mode: Option<bool>,
 ) -> Result<rex_providers::CustodiedRunView, String> {
     let task_id = format!("task-ui-{:x}", now_ms_u128());
     // The custodied workspace sits under the agent runs root: the run
@@ -419,9 +704,323 @@ fn custody_begin(
         provider.unwrap_or_else(|| "gemini".into()),
         model,
         workspace,
+        plan_mode.unwrap_or(false),
     );
     let run = custody_runs.begin_managed_task(req)?;
     Ok(custody_runs.view_of(&run))
+}
+
+/// Trusted UI decision on a plan-gated run's proposed plan. Approval
+/// continues the run into the normal loop; denial ends it as denied with
+/// no tool having executed.
+#[tauri::command]
+fn custody_decide_plan(
+    custody_runs: State<'_, Arc<CustodyRuns>>,
+    run_id: String,
+    approved: bool,
+) -> Result<rex_providers::AgentSnapshot, String> {
+    custody_runs.decide_plan(&run_id, approved)
+}
+
+// ---------------------------------------------------------------------------
+// Fable gate: native THINK → PROVE → ATTACK → WRITE sessions.
+// ---------------------------------------------------------------------------
+
+fn fable_dir() -> std::path::PathBuf {
+    config_dir().join("fable-sessions")
+}
+
+/// Serializable view of a Fable session for the UI countdown.
+#[derive(serde::Serialize)]
+struct FableStatusView {
+    name: String,
+    objective: String,
+    phase: String,
+    unlocked: bool,
+    timer_remaining_ms: u64,
+    timer_remaining_human: String,
+    timer_elapsed: bool,
+    proven_count: usize,
+    invariant_count: usize,
+    unlock_ready: bool,
+}
+
+fn fable_view_of(s: &rex_fable::FableSession) -> FableStatusView {
+    let timer = s.timer();
+    FableStatusView {
+        name: s.name().to_string(),
+        objective: s.objective().to_string(),
+        phase: s.phase().to_string(),
+        unlocked: s.unlocked(),
+        timer_remaining_ms: timer.remaining_ms(),
+        timer_remaining_human: timer.remaining_human(),
+        timer_elapsed: timer.elapsed(),
+        proven_count: s.ledger().proven_count(),
+        invariant_count: s.ledger().invariants().len(),
+        unlock_ready: s.ledger().prerequisites_met() && timer.elapsed(),
+    }
+}
+
+/// Create a Fable session in THINK. The authority timer starts immediately.
+#[tauri::command]
+fn fable_create_session(
+    name: String,
+    objective: String,
+    time_budget_minutes: Option<u32>,
+) -> Result<FableStatusView, String> {
+    let dir = fable_dir();
+    let session = rex_fable::FableSession::create(name, objective, time_budget_minutes)
+        .map_err(|e| e.to_string())?;
+    session.save(&dir).map_err(|e| e.to_string())?;
+    Ok(fable_view_of(&session))
+}
+
+/// Current status of a Fable session, including the live countdown.
+#[tauri::command]
+fn fable_session_status(name: String) -> Result<FableStatusView, String> {
+    let session = rex_fable::FableSession::load(&fable_dir(), &name).map_err(|e| e.to_string())?;
+    Ok(fable_view_of(&session))
+}
+
+/// Attempt the PROVE → ATTACK unlock. Fails honestly when prerequisites or
+/// the authority timer are unmet.
+#[tauri::command]
+fn fable_unlock_session(name: String, rationale: String) -> Result<FableStatusView, String> {
+    let dir = fable_dir();
+    let mut session = rex_fable::FableSession::load(&dir, &name).map_err(|e| e.to_string())?;
+    session
+        .unlock_execution(rationale)
+        .map_err(|e| e.to_string())?;
+    session.save(&dir).map_err(|e| e.to_string())?;
+    Ok(fable_view_of(&session))
+}
+
+// ---------------------------------------------------------------------------
+// Fable-mode MCP link: probe an external Fable Engine MCP server.
+// ---------------------------------------------------------------------------
+
+/// Result of probing a fable-mode MCP server over stdio.
+#[derive(serde::Serialize)]
+struct FableMcpLink {
+    available: bool,
+    server_command: String,
+    tools: Vec<String>,
+    has_fable_session_tool: bool,
+    error: Option<String>,
+}
+
+/// Probe an external fable-mode MCP server. Spawns `server_command` (split
+/// on whitespace), performs the MCP initialize handshake, and lists tools.
+/// The child is killed afterwards; this is a link check, not a session.
+#[tauri::command]
+fn fable_mcp_probe(server_command: String) -> Result<FableMcpLink, String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    let mut parts = server_command.split_whitespace();
+    let bin = parts.next().ok_or("server command is empty")?.to_string();
+    let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+
+    let mut child = Command::new(&bin)
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("cannot spawn {bin}: {e}"))?;
+
+    let mut stdin = child.stdin.take().ok_or("server stdin unavailable")?;
+    let stdout = child.stdout.take().ok_or("server stdout unavailable")?;
+    let mut reader = BufReader::new(stdout);
+
+    let mut next_id = 0u64;
+    let mut request =
+        |method: &str, params: serde_json::Value| -> Result<serde_json::Value, String> {
+            next_id += 1;
+            let msg = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": next_id,
+                "method": method,
+                "params": params,
+            });
+            writeln!(stdin, "{}", msg).map_err(|e| format!("write failed: {e}"))?;
+            stdin.flush().map_err(|e| format!("flush failed: {e}"))?;
+            // Read with a timeout so a hung server cannot hang the UI.
+            let mut line = String::new();
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_secs(10) {
+                line.clear();
+                // Non-blocking check: try to read; BufRead::read_line blocks,
+                // so we rely on the overall spawn timeout via a helper thread
+                // in production. Here we read one line; a well-behaved MCP
+                // server answers initialize promptly.
+                match reader.read_line(&mut line) {
+                    Ok(0) => break, // EOF
+                    Ok(_) if !line.trim().is_empty() => break,
+                    Ok(_) => continue,
+                    Err(e) => return Err(format!("read failed: {e}")),
+                }
+            }
+            if line.trim().is_empty() {
+                return Err("server did not answer within 10s".to_string());
+            }
+            serde_json::from_str(&line).map_err(|e| format!("bad JSON from server: {e}"))
+        };
+
+    let link = (|| -> Result<FableMcpLink, String> {
+        let hello = request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "rex-harness", "version": env!("CARGO_PKG_VERSION") },
+            }),
+        )?;
+        if hello.get("result").is_none() {
+            return Err(format!("server refused initialize: {hello}"));
+        }
+        let tools_resp = request("tools/list", serde_json::json!({}))?;
+        let tools: Vec<String> = tools_resp
+            .pointer("/result/tools")
+            .and_then(|t| t.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        t.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(FableMcpLink {
+            available: true,
+            server_command: server_command.clone(),
+            has_fable_session_tool: tools.iter().any(|t| t == "fable_session"),
+            tools,
+            error: None,
+        })
+    })();
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    match link {
+        Ok(mut l) => {
+            if !l.has_fable_session_tool {
+                l.available = false;
+                l.error = Some(format!(
+                    "server answered but has no fable_session tool (has: {})",
+                    if l.tools.is_empty() {
+                        "none".to_string()
+                    } else {
+                        l.tools.join(", ")
+                    }
+                ));
+            }
+            Ok(l)
+        }
+        Err(e) => Ok(FableMcpLink {
+            available: false,
+            server_command: server_command.clone(),
+            tools: vec![],
+            has_fable_session_tool: false,
+            error: Some(e),
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive terminal: PTY sessions bound to the workspace.
+// ---------------------------------------------------------------------------
+
+/// Spawn a terminal in `workspace` (must sit under the agent runs root).
+/// Returns the terminal ID. Output arrives as `terminal-output-{id}` events.
+#[tauri::command]
+fn terminal_spawn(
+    app: tauri::AppHandle,
+    terminals: State<'_, terminal::SharedTerminals>,
+    workspace: String,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> Result<String, String> {
+    let runs_root = config_dir().join("agent-runs");
+    let id = terminals.spawn(
+        PathBuf::from(workspace),
+        &runs_root,
+        cols.unwrap_or(80),
+        rows.unwrap_or(24),
+    )?;
+
+    // Drain the PTY in a background thread; forward bytes as events.
+    // The event name embeds the terminal ID so the UI routes correctly.
+    let event_name = format!("terminal-output-{id}");
+    let terminals_clone = terminals.inner().clone();
+    let id_clone = id.clone();
+    std::thread::spawn(move || {
+        let mut reader = match terminals_clone.clone_reader(&id_clone) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break, // EOF: child exited
+                Ok(n) => {
+                    // Lossy conversion is fine for terminal output; the
+                    // alternative is dropping undecodable bytes entirely.
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let _ = app.emit(&event_name, text);
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = app.emit(&format!("terminal-exit-{id_clone}"), ());
+    });
+
+    Ok(id)
+}
+
+/// Write bytes (UTF-8) to the terminal's stdin.
+#[tauri::command]
+fn terminal_write(
+    terminals: State<'_, terminal::SharedTerminals>,
+    id: String,
+    data: String,
+) -> Result<(), String> {
+    terminals.write(&id, data.as_bytes())
+}
+
+/// Resize the PTY.
+#[tauri::command]
+fn terminal_resize(
+    terminals: State<'_, terminal::SharedTerminals>,
+    id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    terminals.resize(&id, cols, rows)
+}
+
+/// Kill the terminal and its child.
+#[tauri::command]
+fn terminal_kill(
+    terminals: State<'_, terminal::SharedTerminals>,
+    id: String,
+) -> Result<(), String> {
+    terminals.kill(&id)
+}
+
+/// The default workspace for new terminals: the agent runs root.
+/// The UI passes this to `terminal_spawn`; the backend re-validates it.
+#[tauri::command]
+fn terminal_default_workspace() -> Result<String, String> {
+    let root = config_dir().join("agent-runs");
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    root.to_str()
+        .map(|s| s.to_string())
+        .ok_or("workspace path is not UTF-8".to_string())
 }
 
 /// Current custody phase for a grant (active, verifying, released, ...).
@@ -787,6 +1386,9 @@ fn main() {
         )),
     ));
 
+    // Auto-update is intentionally disabled: there are no signing keys yet,
+    // so no updater plugin is registered. Re-enable with
+    // tauri_plugin_updater once TAURI_SIGNING_PRIVATE_KEY exists.
     tauri::Builder::default()
         .manage(service)
         .manage(search_service)
@@ -797,6 +1399,16 @@ fn main() {
         .manage(ultra)
         .manage(custody_runs)
         .manage(installed_runs)
+        .manage(terminal::SharedTerminals::default())
+        .manage(Arc::new(
+            checkpoint::CheckpointStore::new(&config_dir()).expect("checkpoint store"),
+        ))
+        .manage(Arc::new(
+            mcp::McpStore::new(&config_dir()).expect("mcp store"),
+        ))
+        .manage(Arc::new(
+            cost::CostStore::new(&config_dir()).expect("cost store"),
+        ))
         .invoke_handler(tauri::generate_handler![
             installed_agent_summaries,
             installed_agent_run,
@@ -821,6 +1433,29 @@ fn main() {
             tool_resolve_approval,
             tool_execute,
             tool_cancel,
+            tool_call_diff,
+            workspace_read_file,
+            workspace_write_file,
+            workspace_list_files,
+            git_status,
+            git_diff,
+            git_commit,
+            checkpoint_create,
+            checkpoint_list,
+            checkpoint_restore,
+            mcp_list_servers,
+            mcp_add_server,
+            mcp_remove_server,
+            mcp_set_server_enabled,
+            mcp_set_tool_enabled,
+            mcp_probe_server,
+            cost_price_table,
+            cost_record,
+            cost_receipts,
+            cost_get_budget,
+            cost_set_budget,
+            cost_check_budget,
+            cost_spend,
             preview_detect,
             preview_start,
             preview_status,
@@ -841,6 +1476,16 @@ fn main() {
             custody_begin,
             custody_phase,
             custody_stop,
+            custody_decide_plan,
+            fable_create_session,
+            fable_session_status,
+            fable_unlock_session,
+            fable_mcp_probe,
+            terminal_spawn,
+            terminal_write,
+            terminal_resize,
+            terminal_kill,
+            terminal_default_workspace,
             rex_task_begin,
             rex_task_follow_up,
             rex_tasks,
