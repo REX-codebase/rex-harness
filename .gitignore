@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.fable/
+*.log
+target/
+bench-out/
+packages/rex-mcp-npm/vendor/
+packages/rex-mcp-npm/*.tgz

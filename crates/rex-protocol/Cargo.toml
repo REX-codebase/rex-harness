@@ -1,0 +1,14 @@
+[package]
+name = "rex-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Versioned protocol types for the REX MCP execution surface"
+license = "Proprietary"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
