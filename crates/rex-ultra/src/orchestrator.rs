@@ -29,8 +29,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+
+/// Take a lock, recovering the guard if a prior panic poisoned it. A poisoned
+/// lock would otherwise make every later caller panic too, turning one panic
+/// into a subsystem-wide cascade. Recovering matches `parking_lot` semantics
+/// (whose locks do not poison) without pulling in a new dependency.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 const CONTRACT_ATTEMPTS: u8 = 3;
 const JUDGE_ATTEMPTS: u8 = 2;
@@ -362,6 +370,31 @@ impl Drop for RollbackGuard {
     }
 }
 
+// Publish a terminal result only after rollback has finished. Otherwise a
+// snapshot observer can see Rejected while the failed artifacts still exist.
+fn finish_after_rollback(
+    rollback: &mut RollbackGuard,
+    handle: &RunHandle,
+    terminal: UltraTerminal,
+) {
+    if rollback.armed {
+        let result = rollback.snapshot.restore(&rollback.workspace);
+        rollback.disarm();
+        if let Err(e) = result {
+            finish(
+                handle,
+                UltraTerminal::ProviderError {
+                    detail: format!(
+                        "workspace rollback failed: {e}; original terminal: {terminal:?}"
+                    ),
+                },
+            );
+            return;
+        }
+    }
+    finish(handle, terminal);
+}
+
 struct DriveCtx {
     id: String,
     task: String,
@@ -374,7 +407,7 @@ struct DriveCtx {
 }
 
 fn set_phase(handle: &RunHandle, phase: UltraPhase) {
-    handle.shared.lock().expect("state poisoned").phase = phase;
+    lock(&handle.shared).phase = phase;
 }
 
 fn cancelled(handle: &RunHandle) -> bool {
@@ -382,7 +415,7 @@ fn cancelled(handle: &RunHandle) -> bool {
 }
 
 fn finish(handle: &RunHandle, terminal: UltraTerminal) {
-    let mut state = handle.shared.lock().expect("state poisoned");
+    let mut state = lock(&handle.shared);
     state.phase = match &terminal {
         UltraTerminal::Promoted => UltraPhase::Promoted,
         UltraTerminal::Rejected { .. } => UltraPhase::Rejected,
@@ -417,7 +450,7 @@ fn await_subrun<S: SecretStore + 'static, T: Transport + 'static>(
         match inner.snapshot(run_id) {
             Some(snap) => {
                 let terminal = snap.terminal_reason.is_some();
-                handle.shared.lock().expect("state poisoned").builder = Some(snap.clone());
+                lock(&handle.shared).builder = Some(snap.clone());
                 if terminal {
                     return snap;
                 }
@@ -455,7 +488,8 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(
     let mut ledger = match EpistemicLedger::open(&ultra_dir) {
         Ok(l) => l,
         Err(e) => {
-            finish(
+            finish_after_rollback(
+                &mut rollback,
                 &ctx.handle,
                 UltraTerminal::ProviderError {
                     detail: format!("ledger failed: {e}"),
@@ -467,7 +501,8 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(
     let mut evidence = match EvidenceStore::open(&ultra_dir.join("evidence")) {
         Ok(e) => e,
         Err(e) => {
-            finish(
+            finish_after_rollback(
+                &mut rollback,
                 &ctx.handle,
                 UltraTerminal::ProviderError {
                     detail: format!("evidence store failed: {e}"),
@@ -493,11 +528,15 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(
     ) {
         Ok(m) => m,
         Err(e) => {
-            finish(&ctx.handle, UltraTerminal::ProviderError { detail: e });
+            finish_after_rollback(
+                &mut rollback,
+                &ctx.handle,
+                UltraTerminal::ProviderError { detail: e },
+            );
             return;
         }
     };
-    ctx.handle.shared.lock().expect("state poisoned").model = worker_model.clone();
+    lock(&ctx.handle.shared).model = worker_model.clone();
     ledger.record(
         &format!("worker model resolved to {worker_model}"),
         FactClass::Observed {
@@ -509,7 +548,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(
     let mut contract: Option<AcceptanceContract> = None;
     for _ in 0..CONTRACT_ATTEMPTS {
         if cancelled(&ctx.handle) {
-            finish(&ctx.handle, UltraTerminal::Cancelled);
+            finish_after_rollback(&mut rollback, &ctx.handle, UltraTerminal::Cancelled);
             return;
         }
         let mut prompt = contract::drafting_prompt(&ctx.task);
@@ -552,11 +591,15 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(
         }
     }
     let Some(acceptance) = contract else {
-        finish(&ctx.handle, UltraTerminal::ContractFailed { errors });
+        finish_after_rollback(
+            &mut rollback,
+            &ctx.handle,
+            UltraTerminal::ContractFailed { errors },
+        );
         return;
     };
     write_json(&ultra_dir.join("contract.json"), &acceptance);
-    ctx.handle.shared.lock().expect("state poisoned").contract = Some(acceptance.clone());
+    lock(&ctx.handle.shared).contract = Some(acceptance.clone());
 
     let judge_provider = ctx
         .options
@@ -579,7 +622,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(
         .clone()
         .unwrap_or_else(|| worker_model.clone());
     {
-        let mut state = ctx.handle.shared.lock().expect("state poisoned");
+        let mut state = lock(&ctx.handle.shared);
         state.judge_model = format!("{judge_provider}/{judge_model}");
         state.adversary_model = format!("{adversary_provider}/{adversary_model}");
     }
@@ -623,7 +666,11 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
         ) {
             Ok(snap) => snap,
             Err(e) => {
-                finish(&ctx.handle, UltraTerminal::ProviderError { detail: e });
+                finish_after_rollback(
+                    &mut rollback,
+                    &ctx.handle,
+                    UltraTerminal::ProviderError { detail: e },
+                );
                 return;
             }
         };
@@ -634,7 +681,7 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
             .builder_run_id = Some(builder_run.id.clone());
         let built = await_subrun(&inner, &ctx.handle, &builder_run.id);
         if cancelled(&ctx.handle) {
-            finish(&ctx.handle, UltraTerminal::Cancelled);
+            finish_after_rollback(&mut rollback, &ctx.handle, UltraTerminal::Cancelled);
             return;
         }
         match built.terminal_reason {
@@ -646,7 +693,7 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
             }
             other => {
                 let detail = format!("builder ended without completing: {other:?}");
-                let mut state = ctx.handle.shared.lock().expect("state poisoned");
+                let mut state = lock(&ctx.handle.shared);
                 if state.repair < MAX_REPAIRS {
                     state.repair += 1;
                     drop(state);
@@ -655,7 +702,11 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
                     continue;
                 }
                 drop(state);
-                finish(&ctx.handle, UltraTerminal::BuilderFailed { detail });
+                finish_after_rollback(
+                    &mut rollback,
+                    &ctx.handle,
+                    UltraTerminal::BuilderFailed { detail },
+                );
                 return;
             }
         }
@@ -731,7 +782,11 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
                             .builder_run_id = Some(run.id.clone());
                         let attacked = await_subrun(&inner, &ctx.handle, &run.id);
                         if cancelled(&ctx.handle) {
-                            finish(&ctx.handle, UltraTerminal::Cancelled);
+                            finish_after_rollback(
+                                &mut rollback,
+                                &ctx.handle,
+                                UltraTerminal::Cancelled,
+                            );
                             return;
                         }
                         let summary = attacked.completion_summary.unwrap_or_default();
@@ -752,8 +807,7 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
                     }
                 }
                 write_json(&ultra_dir.join("adversary.json"), &adversary_report_inner);
-                ctx.handle.shared.lock().expect("state poisoned").adversary =
-                    Some(adversary_report_inner.clone());
+                lock(&ctx.handle.shared).adversary = Some(adversary_report_inner.clone());
             }
             adversary_report = Some(adversary_report_inner);
 
@@ -775,7 +829,7 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
             let mut judge_error = String::new();
             for _ in 0..JUDGE_ATTEMPTS {
                 if cancelled(&ctx.handle) {
-                    finish(&ctx.handle, UltraTerminal::Cancelled);
+                    finish_after_rollback(&mut rollback, &ctx.handle, UltraTerminal::Cancelled);
                     return;
                 }
                 let mut p = prompt.clone();
@@ -809,13 +863,18 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
                         }
                     }
                     Err(e) => {
-                        finish(&ctx.handle, UltraTerminal::ProviderError { detail: e });
+                        finish_after_rollback(
+                            &mut rollback,
+                            &ctx.handle,
+                            UltraTerminal::ProviderError { detail: e },
+                        );
                         return;
                     }
                 }
             }
             let Some(judge_found) = judge_report else {
-                finish(
+                finish_after_rollback(
+                    &mut rollback,
                     &ctx.handle,
                     UltraTerminal::Rejected {
                         reasons: vec![format!("judge answer unusable: {judge_error}")],
@@ -834,7 +893,7 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
                     },
                 );
             }
-            ctx.handle.shared.lock().expect("state poisoned").judge = judge_result.clone();
+            lock(&ctx.handle.shared).judge = judge_result.clone();
         } // end if executable_all_proven
 
         // Promotion decision: every world that ran must agree.
@@ -1234,11 +1293,11 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
                 },
             );
             rollback.disarm();
-            finish(&ctx.handle, UltraTerminal::Promoted);
+            finish_after_rollback(&mut rollback, &ctx.handle, UltraTerminal::Promoted);
             return;
         }
 
-        let mut state = ctx.handle.shared.lock().expect("state poisoned");
+        let mut state = lock(&ctx.handle.shared);
         if state.repair < MAX_REPAIRS {
             state.repair += 1;
             let n = state.repair;
@@ -1263,7 +1322,11 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
                 evidence_id: "gate-failures".into(),
             },
         );
-        finish(&ctx.handle, UltraTerminal::Rejected { reasons });
+        finish_after_rollback(
+            &mut rollback,
+            &ctx.handle,
+            UltraTerminal::Rejected { reasons },
+        );
         return;
     }
 }
@@ -1301,6 +1364,19 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
     use std::time::Instant;
+
+    #[test]
+    fn poisoned_lock_recovers_instead_of_cascading() {
+        let m = std::sync::Mutex::new(1u32);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = m.lock().unwrap();
+            panic!("boom while holding the lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(m.is_poisoned());
+        // The helper takes the guard back instead of panicking again.
+        assert_eq!(*lock(&m), 1);
+    }
 
     struct Script {
         turns: Mutex<VecDeque<String>>,
@@ -1508,6 +1584,63 @@ mod tests {
         // The adversary and judge never ran: verification already failed.
         assert!(done.adversary.is_none());
         assert!(done.judge.is_none());
+    }
+
+    #[test]
+    fn terminal_is_published_only_after_rollback_and_failure_is_visible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let snapshot = WorkspaceSnapshot::capture(&workspace).unwrap();
+        let handle = RunHandle {
+            shared: Mutex::new(Shared {
+                phase: UltraPhase::Building,
+                contract: None,
+                verification: None,
+                adversary: None,
+                judge: None,
+                builder: None,
+                builder_run_id: None,
+                terminal: None,
+                repair: 0,
+                model: String::new(),
+                judge_model: String::new(),
+                adversary_model: String::new(),
+            }),
+            cancel: AtomicBool::new(false),
+        };
+        let mut rollback = RollbackGuard {
+            workspace: workspace.clone(),
+            snapshot: snapshot.clone(),
+            armed: true,
+        };
+        fs::write(workspace.join("false-artifact"), "bad").unwrap();
+        finish_after_rollback(
+            &mut rollback,
+            &handle,
+            UltraTerminal::Rejected {
+                reasons: vec!["failed verification".into()],
+            },
+        );
+        assert!(!workspace.join("false-artifact").exists());
+        assert!(!rollback.armed);
+        assert!(matches!(
+            &handle.shared.lock().unwrap().terminal,
+            Some(UltraTerminal::Rejected { .. })
+        ));
+
+        let mut corrupt = RollbackGuard {
+            workspace,
+            snapshot,
+            armed: true,
+        };
+        corrupt.snapshot.tree_sha256 = "corrupt".into();
+        finish_after_rollback(&mut corrupt, &handle, UltraTerminal::Cancelled);
+        let state = handle.shared.lock().unwrap();
+        assert!(
+            matches!(&state.terminal, Some(UltraTerminal::ProviderError { detail }) if detail.contains("rollback snapshot integrity mismatch"))
+        );
+        assert!(!corrupt.armed);
     }
 
     #[test]

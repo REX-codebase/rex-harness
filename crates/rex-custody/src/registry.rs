@@ -29,8 +29,11 @@ use crate::state::{CustodyGrant, CustodyPhase, ReleaseReason, Violation};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use subtle::ConstantTimeEq;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tombstone {
@@ -88,15 +91,33 @@ pub struct CustodyRegistry {
 
 const DEFAULT_OFFER_TTL_MS: u64 = 10 * 60 * 1000;
 
+// `File::lock` is cross-process, but same-process threads also need one
+// acquisition gate before consulting their separate registry snapshots.
+static STORE_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub struct StoreGuard {
+    _local: MutexGuard<'static, ()>,
+    _file: File,
+}
+
 impl CustodyRegistry {
     pub fn open(root: PathBuf) -> Result<Self, CustodyError> {
+        // The grant files hold `token_secret`/`resume_secret` in cleartext, so
+        // the store gets the same owner-only discipline as the daemon MAC key
+        // (`rex-daemon`) and the provider secret store (`rex-providers`): the
+        // root and its subdirectories are 0700, and the files are 0600.
+        fs::create_dir_all(&root).map_err(ioe)?;
+        restrict_dir(&root)?;
         fs::create_dir_all(root.join("grants")).map_err(ioe)?;
+        restrict_dir(&root.join("grants"))?;
         fs::create_dir_all(root.join("audit")).map_err(ioe)?;
+        restrict_dir(&root.join("audit"))?;
         let index: Index = match fs::read(root.join("index.json")) {
             Ok(bytes) => {
                 serde_json::from_slice(&bytes).map_err(|e| CustodyError::Io(e.to_string()))?
             }
-            Err(_) => Index::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Index::default(),
+            Err(e) => return Err(ioe(e)),
         };
         let mut grants = HashMap::new();
         let mut audits = HashMap::new();
@@ -123,32 +144,82 @@ impl CustodyRegistry {
         })
     }
 
+    /// Lock the shared custody store for an entire reload/decision/write.
+    /// A process may not make a decision from its startup snapshot.
+    pub fn lock_store(&self) -> Result<StoreGuard, CustodyError> {
+        let local = STORE_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| CustodyError::Io("custody store lock poisoned".into()))?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.root.join("custody.lock"))
+            .map_err(ioe)?;
+        file.lock().map_err(ioe)?;
+        Ok(StoreGuard {
+            _local: local,
+            _file: file,
+        })
+    }
+
+    /// One serialized operation over the current durable registry. The
+    /// in-memory offer map survives refresh because offers are not persisted.
+    pub fn transact<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<R, CustodyError>,
+    ) -> Result<R, CustodyError> {
+        let _held = self.lock_store()?;
+        self.refresh()?;
+        f(self)
+    }
+
+    /// Reload grants and audit heads while the caller holds `lock_store`.
+    /// Preserve pending, unaccepted offers, which exist only in memory.
+    pub fn refresh(&mut self) -> Result<(), CustodyError> {
+        let offers = self.offers.clone();
+        let mut fresh = Self::open(self.root.clone())?;
+        fresh.offers = offers;
+        *self = fresh;
+        Ok(())
+    }
+
     fn persist_grant(&self, grant: &CustodyGrant) -> Result<(), CustodyError> {
-        let tmp = self
-            .root
-            .join("grants")
-            .join(format!("{}.json.tmp", grant.grant_id));
+        let tmp = self.root.join("grants").join(format!(
+            "{}.{}.json.tmp",
+            grant.grant_id,
+            random_hex(8)?
+        ));
         let fin = self
             .root
             .join("grants")
             .join(format!("{}.json", grant.grant_id));
-        fs::write(
+        write_private(
             &tmp,
-            serde_json::to_vec_pretty(grant).expect("grant serializes"),
+            &serde_json::to_vec_pretty(grant).expect("grant serializes"),
         )
         .map_err(ioe)?;
-        fs::rename(&tmp, &fin).map_err(ioe)
+        let result = fs::rename(&tmp, &fin);
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result.map_err(ioe)
     }
 
     fn persist_index(&self) -> Result<(), CustodyError> {
-        let tmp = self.root.join("index.json.tmp");
+        let tmp = self.root.join(format!("index.{}.json.tmp", random_hex(8)?));
         let fin = self.root.join("index.json");
-        fs::write(
+        write_private(
             &tmp,
-            serde_json::to_vec_pretty(&self.index).expect("index serializes"),
+            &serde_json::to_vec_pretty(&self.index).expect("index serializes"),
         )
         .map_err(ioe)?;
-        fs::rename(&tmp, &fin).map_err(ioe)
+        let result = fs::rename(&tmp, &fin);
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result.map_err(ioe)
     }
 
     fn audit(
@@ -196,7 +267,7 @@ impl CustodyRegistry {
             return Err(CustodyError::DelegationRefused);
         }
         let offer = CustodyOffer {
-            offer_id: format!("offer-{}", random_hex(8)),
+            offer_id: format!("offer-{}", random_hex(8)?),
             task_id: task_id.to_string(),
             task_summary: task_summary.chars().take(500).collect(),
             operator,
@@ -205,7 +276,7 @@ impl CustodyRegistry {
             budgets,
             lease_terms,
             contract,
-            nonce: random_hex(16),
+            nonce: random_hex(16)?,
             created_ms: now_ms,
             expires_ms: now_ms + DEFAULT_OFFER_TTL_MS as u128,
         };
@@ -239,9 +310,9 @@ impl CustodyRegistry {
             return Err(CustodyError::CommitmentMismatch);
         }
         self.offers.remove(&acceptance.offer_id);
-        let grant_id = format!("custody-{}", random_hex(8));
+        let grant_id = format!("custody-{}", random_hex(8)?);
         let lease = Lease {
-            lease_id: format!("lease-{}", random_hex(8)),
+            lease_id: format!("lease-{}", random_hex(8)?),
             epoch: 1,
             issued_ms: now_ms,
             expires_ms: now_ms + offer.lease_terms.lease_ms as u128,
@@ -263,8 +334,8 @@ impl CustodyRegistry {
             contract: offer.contract.clone(),
             phase: CustodyPhase::Active,
             claim_attempts: 0,
-            resume_secret: random_hex(16),
-            token_secret: random_hex(32),
+            resume_secret: random_hex(16)?,
+            token_secret: random_hex(32)?,
             created_ms: now_ms,
             updated_ms: now_ms,
             suspended_at_ms: None,
@@ -285,7 +356,7 @@ impl CustodyRegistry {
                 "task_id": grant.task_id,
                 "operator": grant.operator.label(),
                 "worker": grant.worker,
-                "scope_hash": grant.capabilities.scope_hash(),
+                "scope_hash": grant.capabilities.scope_hash()?,
                 "offer_hash": offer.offer_hash(),
                 "epoch": 1,
             }),
@@ -299,7 +370,7 @@ impl CustodyRegistry {
             grant_id: grant_id.clone(),
             epoch: 1,
             secret: grant.token_secret.clone(),
-            scope_hash: grant.capabilities.scope_hash(),
+            scope_hash: grant.capabilities.scope_hash()?,
         };
         Ok((token, grant))
     }
@@ -360,14 +431,20 @@ impl CustodyRegistry {
             self.violate(&token.grant_id, v.clone(), now_ms)?;
             return Err(CustodyError::Quarantined(v));
         }
-        if token.secret != grant.token_secret {
+        if token
+            .secret
+            .as_bytes()
+            .ct_eq(grant.token_secret.as_bytes())
+            .unwrap_u8()
+            == 0
+        {
             let v = Violation::TokenForgery {
                 grant_id: token.grant_id.clone(),
             };
             self.violate(&token.grant_id, v.clone(), now_ms)?;
             return Err(CustodyError::Quarantined(v));
         }
-        if token.scope_hash != grant.capabilities.scope_hash() {
+        if token.scope_hash != grant.capabilities.scope_hash()? {
             return Err(CustodyError::CommitmentMismatch);
         }
         if grant.phase != CustodyPhase::Active {
@@ -500,7 +577,12 @@ impl CustodyRegistry {
             self.release(grant_id, ReleaseReason::LeaseExpired, now_ms)?;
             return Err(CustodyError::GrantReleased(ReleaseReason::LeaseExpired));
         }
-        if resume_secret != grant.resume_secret {
+        if resume_secret
+            .as_bytes()
+            .ct_eq(grant.resume_secret.as_bytes())
+            .unwrap_u8()
+            == 0
+        {
             // Wrong secret on a suspended grant is a forgery attempt.
             let v = Violation::TokenForgery {
                 grant_id: grant_id.to_string(),
@@ -510,12 +592,12 @@ impl CustodyRegistry {
         }
         let grant = self.grants.get_mut(grant_id).expect("checked");
         grant.lease.epoch += 1;
-        grant.lease.lease_id = format!("lease-{}", random_hex(8));
+        grant.lease.lease_id = format!("lease-{}", random_hex(8)?);
         grant.lease.issued_ms = now_ms;
         grant.lease.expires_ms = now_ms + grant.lease_terms.lease_ms as u128;
         grant.lease.next_seq = 1;
-        grant.resume_secret = random_hex(16);
-        grant.token_secret = random_hex(32);
+        grant.resume_secret = random_hex(16)?;
+        grant.token_secret = random_hex(32)?;
         grant.phase = CustodyPhase::Active;
         grant.suspended_at_ms = None;
         grant.updated_ms = now_ms;
@@ -524,7 +606,7 @@ impl CustodyRegistry {
             grant_id: grant.grant_id.clone(),
             epoch,
             secret: grant.token_secret.clone(),
-            scope_hash: grant.capabilities.scope_hash(),
+            scope_hash: grant.capabilities.scope_hash()?,
         };
         self.persist_grant(self.grants.get(grant_id).expect("checked"))?;
         self.audit(grant_id, now_ms, "resumed", json!({ "epoch": epoch }))?;
@@ -782,6 +864,18 @@ impl CustodyRegistry {
 
     /// Crash recovery: reload and reconcile against the clock.
     pub fn recover(root: PathBuf, now_ms: u128) -> Result<Self, CustodyError> {
+        fs::create_dir_all(&root).map_err(ioe)?;
+        let _local = STORE_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| CustodyError::Io("custody store lock poisoned".into()))?;
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("custody.lock"))
+            .map_err(ioe)?;
+        lock_file.lock().map_err(ioe)?;
         let mut reg = Self::open(root)?;
         reg.sweep(now_ms)?;
         Ok(reg)
@@ -811,12 +905,55 @@ impl CustodyRegistry {
 
     /// Register a named external agent instance (id minting lives here so
     /// name collisions never share identity).
-    pub fn register_agent(name: &str, protocol: crate::identity::AgentProtocol) -> AgentIdentity {
-        AgentIdentity {
+    pub fn register_agent(
+        name: &str,
+        protocol: crate::identity::AgentProtocol,
+    ) -> Result<AgentIdentity, CustodyError> {
+        Ok(AgentIdentity {
             name: name.chars().take(120).collect(),
             protocol,
-            instance_id: format!("aginst-{}", random_hex(8)),
-        }
+            instance_id: format!("aginst-{}", random_hex(8)?),
+        })
+    }
+}
+
+/// Force a directory to owner-only (0700) on unix; a no-op elsewhere.
+#[cfg(unix)]
+fn restrict_dir(path: &Path) -> Result<(), CustodyError> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(ioe)
+}
+
+#[cfg(not(unix))]
+fn restrict_dir(_path: &Path) -> Result<(), CustodyError> {
+    Ok(())
+}
+
+/// Write bytes to `path` with owner-only (0600) permissions from creation,
+/// resetting the mode if a stale temp file already existed. Mirrors the
+/// daemon's `load_or_create_secret`.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        // A leftover temp file keeps its old mode; reset it.
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+impl From<std::io::Error> for CustodyError {
+    fn from(e: std::io::Error) -> Self {
+        CustodyError::Io(e.to_string())
     }
 }
 

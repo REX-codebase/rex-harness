@@ -10,6 +10,8 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// Wire protocol this client speaks. Must match the server's negotiated
@@ -20,7 +22,8 @@ pub const CLIENT_PROTOCOL_VERSION: &str = "2025-11-25";
 pub struct McpStdioClient {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<std::process::ChildStdout>,
+    replies: Receiver<Result<String, String>>,
+    reader: Option<JoinHandle<()>>,
     next_id: u64,
 }
 
@@ -37,11 +40,34 @@ impl McpStdioClient {
             .spawn()
             .map_err(|e| format!("cannot spawn rex-mcp at {}: {e}", bin.display()))?;
         let stdin = child.stdin.take().ok_or("rex-mcp stdin unavailable")?;
-        let stdout = BufReader::new(child.stdout.take().ok_or("rex-mcp stdout unavailable")?);
+        let stdout = child.stdout.take().ok_or("rex-mcp stdout unavailable")?;
+        let (tx, replies) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match stdout.read_line(&mut line) {
+                    Ok(0) => {
+                        let _ = tx.send(Err("rex-mcp closed stdout unexpectedly".into()));
+                        break;
+                    }
+                    Ok(_) => {
+                        if tx.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("rex-mcp read: {e}")));
+                        break;
+                    }
+                }
+            }
+        });
         let mut client = Self {
             child,
             stdin,
-            stdout,
+            replies,
+            reader: Some(reader),
             next_id: 0,
         };
         let hello = client.request(
@@ -55,6 +81,13 @@ impl McpStdioClient {
         if hello.get("result").is_none() {
             let _ = client.child.kill();
             return Err(format!("rex-mcp refused initialize: {hello}"));
+        }
+        let negotiated = hello["result"]["protocolVersion"].as_str();
+        if negotiated != Some(CLIENT_PROTOCOL_VERSION) {
+            let _ = client.child.kill();
+            return Err(format!(
+                "rex-mcp negotiated unsupported protocol version {negotiated:?}; expected {CLIENT_PROTOCOL_VERSION}"
+            ));
         }
         client.notify("notifications/initialized", json!({}))?;
         Ok(client)
@@ -88,20 +121,24 @@ impl McpStdioClient {
         self.next_id += 1;
         let id = self.next_id;
         self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
-        // Read until the matching id; notifications from the server are skipped.
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // A command or test can legitimately run for the daemon's 120-second
+        // tool cap. Timing out at 30 seconds would kill the child while the
+        // daemon is still working and leave the host unsure whether a write
+        // landed. Keep a bounded margin for transport and custody persistence.
+        // Handshake and read-only inspection still fail promptly.
+        let deadline = Instant::now() + reply_timeout(method, &params);
         loop {
-            if Instant::now() > deadline {
-                return Err(format!("rex-mcp reply timed out for {method}"));
-            }
-            let mut line = String::new();
-            let n = self
-                .stdout
-                .read_line(&mut line)
-                .map_err(|e| format!("rex-mcp read: {e}"))?;
-            if n == 0 {
-                return Err("rex-mcp closed stdout unexpectedly".into());
-            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let line = match self.replies.recv_timeout(remaining) {
+                Ok(Ok(line)) => line,
+                Ok(Err(error)) => return Err(error),
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!("rex-mcp reply timed out for {method}"));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err("rex-mcp stdout reader stopped unexpectedly".into());
+                }
+            };
             if line.trim().is_empty() {
                 continue;
             }
@@ -128,10 +165,30 @@ impl McpStdioClient {
     }
 }
 
+fn reply_timeout(method: &str, params: &Value) -> Duration {
+    if method != "tools/call" {
+        return Duration::from_secs(30);
+    }
+    match params.get("name").and_then(Value::as_str) {
+        // Ultra verification has a 600-second budget independent of the
+        // regular command cap. Leave room for persistence and transport.
+        Some("rex_ultra_open" | "rex_ultra_promote" | "rex_proof_verify") => {
+            Duration::from_secs(660)
+        }
+        Some("rex_execute" | "rex_run" | "rex_test" | "rex_ultra_submit") => {
+            Duration::from_secs(150)
+        }
+        _ => Duration::from_secs(30),
+    }
+}
+
 impl Drop for McpStdioClient {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
@@ -181,5 +238,33 @@ pub fn rex_mcp_bin() -> Result<PathBuf, String> {
             "rex-mcp binary not found next to {}; set REX_MCP_BIN",
             exe.display()
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_tool_calls_outlive_the_daemon_command_cap() {
+        for name in ["rex_execute", "rex_run", "rex_test", "rex_ultra_submit"] {
+            assert_eq!(
+                reply_timeout("tools/call", &json!({"name": name})),
+                Duration::from_secs(150)
+            );
+        }
+        for name in ["rex_ultra_open", "rex_ultra_promote", "rex_proof_verify"] {
+            assert!(reply_timeout("tools/call", &json!({"name": name})) > Duration::from_secs(600));
+        }
+        for name in ["rex_status", "rex_events", "rex_result", "unknown"] {
+            assert_eq!(
+                reply_timeout("tools/call", &json!({"name": name})),
+                Duration::from_secs(30)
+            );
+        }
+        assert_eq!(
+            reply_timeout("initialize", &json!({})),
+            Duration::from_secs(30)
+        );
     }
 }

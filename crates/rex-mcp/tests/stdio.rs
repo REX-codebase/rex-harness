@@ -55,6 +55,41 @@ impl Session {
 }
 
 #[test]
+fn codex_compatible_version_negotiates_over_stdio() {
+    let d = tempfile::tempdir().unwrap();
+    let ws = d.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let mut s = Session::start(&d.path().join("state"), &ws, false);
+    let init = s.call(
+        "initialize",
+        json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "compat-test", "version": "0"}
+        }),
+    );
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    let listed = s.call("tools/list", json!({}));
+    assert!(listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "rex_execute"));
+    let started = s.tool(
+        "rex_execute",
+        json!({
+            "request_id": "compat-stdio-test",
+            "task": "inspect status",
+            "host": "codex",
+            "operator_is_agent": true
+        }),
+    );
+    let task_id = started["task_id"].as_str().unwrap();
+    let status = s.tool("rex_status", json!({"task_id": task_id}));
+    assert_eq!(status["task_id"], task_id);
+}
+
+#[test]
 fn full_caller_driven_lifecycle_over_stdio() {
     let d = tempfile::tempdir().unwrap();
     let ws = d.path().join("ws");
@@ -76,7 +111,17 @@ fn full_caller_driven_lifecycle_over_stdio() {
         .iter()
         .filter_map(|t| t["name"].as_str())
         .collect();
-    assert_eq!(names.len(), 19);
+    assert_eq!(names.len(), 29);
+    for name in [
+        "rex_critique_prompt",
+        "rex_critique_record",
+        "rex_preview_start",
+        "rex_preview_action",
+        "rex_preview_capture",
+        "rex_preview_stop",
+    ] {
+        assert!(names.contains(&name), "missing {name}");
+    }
     assert!(names.contains(&"rex_human_stop"));
     assert!(names.contains(&"rex_execute") && names.contains(&"rex_submit"));
 
@@ -100,6 +145,14 @@ fn full_caller_driven_lifecycle_over_stdio() {
         json!({"task_id":task_id,"capability":cap,"lease_epoch":epoch,"path":"note.txt"}),
     );
     assert_eq!(read["content"], "hello rex");
+    let critique1 = s.tool(
+        "rex_critique_prompt",
+        json!({"task_id":task_id,"capability":cap,"lease_epoch":epoch}),
+    );
+    assert_eq!(critique1["action_id"], action1);
+    let findings1 = s.tool("rex_critique_record", json!({"task_id":task_id,"capability":cap,"lease_epoch":epoch,
+        "action_id":action1,"findings":"Tried to break the read step: verify the returned bytes match the frozen task and do not claim a mutation. The note read matches; editing remains unverified."}));
+    assert_eq!(findings1["recorded"], true);
     let sub1 = s.tool(
         "rex_submit",
         json!({"task_id":task_id,"capability":cap,"lease_epoch":epoch,
@@ -118,7 +171,19 @@ fn full_caller_driven_lifecycle_over_stdio() {
         json!({"task_id":task_id,"capability":cap,"lease_epoch":epoch,
         "argv":["cat","note.txt"]}),
     );
-    assert!(run["stdout"].as_str().unwrap().contains("world"));
+    assert!(
+        run["stdout"].as_str().is_some_and(|s| s.contains("world")),
+        "rex_run must return stdout containing the appended line; got: {run}"
+    );
+
+    let critique2 = s.tool(
+        "rex_critique_prompt",
+        json!({"task_id":task_id,"capability":cap,"lease_epoch":epoch}),
+    );
+    assert_eq!(critique2["action_id"], action2);
+    let findings2 = s.tool("rex_critique_record", json!({"task_id":task_id,"capability":cap,"lease_epoch":epoch,
+        "action_id":action2,"findings":"Tried to break the edit: the file can be changed without proving task completion, so require the exact edit receipt and a run result showing the appended line. No UI pixels apply."}));
+    assert_eq!(findings2["recorded"], true);
 
     // Fable completion gate: a final claim citing no harness evidence is
     // rejected with repair feedback, and the action stays open.
@@ -178,13 +243,13 @@ fn full_caller_driven_lifecycle_over_stdio() {
         "rex_read",
         json!({"task_id":t3,"capability":cap3,"lease_epoch":e3,"path":"../outside"}),
     );
-    assert_eq!(denied["data"]["code"], "scope_denied");
+    assert_eq!(denied["code"], "scope_denied");
     let after = s2.tool(
         "rex_submit",
         json!({"task_id":t3,"capability":cap3,"lease_epoch":e3,
         "action_id":ex3["next"]["action_id"],"narrative":"try anyway"}),
     );
-    assert_eq!(after["data"]["code"], "unauthorized");
+    assert_eq!(after["code"], "unauthorized");
 }
 
 #[test]
@@ -205,6 +270,10 @@ fn agent_execute_advertises_and_accepts_host_resume_handle() {
         .unwrap();
     assert_eq!(
         execute_schema["inputSchema"]["properties"]["resume_handle"]["type"],
+        "string"
+    );
+    assert_eq!(
+        execute_schema["inputSchema"]["properties"]["recovery_key"]["type"],
         "string"
     );
     assert_eq!(
@@ -268,5 +337,37 @@ fn mutations_require_trusted_launcher_approval_over_stdio() {
         json!({"task_id":task_id,"capability":cap,"lease_epoch":epoch,
         "path":"x.txt","replacement":"nope","create":true}),
     );
-    assert_eq!(err["data"]["code"], "approval_required");
+    assert_eq!(err["code"], "approval_required");
+}
+
+#[test]
+fn host_profiles_share_a_durable_task_over_stdio() {
+    let d = tempfile::tempdir().unwrap();
+    let ws = d.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let state = d.path().join("state");
+    for (index, host) in ["claude_code", "codex", "opencode", "hermes"]
+        .iter()
+        .enumerate()
+    {
+        let mut s = Session::start(&state, &ws, true);
+        let init = s.call("initialize", json!({"protocolVersion":"2025-11-25"}));
+        assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
+        let task = s.tool(
+            "rex_execute",
+            json!({
+            "request_id":format!("host-profile-{index}"),
+            "task":format!("task from {host}"),
+            "host": if *host == "opencode" { "open_code" } else { host }, "operator_is_agent":true
+            }),
+        );
+        assert_eq!(task["state"], "active", "{host}: {task}");
+        let task_id = task["task_id"].as_str().unwrap().to_owned();
+        drop(s);
+        let mut reopened = Session::start(&state, &ws, true);
+        reopened.call("initialize", json!({"protocolVersion":"2025-11-25"}));
+        let status = reopened.tool("rex_status", json!({"task_id":task_id}));
+        assert_eq!(status["state"], "active", "{host}: {status}");
+        assert_eq!(status["task_id"], task_id);
+    }
 }

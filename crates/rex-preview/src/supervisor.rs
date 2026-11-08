@@ -4,6 +4,7 @@ use crate::{
     PORT_MAX, PORT_MIN,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     fs,
@@ -13,11 +14,19 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// Take a lock, recovering the guard if a prior panic poisoned it. A poisoned
+/// lock would otherwise make every later caller panic too, turning one panic
+/// into a subsystem-wide cascade. Recovering matches `parking_lot` semantics
+/// (whose locks do not poison) without pulling in a new dependency.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_LOG_BYTES: usize = 256 * 1024;
@@ -96,12 +105,13 @@ struct Runtime {
     stop: Arc<AtomicBool>,
     static_thread: Option<thread::JoinHandle<()>>,
     browser: Option<BrowserRuntime>,
+    project_root: PathBuf,
     iteration: PreviewSession,
 }
 
 impl Runtime {
     fn event(&self, kind: LifecycleKind, detail: impl Into<String>) {
-        let mut events = self.events.lock().unwrap();
+        let mut events = lock(&self.events);
         let sequence = events.back().map_or(1, |e| e.sequence + 1);
         events.push_back(LifecycleEvent {
             sequence,
@@ -125,9 +135,9 @@ impl Runtime {
             url: self.url.clone(),
             pid: self.pid,
             exit_code: self.exit_code,
-            stdout: self.stdout.lock().unwrap().text(),
-            stderr: self.stderr.lock().unwrap().text(),
-            events: self.events.lock().unwrap().iter().cloned().collect(),
+            stdout: lock(&self.stdout).text(),
+            stderr: lock(&self.stderr).text(),
+            events: lock(&self.events).iter().cloned().collect(),
         }
     }
     fn refresh_exit(&mut self) {
@@ -275,6 +285,7 @@ impl PreviewSupervisor {
             stop: Arc::new(AtomicBool::new(false)),
             static_thread: None,
             browser: None,
+            project_root: plan.cwd.clone(),
             iteration: PreviewSession::new(id.clone(), plan.clone(), SystemTime::now()),
         };
         runtime.iteration.start()?;
@@ -315,18 +326,18 @@ impl PreviewSupervisor {
             thread::sleep(READINESS_INTERVAL);
         }
         let summary = runtime.summary();
-        self.sessions.lock().unwrap().insert(id, runtime);
+        lock(&self.sessions).insert(id, runtime);
         Ok(summary)
     }
     pub fn summary(&self, id: &str) -> Result<SupervisorSummary, PreviewError> {
-        let mut s = self.sessions.lock().unwrap();
+        let mut s = lock(&self.sessions);
         s.get_mut(id)
             .map(Runtime::summary)
             .ok_or(PreviewError::NotRunning)
     }
     pub fn action(&self, id: &str, action: &BrowserAction) -> Result<(), PreviewError> {
         action.validate()?;
-        let mut s = self.sessions.lock().unwrap();
+        let mut s = lock(&self.sessions);
         let r = s.get_mut(id).ok_or(PreviewError::NotRunning)?;
         r.refresh_exit();
         if r.state != SessionState::Running {
@@ -340,24 +351,50 @@ impl PreviewSupervisor {
             .ok_or(PreviewError::NotRunning)?
             .action(action, &r.url)
     }
+    pub fn visible_control(&self, id: &str, selector: &str) -> Result<bool, PreviewError> {
+        let mut sessions = lock(&self.sessions);
+        let session = sessions.get_mut(id).ok_or(PreviewError::NotRunning)?;
+        if session.browser.is_none() {
+            session.browser = Some(BrowserRuntime::launch(&session.url)?);
+        }
+        session
+            .browser
+            .as_mut()
+            .ok_or(PreviewError::NotRunning)?
+            .visible_control(selector)
+    }
+
     pub fn capture(&self, id: &str) -> Result<crate::BrowserEvidence, PreviewError> {
-        let mut s = self.sessions.lock().unwrap();
+        self.capture_with_fields(id, &[])
+    }
+
+    pub fn capture_with_fields(
+        &self,
+        id: &str,
+        fields: &[rex_protocol::MobileResultField],
+    ) -> Result<crate::BrowserEvidence, PreviewError> {
+        let mut s = lock(&self.sessions);
         let r = s.get_mut(id).ok_or(PreviewError::NotRunning)?;
         if r.browser.is_none() {
             r.browser = Some(BrowserRuntime::launch(&r.url)?);
         }
-        let evidence = r
+        let before = source_tree_sha256(&r.project_root, r.framework == Framework::StaticHtml)?;
+        let mut evidence = r
             .browser
             .as_mut()
             .ok_or(PreviewError::NotRunning)?
-            .capture()?;
+            .capture(&r.url, fields)?;
+        if before != source_tree_sha256(&r.project_root, r.framework == Framework::StaticHtml)? {
+            return Err(PreviewError::SourceChanged);
+        }
+        evidence.source_sha256 = before;
         for item in evidence.items.iter().cloned() {
             r.iteration.push_evidence(item)?;
         }
         Ok(evidence)
     }
     pub fn begin_iteration(&self, id: &str) -> Result<u8, PreviewError> {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = lock(&self.sessions);
         sessions
             .get_mut(id)
             .ok_or(PreviewError::NotRunning)?
@@ -369,7 +406,7 @@ impl PreviewSupervisor {
         id: &str,
         receipt: IterationReceipt,
     ) -> Result<(), PreviewError> {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = lock(&self.sessions);
         sessions
             .get_mut(id)
             .ok_or(PreviewError::NotRunning)?
@@ -377,7 +414,7 @@ impl PreviewSupervisor {
             .record_iteration(receipt)
     }
     pub fn production_report(&self, id: &str) -> Result<ProductionReport, PreviewError> {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = lock(&self.sessions);
         let runtime = sessions.get(id).ok_or(PreviewError::NotRunning)?;
         let mut gates = BTreeMap::new();
         for item in &runtime.iteration.evidence {
@@ -391,7 +428,7 @@ impl PreviewSupervisor {
         })
     }
     pub fn finish(&self, id: &str) -> Result<(), PreviewError> {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = lock(&self.sessions);
         let runtime = sessions.get_mut(id).ok_or(PreviewError::NotRunning)?;
         let mut gates = BTreeMap::new();
         for item in &runtime.iteration.evidence {
@@ -405,14 +442,14 @@ impl PreviewSupervisor {
         })
     }
     pub fn cancel(&self, id: &str) -> Result<SupervisorSummary, PreviewError> {
-        let mut s = self.sessions.lock().unwrap();
+        let mut s = lock(&self.sessions);
         let r = s.get_mut(id).ok_or(PreviewError::NotRunning)?;
         r.iteration.cancel();
         r.terminate(LifecycleKind::Cancelled);
         Ok(r.summary())
     }
     pub fn teardown(&self, id: &str) -> Result<(), PreviewError> {
-        let mut s = self.sessions.lock().unwrap();
+        let mut s = lock(&self.sessions);
         let mut r = s.remove(id).ok_or(PreviewError::NotRunning)?;
         if !r.stop.load(Ordering::SeqCst) {
             r.terminate(LifecycleKind::Cancelled)
@@ -421,6 +458,66 @@ impl PreviewSupervisor {
     }
 }
 
+/// Hash bounded, regular source files in canonical relative-path order.
+/// This is a local snapshot check, not proof of an external host or remote build.
+fn source_tree_sha256(root: &Path, static_html: bool) -> Result<String, PreviewError> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        files: &mut Vec<PathBuf>,
+        static_html: bool,
+    ) -> Result<(), PreviewError> {
+        for entry in fs::read_dir(dir).map_err(|_| PreviewError::SourceChanged)? {
+            let entry = entry.map_err(|_| PreviewError::SourceChanged)?;
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(root)
+                .map_err(|_| PreviewError::PathEscape)?;
+            // A static preview serves its project tree directly, including
+            // dist/build. Those are excluded for framework dev servers to
+            // avoid hashing volatile generated output and dependencies.
+            if rel.components().any(|c| {
+                matches!(
+                    c.as_os_str().to_str(),
+                    Some("node_modules" | ".git" | "target" | ".next")
+                ) || (!static_html && matches!(c.as_os_str().to_str(), Some("dist" | "build")))
+            }) {
+                continue;
+            }
+            let meta = fs::symlink_metadata(&path).map_err(|_| PreviewError::SourceChanged)?;
+            if meta.file_type().is_symlink() {
+                return Err(PreviewError::SymlinkComponent);
+            }
+            if meta.is_dir() {
+                visit(root, &path, files, static_html)?;
+            } else if meta.is_file() {
+                files.push(path);
+                if files.len() > 4096 {
+                    return Err(PreviewError::EvidenceLimit);
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    visit(root, root, &mut files, static_html)?;
+    files.sort();
+    let mut hash = Sha256::new();
+    for file in files {
+        let rel = file
+            .strip_prefix(root)
+            .map_err(|_| PreviewError::PathEscape)?;
+        let content = fs::read(&file).map_err(|_| PreviewError::SourceChanged)?;
+        if content.len() > 16 * 1024 * 1024 {
+            return Err(PreviewError::EvidenceLimit);
+        }
+        hash.update((rel.as_os_str().as_encoded_bytes().len() as u64).to_le_bytes());
+        hash.update(rel.as_os_str().as_encoded_bytes());
+        hash.update((content.len() as u64).to_le_bytes());
+        hash.update(&content);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
 fn reserve_port() -> Result<(TcpListener, u16), PreviewError> {
     for port in PORT_MIN..=PORT_MAX {
         if let Ok(l) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
@@ -481,7 +578,7 @@ fn spawn_child(
 fn pipe<R: Read + Send + 'static>(r: R, log: Arc<Mutex<BoundedLog>>) {
     thread::spawn(move || {
         for line in BufReader::new(r).lines().map_while(Result::ok) {
-            log.lock().unwrap().push(line)
+            lock(&log).push(line)
         }
     });
 }
@@ -524,7 +621,18 @@ fn spawn_static(
                         root.join(rel)
                     };
                     let canonical = candidate.canonicalize().ok();
-                    if let Some(file) = canonical.filter(|p| p.starts_with(&root) && p.is_file()) {
+                    // These paths are excluded from the capture source hash.
+                    // A static preview must not serve untracked bytes as if
+                    // they belonged to the attested project snapshot.
+                    let excluded = Path::new(rel).components().any(|c| {
+                        matches!(
+                            c.as_os_str().to_str(),
+                            Some("node_modules" | ".git" | "target" | ".next")
+                        )
+                    });
+                    if let Some(file) =
+                        canonical.filter(|p| !excluded && p.starts_with(&root) && p.is_file())
+                    {
                         let data = fs::read(file).unwrap_or_default();
                         let _ = write!(
                             stream,
@@ -548,7 +656,7 @@ fn spawn_static(
                     thread::sleep(Duration::from_millis(20));
                 }
                 Err(error) => {
-                    errors.lock().unwrap().push(error.to_string());
+                    lock(&errors).push(error.to_string());
                     break;
                 }
             }
@@ -570,6 +678,20 @@ fn mime(p: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn poisoned_lock_recovers_instead_of_cascading() {
+        let m = std::sync::Mutex::new(1u32);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = m.lock().unwrap();
+            panic!("boom while holding the lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(m.is_poisoned());
+        // The helper takes the guard back instead of panicking again.
+        assert_eq!(*lock(&m), 1);
+    }
     // Several tests bind from the shared preview port range; serialize them
     // so a concurrently running test cannot occupy a port another test
     // expects to bind or skip.
@@ -580,6 +702,54 @@ mod tests {
         fs::create_dir_all(&p).unwrap();
         p
     }
+    #[test]
+    fn static_preview_refuses_unhashed_resource_paths() {
+        let _port_guard = PORT_LOCK.lock().unwrap();
+        let w = temp("unhashed-resource");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("index.html"), "<h1>visible</h1>").unwrap();
+        for dirname in ["node_modules", ".next", "target", ".git"] {
+            fs::create_dir(app.join(dirname)).unwrap();
+            fs::write(app.join(dirname).join("asset.css"), "body{color:red}").unwrap();
+        }
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        let addr = started
+            .url
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        for dirname in ["node_modules", ".next", "target", ".git"] {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            write!(stream, "GET /{dirname}/asset.css HTTP/1.0\r\n\r\n").unwrap();
+            let mut body = String::new();
+            stream.read_to_string(&mut body).unwrap();
+            assert!(body.starts_with("HTTP/1.0 404"), "{dirname}: {body}");
+        }
+        sup.cancel(&started.id).unwrap();
+        let _ = fs::remove_dir_all(w);
+    }
+
+    #[test]
+    fn static_preview_hash_includes_served_generated_assets() {
+        let w = temp("static-asset-hash");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::create_dir(app.join("dist")).unwrap();
+        fs::write(
+            app.join("index.html"),
+            "<link rel='stylesheet' href='dist/theme.css'>",
+        )
+        .unwrap();
+        fs::write(app.join("dist/theme.css"), "body{color:#123}").unwrap();
+        let old = source_tree_sha256(&app, true).unwrap();
+        let framework_old = source_tree_sha256(&app, false).unwrap();
+        fs::write(app.join("dist/theme.css"), "body{color:#456}").unwrap();
+        assert_ne!(old, source_tree_sha256(&app, true).unwrap());
+        assert_eq!(framework_old, source_tree_sha256(&app, false).unwrap());
+        let _ = fs::remove_dir_all(w);
+    }
+
     #[test]
     fn static_preview_is_real_and_cancel_cleans_listener() {
         let _port_guard = PORT_LOCK.lock().unwrap();
@@ -608,6 +778,32 @@ mod tests {
         let _ = fs::remove_dir_all(w);
     }
     #[test]
+    fn in_project_symlinked_scene_cannot_be_captured_as_source_proof() {
+        let _port_guard = PORT_LOCK.lock().unwrap();
+        let w = temp("symlinked-scene");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("index.html"), "<!doctype html><style>body{background:linear-gradient(#123,#678)}</style><main>Scene</main><script src='scene.js'></script>").unwrap();
+        fs::write(
+            app.join("actual.js"),
+            "document.querySelector('main').textContent='Loaded';",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(app.join("actual.js"), app.join("scene.js")).unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        sup.begin_iteration(&started.id).unwrap();
+        #[cfg(unix)]
+        assert_eq!(
+            sup.capture(&started.id).unwrap_err(),
+            PreviewError::SymlinkComponent
+        );
+        sup.cancel(&started.id).unwrap();
+        let _ = fs::remove_dir_all(w);
+    }
+
+    #[test]
     fn symlinked_project_is_rejected() {
         let w = temp("link");
         let real = temp("outside");
@@ -624,6 +820,444 @@ mod tests {
         let _ = fs::remove_dir_all(real);
     }
     #[test]
+    fn local_external_script_runs_but_other_loopback_port_is_blocked() {
+        let _port_guard = PORT_LOCK.lock().unwrap();
+        let w = temp("local-script");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        let other = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        other.set_nonblocking(true).unwrap();
+        let other_port = other.local_addr().unwrap().port();
+        fs::write(app.join("index.html"), format!(
+            "<!doctype html><style>body{{background:linear-gradient(45deg,#123,#789)}}</style><main id='scene'>Waiting for scene</main><script src='/scene.js'></script><script src='http://127.0.0.1:{other_port}/foreign.js'></script>"
+        )).unwrap();
+        fs::write(
+            app.join("scene.js"),
+            "document.querySelector('#scene').textContent='Local scene executed';",
+        )
+        .unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        sup.begin_iteration(&started.id).unwrap();
+        let evidence = sup.capture(&started.id).unwrap();
+        assert!(evidence.accessibility_text.contains("Local scene executed"));
+        assert!(matches!(other.accept(), Err(ref e) if e.kind()==std::io::ErrorKind::WouldBlock));
+        sup.cancel(&started.id).unwrap();
+        let _ = fs::remove_dir_all(w);
+    }
+    #[test]
+    fn mobile_result_observations_require_uncovered_first_view_elements() {
+        let _port_guard = PORT_LOCK.lock().unwrap();
+        let w = temp("mobile-result-fields");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("index.html"), r#"<!doctype html><style>
+          body{background:#f5f1e7;color:#202020;margin:0;font:24px sans-serif}
+          main{padding:20px} button{font:inherit;padding:12px}
+          .far{margin-top:800px}.hidden{display:none}.overlay{position:fixed;inset:0;background:#fff;z-index:10}
+          </style><main><p>12 units</p><button>Approve</button><p class='far'>-2 units</p>
+          <button disabled>Reject</button><p class='hidden'>secret</p><div class='overlay'>Blocked</div></main>"#).unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        sup.begin_iteration(&started.id).unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::SetViewport {
+                width: 390,
+                height: 650,
+                scale: 1.0,
+            },
+        )
+        .unwrap();
+        let fields = [
+            ("order", "12 units", "text"),
+            ("approve", "Approve", "control"),
+            ("delta", "-2 units", "text"),
+            ("reject", "Reject", "control"),
+            ("secret", "secret", "text"),
+            ("block", "Blocked", "text"),
+        ]
+        .map(|(name, text, kind)| rex_protocol::MobileResultField {
+            name: name.into(),
+            alternatives: vec![text.into()],
+            kind: kind.into(),
+            match_mode: None,
+            min_font_px: None,
+            region: None,
+            min_count: None,
+        });
+        let first = sup.capture_with_fields(&started.id, &fields).unwrap();
+        assert_eq!(first.visible_result_fields, vec!["block"]);
+        fs::write(
+            app.join("index.html"),
+            r#"<!doctype html><style>
+          body{background:#f5f1e7;color:#202020;margin:0;font:24px sans-serif}
+          main{padding:20px} button{font:inherit;padding:12px}
+          .far{margin-top:800px}.hidden{display:none}</style>
+          <main><p>12 units</p><button>Approve</button><p class='far'>-2 units</p>
+          <button disabled>Reject</button><p class='hidden'>secret</p></main>"#,
+        )
+        .unwrap();
+        sup.action(&started.id, &BrowserAction::Navigate { path: "/".into() })
+            .unwrap();
+        let second = sup.capture_with_fields(&started.id, &fields).unwrap();
+        assert!(second.visible_result_fields.contains(&"order".into()));
+        assert!(second.visible_result_fields.contains(&"approve".into()));
+        assert!(!second.visible_result_fields.contains(&"delta".into()));
+        assert!(!second.visible_result_fields.contains(&"reject".into()));
+        assert!(!second.visible_result_fields.contains(&"secret".into()));
+        sup.action(
+            &started.id,
+            &BrowserAction::Scroll {
+                delta_x: 0.0,
+                delta_y: 520.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            sup.capture_with_fields(&started.id, &fields).unwrap_err(),
+            PreviewError::FirstViewScrolled
+        );
+        sup.action(&started.id, &BrowserAction::Navigate { path: "/".into() })
+            .unwrap();
+        assert!(sup.capture_with_fields(&started.id, &fields).is_ok());
+        let contains = [
+            rex_protocol::MobileResultField {
+                name: "quantity".into(),
+                alternatives: vec!["12".into()],
+                kind: "text".into(),
+                match_mode: Some("contains".into()),
+                min_font_px: None,
+                region: None,
+                min_count: None,
+            },
+            rex_protocol::MobileResultField {
+                name: "action".into(),
+                alternatives: vec!["prov".into()],
+                kind: "control".into(),
+                match_mode: Some("contains".into()),
+                min_font_px: None,
+                region: None,
+                min_count: None,
+            },
+            rex_protocol::MobileResultField {
+                name: "exact-fail".into(),
+                alternatives: vec!["12".into()],
+                kind: "text".into(),
+                match_mode: None,
+                min_font_px: None,
+                region: None,
+                min_count: None,
+            },
+        ];
+        let third = sup.capture_with_fields(&started.id, &contains).unwrap();
+        assert_eq!(third.visible_result_fields, vec!["quantity", "action"]);
+        // A substring in a tiny visible node is not enough when the creator
+        // explicitly sets a CSS-pixel legibility floor.
+        fs::write(
+            app.join("index.html"),
+            r#"<!doctype html><style>
+          body{background:#f5f1e7;color:#202020;margin:0;font:18px sans-serif}
+          main{padding:20px}.tiny{font-size:9px}button{font-size:10px}
+          </style><main><p class='tiny'>12 units</p><button>Approve</button></main>"#,
+        )
+        .unwrap();
+        sup.action(&started.id, &BrowserAction::Navigate { path: "/".into() })
+            .unwrap();
+        let sized = [
+            rex_protocol::MobileResultField {
+                name: "quantity".into(),
+                alternatives: vec!["12".into()],
+                kind: "text".into(),
+                match_mode: Some("contains".into()),
+                min_font_px: Some(14),
+                region: None,
+                min_count: None,
+            },
+            rex_protocol::MobileResultField {
+                name: "action".into(),
+                alternatives: vec!["Approve".into()],
+                kind: "control".into(),
+                match_mode: None,
+                min_font_px: Some(14),
+                region: None,
+                min_count: None,
+            },
+        ];
+        assert!(sup
+            .capture_with_fields(&started.id, &sized)
+            .unwrap()
+            .visible_result_fields
+            .is_empty());
+        fs::write(
+            app.join("index.html"),
+            r#"<!doctype html><style>
+          body{background:#f5f1e7;color:#202020;margin:0;font:18px sans-serif}
+          main{padding:20px}.tiny{font-size:15px}button{font-size:16px}
+          </style><main><p class='tiny'>12 units</p><button>Approve</button></main>"#,
+        )
+        .unwrap();
+        sup.action(&started.id, &BrowserAction::Navigate { path: "/".into() })
+            .unwrap();
+        assert_eq!(
+            sup.capture_with_fields(&started.id, &sized)
+                .unwrap()
+                .visible_result_fields,
+            vec!["quantity", "action"]
+        );
+        // The list count needs distinct, legible, complete items inside the
+        // creator-named region; duplicate or below-fold items do not count.
+        let list = rex_protocol::MobileResultField {
+            name: "moves".into(),
+            alternatives: vec![],
+            kind: "list_count".into(),
+            match_mode: None,
+            min_font_px: Some(14),
+            region: Some("#moves".into()),
+            min_count: Some(3),
+        };
+        fs::write(
+            app.join("index.html"),
+            r#"<!doctype html><style>
+          body{background:#f5f1e7;color:#202020;font:16px sans-serif}
+          .far{margin-top:800px}</style><main id='moves'><ul>
+          <li>Squat</li><li>Squat</li><li class='far'>Push-up</li></ul></main>"#,
+        )
+        .unwrap();
+        sup.action(&started.id, &BrowserAction::Navigate { path: "/".into() })
+            .unwrap();
+        assert!(sup
+            .capture_with_fields(&started.id, std::slice::from_ref(&list))
+            .unwrap()
+            .visible_result_fields
+            .is_empty());
+        fs::write(
+            app.join("index.html"),
+            r#"<!doctype html><style>
+          body{background:#f5f1e7;color:#202020;font:16px sans-serif}
+          #moves{padding:20px}</style><main id='moves'><ul>
+          <li>Squat</li><li>Push-up</li><li>Plank</li></ul></main>"#,
+        )
+        .unwrap();
+        sup.action(&started.id, &BrowserAction::Navigate { path: "/".into() })
+            .unwrap();
+        assert_eq!(
+            sup.capture_with_fields(&started.id, &[list])
+                .unwrap()
+                .visible_result_fields,
+            vec!["moves"]
+        );
+        sup.cancel(&started.id).unwrap();
+        let _ = fs::remove_dir_all(w);
+    }
+
+    #[test]
+    fn native_labels_and_styled_inputs_are_visible_contract_controls() {
+        let _guard = PORT_LOCK.lock().unwrap();
+        let w = temp("native-control-labels");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(
+            app.join("index.html"),
+            r#"<!doctype html><style>
+          body{background:#f5efe1;color:#222;font:18px sans-serif;padding:20px}
+          input[type=radio]{position:absolute;opacity:0;width:1px;height:1px}
+          label{display:inline-block;padding:16px;border:2px solid #222}
+          .far{margin-top:800px}</style>
+          <h1>Control choices</h1><p>Choose a visible, labeled input for the example.</p>
+          <input id='energy' type='radio' name='feel'><label for='energy'>Energy</label>
+          <input id='tone' type='radio' name='tone' aria-labelledby='tone-label'>
+          <span id='tone-label'>Tone</span>
+          <input id='secret' type='radio' aria-label='Invisible'>
+          <div class='far'><input id='offscreen' type='radio'><label for='offscreen'>Below fold</label></div>
+          <input id='gone' type='radio' style='display:none'><label for='gone'>Gone</label>"#,
+        )
+        .unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::SetViewport {
+                width: 390,
+                height: 650,
+                scale: 1.0,
+            },
+        )
+        .unwrap();
+        let fields = [
+            ("energy", "Energy"),
+            ("tone", "Tone"),
+            ("invisible", "Invisible"),
+            ("offscreen", "Below fold"),
+            ("gone", "Gone"),
+        ]
+        .map(|(name, text)| rex_protocol::MobileResultField {
+            name: name.into(),
+            alternatives: vec![text.into()],
+            kind: "control".into(),
+            match_mode: None,
+            min_font_px: Some(14),
+            region: None,
+            min_count: None,
+        });
+        let capture = sup.capture_with_fields(&started.id, &fields).unwrap();
+        eprintln!("LABEL DEBUG {:?}", capture.visible_result_fields);
+        assert_eq!(capture.visible_result_fields, vec!["energy", "tone"]);
+        sup.cancel(&started.id).unwrap();
+        let _ = fs::remove_dir_all(w);
+    }
+
+    #[test]
+    fn arrow_key_reaches_native_range_and_tab_moves_focus() {
+        let _guard = PORT_LOCK.lock().unwrap();
+        let w = temp("native-keycodes");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(
+            app.join("index.html"),
+            r#"<!doctype html><style>body{background:#eee;color:#111;font:20px sans-serif}</style>
+          <button id='first'>First</button><input id='range' type='range' min='0' max='10' value='5'
+          oninput="document.getElementById('out').textContent=this.value"><p id='out'>5</p>"#,
+        )
+        .unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        for key in [
+            crate::SafeKey::Tab,
+            crate::SafeKey::Tab,
+            crate::SafeKey::ArrowRight,
+        ] {
+            for state in [crate::KeyState::Down, crate::KeyState::Up] {
+                sup.action(&started.id, &BrowserAction::Key { key, state })
+                    .unwrap();
+            }
+        }
+        let frame = sup.capture(&started.id).unwrap();
+        assert!(
+            frame.dom_text.contains("<p id=\"out\">6</p>"),
+            "{}",
+            frame.dom_text
+        );
+        sup.cancel(&started.id).unwrap();
+        let _ = fs::remove_dir_all(w);
+    }
+
+    #[test]
+    fn javascript_off_is_fresh_and_probe_verified() {
+        let _port_guard = PORT_LOCK.lock().unwrap();
+        let w = temp("javascript-off");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("index.html"), r#"<!doctype html><style>body{background:linear-gradient(#123,#678)}</style><main id='scene'>Script-off fallback</main><script>document.querySelector('#scene').textContent='Script ran'</script>"#).unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        sup.begin_iteration(&started.id).unwrap();
+        assert!(sup
+            .capture(&started.id)
+            .unwrap()
+            .dom_text
+            .contains("Script ran"));
+        sup.action(
+            &started.id,
+            &BrowserAction::SetJavaScript { enabled: false },
+        )
+        .unwrap();
+        let off = sup.capture(&started.id).unwrap();
+        assert!(off.dom_text.contains("Script-off fallback"));
+        assert!(!off.accessibility_text.contains("Script ran"));
+        assert_eq!(
+            sup.action(&started.id, &BrowserAction::SetJavaScript { enabled: true })
+                .unwrap_err(),
+            PreviewError::ConditionNotApplied
+        );
+        sup.cancel(&started.id).unwrap();
+        let _ = fs::remove_dir_all(w);
+    }
+    #[test]
+    fn mobile_script_off_and_reduced_motion_are_real_capture_states() {
+        let _port_guard = PORT_LOCK.lock().unwrap();
+        let w = temp("mobile-conditions");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("index.html"), r#"<!doctype html><style>body{background:linear-gradient(#123,#678)}@media(prefers-reduced-motion:reduce){body{background:linear-gradient(#3475e3,#e8b875)}}</style><main id='scene'>Script-off fallback</main><script>document.querySelector('#scene').textContent='Script ran'</script>"#).unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        sup.begin_iteration(&started.id).unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::SetViewport {
+                width: 390,
+                height: 650,
+                scale: 1.0,
+            },
+        )
+        .unwrap();
+        let normal = sup.capture(&started.id).unwrap();
+        assert!(normal.dom_text.contains("Script ran"));
+        assert!(normal.items.iter().any(|item| matches!(
+            item,
+            crate::Evidence::Viewport {
+                width: 390,
+                height: 650,
+                ..
+            }
+        )));
+        sup.action(
+            &started.id,
+            &BrowserAction::SetReducedMotion { enabled: true },
+        )
+        .unwrap();
+        let reduced = sup.capture(&started.id).unwrap();
+        assert_ne!(normal.screenshot_data_url, reduced.screenshot_data_url);
+        sup.action(
+            &started.id,
+            &BrowserAction::SetJavaScript { enabled: false },
+        )
+        .unwrap();
+        let off = sup.capture(&started.id).unwrap();
+        assert!(off.dom_text.contains("Script-off fallback"));
+        assert!(!off.accessibility_text.contains("Script ran"));
+        assert_eq!(off.source_sha256, normal.source_sha256);
+        sup.cancel(&started.id).unwrap();
+        let _ = fs::remove_dir_all(w);
+    }
+
+    #[test]
+    fn missing_local_scene_asset_cannot_be_capture_evidence() {
+        let _port_guard = PORT_LOCK.lock().unwrap();
+        let w = temp("missing-scene");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("index.html"),"<!doctype html><style>body{background:linear-gradient(#123,#456)}</style><main>Scene not loaded</main><script src='/missing-scene.js'></script>").unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        sup.begin_iteration(&started.id).unwrap();
+        assert_eq!(
+            sup.capture(&started.id).unwrap_err(),
+            PreviewError::BrokenPage
+        );
+        sup.cancel(&started.id).unwrap();
+        let _ = fs::remove_dir_all(w);
+    }
+    #[test]
+    fn broken_script_and_empty_body_cannot_be_capture_evidence() {
+        let _port_guard = PORT_LOCK.lock().unwrap();
+        let w = temp("broken-evidence");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("index.html"),
+            "<!doctype html><style>body{background:linear-gradient(#123,#456)}</style><main>Visible wrapper but missing scene</main><script>throw Error('scene failed')</script>").unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        sup.begin_iteration(&started.id).unwrap();
+        assert_eq!(
+            sup.capture(&started.id).unwrap_err(),
+            PreviewError::BrokenPage
+        );
+        sup.cancel(&started.id).unwrap();
+        let _ = fs::remove_dir_all(w);
+    }
+    #[test]
     fn occupied_reserved_ports_are_skipped() {
         let _port_guard = PORT_LOCK.lock().unwrap();
         let guards: Vec<TcpListener> = (PORT_MIN..PORT_MIN + 3)
@@ -634,6 +1268,123 @@ mod tests {
         drop(guards);
     }
     #[test]
+    fn explicit_animation_wait_reaches_css_end_state_and_reports_timeout() {
+        let _port_guard = PORT_LOCK.lock().unwrap();
+        let w = temp("animation-wait");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("index.html"), r#"<!doctype html><style>body{background:linear-gradient(#135,#753)}#scene{opacity:0;transition:opacity .35s}#scene.done{opacity:1}</style><button onclick="document.querySelector('#scene').classList.add('done')">Reveal</button><main id="scene">Final scene</main>"#).unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::WaitForAnimations { timeout_ms: 0 },
+        )
+        .unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::PointerMove { x: 35.0, y: 15.0 },
+        )
+        .unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::PointerDown {
+                button: crate::PointerButton::Primary,
+            },
+        )
+        .unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::PointerUp {
+                button: crate::PointerButton::Primary,
+            },
+        )
+        .unwrap();
+        // We need to see the actual transition, not an inferred source class.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut saw_running = false;
+        while std::time::Instant::now() < deadline {
+            if sup.action(
+                &started.id,
+                &BrowserAction::WaitForAnimations { timeout_ms: 0 },
+            ) == Err(PreviewError::AnimationNotSettled)
+            {
+                saw_running = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(saw_running, "CSS transition should run after the click");
+        sup.action(
+            &started.id,
+            &BrowserAction::WaitForAnimations { timeout_ms: 2000 },
+        )
+        .unwrap();
+        let frame = sup.capture(&started.id).unwrap();
+        assert!(
+            frame.dom_text.contains("class=\"done\""),
+            "{}",
+            frame.dom_text
+        );
+        sup.cancel(&started.id).unwrap();
+    }
+
+    #[test]
+    fn animation_wait_does_not_claim_ambient_loop_is_settled() {
+        let _port_guard = PORT_LOCK.lock().unwrap();
+        let w = temp("animation-loop");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("index.html"), r#"<!doctype html><style>body{background:linear-gradient(#135,#753)}main{animation:pulse .2s infinite alternate}@keyframes pulse{to{opacity:.7}}</style><main>Ambient scene</main>"#).unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::WaitForAnimations { timeout_ms: 200 },
+        )
+        .unwrap();
+        let frame = sup.capture(&started.id).unwrap();
+        assert!(frame.dom_text.contains("infinite"));
+        sup.cancel(&started.id).unwrap();
+    }
+
+    #[test]
+    fn keyboard_enter_activates_native_button_and_space_reverses_it() {
+        let _port_guard = PORT_LOCK.lock().unwrap();
+        let w = temp("keyboard-native-button");
+        let app = w.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("index.html"), r#"<!doctype html><button id='first' onclick="document.getElementById('out').textContent='first'">First</button><button id='second' onclick="document.getElementById('out').textContent='second'">Second</button><p id='out'>first</p>"#).unwrap();
+        let sup = PreviewSupervisor::new(&w).unwrap();
+        let started = sup.start(Path::new("app")).unwrap();
+        let press = |key| {
+            for state in [crate::KeyState::Down, crate::KeyState::Up] {
+                sup.action(&started.id, &BrowserAction::Key { key, state })
+                    .unwrap();
+            }
+        };
+        press(crate::SafeKey::Tab);
+        press(crate::SafeKey::Tab);
+        press(crate::SafeKey::Enter);
+        let after_enter = sup.capture(&started.id).unwrap();
+        assert!(
+            after_enter.dom_text.contains("<p id=\"out\">second</p>"),
+            "Enter must activate the focused native button, not merely move focus: {}",
+            after_enter.dom_text
+        );
+        press(crate::SafeKey::Tab);
+        press(crate::SafeKey::Tab);
+        press(crate::SafeKey::Space);
+        let after_space = sup.capture(&started.id).unwrap();
+        assert!(
+            after_space.dom_text.contains("<p id=\"out\">first</p>"),
+            "Space must restore the first result: {}",
+            after_space.dom_text
+        );
+        sup.cancel(&started.id).unwrap();
+    }
+
+    #[test]
     fn browser_capture_is_real_and_actions_reach_page() {
         let _port_guard = PORT_LOCK.lock().unwrap();
         let w = temp("browser");
@@ -641,7 +1392,7 @@ mod tests {
         fs::create_dir(&app).unwrap();
         fs::write(
             app.join("index.html"),
-            r#"<!doctype html><button id='b' onclick="this.textContent='clicked'">press</button>"#,
+            r#"<!doctype html><style>body{background:linear-gradient(45deg,#194c5b,#f0bb74)}</style><button id='b' onclick="this.textContent='clicked'">press</button>"#,
         )
         .unwrap();
         let sup = PreviewSupervisor::new(&w).unwrap();
@@ -649,6 +1400,20 @@ mod tests {
         assert_eq!(sup.begin_iteration(&started.id).unwrap(), 1);
         let first = sup.capture(&started.id).unwrap();
         assert!(first.dom_text.contains("press"));
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(
+                first
+                    .screenshot_data_url
+                    .as_ref()
+                    .unwrap()
+                    .strip_prefix("data:image/png;base64,")
+                    .unwrap(),
+            )
+            .unwrap();
+        let reader = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        assert_eq!((reader.info().width, reader.info().height), (1280, 800));
         assert!(first
             .screenshot_data_url
             .as_deref()
@@ -675,6 +1440,82 @@ mod tests {
         .unwrap();
         let second = sup.capture(&started.id).unwrap();
         assert!(second.dom_text.contains("clicked"));
+        assert_eq!(first.source_sha256, second.source_sha256);
+        fs::write(
+            app.join("index.html"),
+            "<!doctype html><style>body{background:linear-gradient(45deg,#194c5b,#f0bb74)}</style><p>revised source</p>",
+        )
+        .unwrap();
+        let revised = sup.capture(&started.id).unwrap();
+        assert_ne!(first.source_sha256, revised.source_sha256);
+        fs::write(
+            app.join("index.html"),
+            r#"<!doctype html><style>body{background:linear-gradient(45deg,#194c5b,#f0bb74)}</style><button id='b' onclick="this.textContent='clicked'">press</button>"#,
+        )
+        .unwrap();
+        fs::write(app.join("motion.html"), "<!doctype html><style>body{background:linear-gradient(45deg,#e34141,#e8b875)}@media(prefers-reduced-motion:reduce){body{background:linear-gradient(45deg,#3475e3,#e8b875)}}</style><p>motion test</p>").unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::Navigate {
+                path: "/motion.html".into(),
+            },
+        )
+        .unwrap();
+        let normal = sup.capture(&started.id).unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::SetReducedMotion { enabled: true },
+        )
+        .unwrap();
+        let reduced = sup.capture(&started.id).unwrap();
+        assert_ne!(normal.screenshot_data_url, reduced.screenshot_data_url);
+        sup.action(
+            &started.id,
+            &BrowserAction::SetReducedMotion { enabled: false },
+        )
+        .unwrap();
+        let restored = sup.capture(&started.id).unwrap();
+        assert_eq!(normal.screenshot_data_url, restored.screenshot_data_url);
+        // A click navigates independently of the typed route action. Do not
+        // bind its pixels as task evidence when it leaves the preview port.
+        fs::write(
+            app.join("escape.html"),
+            "<a href='http://example.invalid/'>leave</a>",
+        )
+        .unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::Navigate {
+                path: "/escape.html".into(),
+            },
+        )
+        .unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::PointerMove { x: 20.0, y: 15.0 },
+        )
+        .unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::PointerDown {
+                button: crate::PointerButton::Primary,
+            },
+        )
+        .unwrap();
+        sup.action(
+            &started.id,
+            &BrowserAction::PointerUp {
+                button: crate::PointerButton::Primary,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            sup.capture(&started.id).unwrap_err(),
+            PreviewError::UrlDenied
+        );
+        sup.action(&started.id, &BrowserAction::Navigate { path: "/".into() })
+            .unwrap();
+        assert!(sup.capture(&started.id).unwrap().dom_text.contains("press"));
         sup.record_iteration(
             &started.id,
             crate::IterationReceipt {

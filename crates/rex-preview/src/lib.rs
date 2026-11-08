@@ -64,12 +64,26 @@ pub enum PreviewError {
     UrlDenied,
     #[error("preview session is not running")]
     NotRunning,
+    #[error("preview source changed while capturing; recapture this state")]
+    SourceChanged,
+    #[error("preview frame is blank or near-uniform")]
+    BlankFrame,
+    #[error("requested preview condition did not take effect in the page")]
+    ConditionNotApplied,
+    #[error("visible finite animations did not settle within the requested wait; capture may be in flight")]
+    AnimationNotSettled,
+    #[error("preview page has runtime errors or missing scene content")]
+    BrokenPage,
     #[error("preview session is already terminal")]
     Terminal,
     #[error("iteration budget exhausted")]
     IterationLimit,
+    #[error("capture with frozen first-view fields requires scroll at the top; scroll back to y=0 and recapture")]
+    FirstViewScrolled,
     #[error("evidence exceeded its bounded budget")]
     EvidenceLimit,
+    #[error("scroll delta_x and delta_y must each be finite and within -10000..=10000 per action; use several smaller scroll actions for longer pages")]
+    ScrollDeltaLimit,
     #[error("production gates have not passed")]
     GatesFailed,
 }
@@ -221,12 +235,16 @@ pub fn validate_local_url(raw: &str, expected_port: u16) -> Result<Url, PreviewE
 pub enum BrowserAction {
     Navigate { path: String },
     PointerMove { x: f32, y: f32 },
+    ActivateControl { selector: String },
     PointerDown { button: PointerButton },
     PointerUp { button: PointerButton },
     Key { key: SafeKey, state: KeyState },
     Text { value: String },
     Scroll { delta_x: f32, delta_y: f32 },
+    WaitForAnimations { timeout_ms: u32 },
     SetViewport { width: u16, height: u16, scale: f32 },
+    SetReducedMotion { enabled: bool },
+    SetJavaScript { enabled: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -259,13 +277,30 @@ pub enum SafeKey {
     Space,
 }
 
+fn valid_simple_id(selector: &str) -> bool {
+    let Some(id) = selector.strip_prefix('#') else {
+        return false;
+    };
+    (1..=80).contains(&id.len())
+        && id.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 impl BrowserAction {
     pub fn validate(&self) -> Result<(), PreviewError> {
         match self {
             Self::Navigate { path }
-                if !path.starts_with('/') || path.starts_with("//") || path.contains("..") =>
+                if !path.starts_with('/')
+                    || path.starts_with("//")
+                    || path.contains('\\')
+                    || path.contains("..") =>
             {
                 Err(PreviewError::UrlDenied)
+            }
+            Self::ActivateControl { selector } if !valid_simple_id(selector) => {
+                Err(PreviewError::EvidenceLimit)
             }
             Self::PointerMove { x, y }
                 if !x.is_finite() || !y.is_finite() || *x < 0.0 || *y < 0.0 =>
@@ -278,6 +313,9 @@ impl BrowserAction {
                     || delta_x.abs() > 10_000.0
                     || delta_y.abs() > 10_000.0 =>
             {
+                Err(PreviewError::ScrollDeltaLimit)
+            }
+            Self::WaitForAnimations { timeout_ms } if *timeout_ms > 5000 => {
                 Err(PreviewError::EvidenceLimit)
             }
             Self::SetViewport {
@@ -633,6 +671,13 @@ mod tests {
         }
         .validate()
         .is_err());
+        // URL parsers treat a backslash after the first slash like an
+        // authority delimiter for special schemes; reject it before CDP.
+        assert!(BrowserAction::Navigate {
+            path: "/\\evil.test".into()
+        }
+        .validate()
+        .is_err());
         assert!(BrowserAction::SetViewport {
             width: 1440,
             height: 900,
@@ -647,6 +692,30 @@ mod tests {
         }
         .validate()
         .is_err());
+        assert_eq!(
+            BrowserAction::Scroll {
+                delta_x: 0.0,
+                delta_y: 10_000.0
+            }
+            .validate(),
+            Ok(())
+        );
+        for (delta_x, delta_y) in [(10_000.1, 0.0), (0.0, -10_000.1), (f32::NAN, 0.0)] {
+            let error = BrowserAction::Scroll { delta_x, delta_y }
+                .validate()
+                .unwrap_err();
+            assert_eq!(error, PreviewError::ScrollDeltaLimit);
+            assert!(error.to_string().contains("delta_x and delta_y"));
+            assert!(error.to_string().contains("10000"));
+        }
+        assert_eq!(
+            BrowserAction::WaitForAnimations { timeout_ms: 5000 }.validate(),
+            Ok(())
+        );
+        assert_eq!(
+            BrowserAction::WaitForAnimations { timeout_ms: 5001 }.validate(),
+            Err(PreviewError::EvidenceLimit)
+        );
         assert!(BrowserAction::Text {
             value: "x".repeat(20_000)
         }

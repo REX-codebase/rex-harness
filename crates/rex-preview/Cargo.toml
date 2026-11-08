@@ -5,12 +5,14 @@ edition = "2021"
 description = "Rust-owned live preview and grounded visual iteration runtime for REX Harness"
 
 [dependencies]
+rex-protocol = { path = "../rex-protocol" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"
 url = "2"
 base64 = "0.22"
 sha2 = "0.10"
+png = "0.18"
 tungstenite = "0.27"
 ureq = { version = "3", features = ["json"] }
 

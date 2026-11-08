@@ -31,6 +31,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 
 mod lease_keeper;
 pub use lease_keeper::{LeaseKeeper, LeaseKeeperConfig, LeaseRenewalReport, RenewedLease};
@@ -62,6 +63,20 @@ impl DaemonPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct StateTrace {
+    action_id: String,
+    preview_id: String,
+    start_digest: String,
+    source_sha256: String,
+    activated: bool,
+    end_digest: Option<String>,
+    #[serde(default)]
+    reverse_action_observed: bool,
+    #[serde(default)]
+    reverse_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DurableTask {
     protocol_version: String,
     task_id: String,
@@ -74,6 +89,20 @@ struct DurableTask {
     ultra: bool,
     plan_hash: String,
     plan: Vec<PlanStep>,
+    /// Frozen at creation; absent on legacy and uncontracted tasks.
+    #[serde(default)]
+    mobile_result_fields: Option<Vec<MobileResultField>>,
+    #[serde(default)]
+    desktop_result_fields: Option<Vec<MobileResultField>>,
+    #[serde(default)]
+    two_state_contract: Option<TwoStateContract>,
+    #[serde(default)]
+    state_trace: Option<StateTrace>,
+    /// First-party mobile capture digest -> visible-field names for this action.
+    #[serde(default)]
+    mobile_field_captures: BTreeMap<String, (String, Vec<String>)>,
+    #[serde(default)]
+    desktop_field_captures: BTreeMap<String, (String, Vec<String>)>,
     cursor: usize,
     state: TaskState,
     open_action: Option<ActionSpec>,
@@ -93,6 +122,26 @@ struct DurableTask {
     /// Harness-registered evidence ids (tool receipts, test evidence ids).
     /// A completion claim may only cite these.
     registered_evidence: BTreeSet<String>,
+    /// Active source generation for first-party preview evidence. A new source
+    /// invalidates every earlier render binding and observation.
+    #[serde(default)]
+    preview_source_generation: Option<String>,
+    /// First-party local preview frame digest -> (source snapshot, action).
+    /// Host-supplied artifacts carry no snapshot and cannot satisfy this gate.
+    #[serde(default)]
+    preview_sources: BTreeMap<String, (String, String)>,
+    /// Additional action bindings for a byte-identical frame from the SAME
+    /// source snapshot, captured again under a later open action. Legacy
+    /// preview_sources stays readable for existing durable tasks.
+    #[serde(default)]
+    preview_action_sources: BTreeMap<String, BTreeMap<String, String>>,
+    /// Latest accepted visual action's six-slot digest summary, not a taste gate.
+    #[serde(default)]
+    visual_capture_coverage: Option<VisualCaptureCoverage>,
+    #[serde(default)]
+    critique_issued_for: Option<String>,
+    #[serde(default)]
+    critique_recorded_for: Option<String>,
     result: Option<String>,
     terminal_reason: Option<String>,
     #[serde(default = "default_branch_id")]
@@ -107,6 +156,10 @@ struct DurableTask {
     /// never stored; it rotates on every accepted resume.
     #[serde(default)]
     host_resume_handle_hash: Option<String>,
+    /// Optional SHA-256 of the caller's precommitted one-time recovery key.
+    /// Cleared on first successful use. Legacy tasks cannot recover this way.
+    #[serde(default)]
+    recovery_key_hash: Option<String>,
     /// SHA-256 of the per-task operational capability (protocol 2.0). The
     /// capability itself is only ever held by the task's operator; every
     /// operational call must present it. Empty means a pre-2.0 record,
@@ -191,10 +244,120 @@ impl HarnessDaemon {
         Ok(daemon)
     }
 
+    // Typed callers take the same transaction path as MCP dispatch. Core
+    // methods below run only while dispatch holds the per-task lock.
+    pub fn human_stop(&self, req: HumanStopRequest) -> Result<CancelResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::HumanStop, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn execute(&self, req: ExecuteRequest) -> Result<ExecuteResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Execute, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn next(&self, req: NextRequest) -> Result<NextResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Next, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn read(&self, req: ReadRequest) -> Result<ReadResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Read, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn edit(&self, req: EditRequest) -> Result<EditResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Edit, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn search(&self, req: SearchRequest) -> Result<SearchResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Search, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn run(&self, req: RunRequest) -> Result<RunResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Run, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn test(&self, req: TestRequest) -> Result<TestResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Test, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn submit(&self, req: SubmitRequest) -> Result<SubmitResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Submit, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn status(&self, req: TaskRefRequest) -> Result<StatusResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Status, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn events(&self, req: EventsRequest) -> Result<EventsResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Events, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn result(&self, req: TaskRefRequest) -> Result<ResultResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Result, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn cancel(&self, req: CancelRequest) -> Result<CancelResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Cancel, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn artifact_put(
+        &self,
+        req: ArtifactPutRequest,
+    ) -> Result<ArtifactPutResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::ArtifactPut, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn ultra_open(&self, req: UltraOpenRequest) -> Result<UltraViewResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::UltraOpen, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn ultra_submit(
+        &self,
+        req: UltraSubmitRequest,
+    ) -> Result<UltraViewResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::UltraSubmit, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn ultra_promote(
+        &self,
+        req: rex_protocol::UltraPromoteRequest,
+    ) -> Result<rex_protocol::UltraPromoteResponse, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::UltraPromote, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn proof_bundle(&self, req: TaskRefRequest) -> Result<TaskProofBundle, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::Proof, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+    pub fn verify_proof_bundle(
+        &self,
+        req: TaskRefRequest,
+    ) -> Result<ProofVerificationReport, ProtocolError> {
+        let args = serde_json::to_value(req).map_err(internal)?;
+        let result = self.dispatch(ToolName::ProofVerify, args)?;
+        serde_json::from_value(result).map_err(internal)
+    }
+
     /// The final human Stop: terminal fence for any task, gated on the
     /// human-stop token that only the trusted local launcher can read.
     /// Distinct from operator `cancel`, which requires the task capability.
-    pub fn human_stop(&self, req: HumanStopRequest) -> Result<CancelResponse, ProtocolError> {
+    fn human_stop_inner(&self, req: HumanStopRequest) -> Result<CancelResponse, ProtocolError> {
         if hex_sha256(req.human_token.as_bytes()) != self.human_token_hash {
             return Err(perr(
                 ErrorCode::Unauthorized,
@@ -215,6 +378,8 @@ impl HarnessDaemon {
                 .custody
                 .lock()
                 .map_err(|_| internal("custody registry poisoned"))?;
+            let _store_lock = reg.lock_store().map_err(custody_err)?;
+            reg.refresh().map_err(custody_err)?;
             // The human stop is final in every phase, never gated on the
             // operator's state, even for an agent-operated task.
             reg.human_stop(&t.grant_id, now_ms()).map_err(custody_err)?;
@@ -233,23 +398,34 @@ impl HarnessDaemon {
         })
     }
 
-    pub fn execute(&self, req: ExecuteRequest) -> Result<ExecuteResponse, ProtocolError> {
+    fn execute_inner(&self, req: ExecuteRequest) -> Result<ExecuteResponse, ProtocolError> {
         validate_execute(&req)?;
         if let Some(id) = &req.task_id {
             let mut task = self.load(id)?;
-            if task.task != req.task {
+            if task.task != req.task
+                || (req.mobile_result_fields.is_some()
+                    && req.mobile_result_fields != task.mobile_result_fields)
+                || (req.desktop_result_fields.is_some()
+                    && req.desktop_result_fields != task.desktop_result_fields)
+                || (req.two_state_contract.is_some()
+                    && req.two_state_contract != task.two_state_contract)
+            {
                 return Err(perr(
                     ErrorCode::IdempotencyConflict,
-                    "task_id exists with different task text",
+                    "task_id exists with different task text or frozen result contract",
                     id,
                 ));
             }
             // Verify, gate, then rotate: a resume the lease gate refuses must
             // not burn the host's only resume handle.
-            self.verify_resume_handle(&task, &req)?;
+            let recovering = self.verify_resume_credential(&task, &req)?;
             let renewed = self.renew_lease_on_resume(&mut task)?;
             let handle = self.rotate_resume_handle(&mut task)?;
             let capability = self.rotate_capability(&mut task)?;
+            if recovering {
+                task.recovery_key_hash = None;
+                self.append_event(&mut task, "recovery_key_consumed", json!({}))?;
+            }
             if renewed {
                 self.append_event(&mut task, "lease_renewed_on_resume", json!({}))?;
             }
@@ -267,17 +443,21 @@ impl HarnessDaemon {
             if task.request_hash != request_hash(&req)? {
                 return Err(perr(
                     ErrorCode::IdempotencyConflict,
-                    "request_id was already used with another payload",
+                    "request_id was already used with another payload; resume with the identical full creation payload (including plan, proof, budgets, ultra, host and operator_is_agent) plus the current resume_handle, or use task_id with the unchanged task text and current resume_handle. Successful resume rotates the handle and task capability",
                     &task.task_id,
                 ));
             }
             let mut task = task;
             // Verify, gate, then rotate: a resume the lease gate refuses must
             // not burn the host's only resume handle.
-            self.verify_resume_handle(&task, &req)?;
+            let recovering = self.verify_resume_credential(&task, &req)?;
             let renewed = self.renew_lease_on_resume(&mut task)?;
             let handle = self.rotate_resume_handle(&mut task)?;
             let capability = self.rotate_capability(&mut task)?;
+            if recovering {
+                task.recovery_key_hash = None;
+                self.append_event(&mut task, "recovery_key_consumed", json!({}))?;
+            }
             if renewed {
                 self.append_event(&mut task, "lease_renewed_on_resume", json!({}))?;
             }
@@ -292,9 +472,12 @@ impl HarnessDaemon {
             return Ok(self.execute_view(&task, true, Some(handle), Some(capability)));
         }
         let now = now_ms();
-        let task_id = format!("task-{}", random_id());
-        let host_resume_handle = format!("hrh-{}", random_hex(24));
-        let task_capability = format!("cap-{}", random_hex(24));
+        let task_id = format!("task-{}", random_id()?);
+        // Keep creation under the same per-task lock that the keeper and
+        // failsafe use when scanning a newly created task.
+        let _new_task_lock = self.lock_task(&task_id)?;
+        let host_resume_handle = format!("hrh-{}", random_hex(24)?);
+        let task_capability = format!("cap-{}", random_hex(24)?);
         let plan = req
             .plan
             .clone()
@@ -325,13 +508,16 @@ impl HarnessDaemon {
             .min(self.policy.max_wall_ms);
         let caps = capability_set(&self.policy.workspace);
         let operator = if req.operator_is_agent {
-            OperatorIdentity::Agent(CustodyRegistry::register_agent(
-                host_label(req.host),
-                AgentProtocol::Mcp {
-                    client: host_label(req.host).into(),
-                    version: PROTOCOL_VERSION.into(),
-                },
-            ))
+            OperatorIdentity::Agent(
+                CustodyRegistry::register_agent(
+                    host_label(req.host),
+                    AgentProtocol::Mcp {
+                        client: host_label(req.host).into(),
+                        version: PROTOCOL_VERSION.into(),
+                    },
+                )
+                .map_err(internal)?,
+            )
         } else {
             OperatorIdentity::Human
         };
@@ -361,6 +547,8 @@ impl HarnessDaemon {
                 .custody
                 .lock()
                 .map_err(|_| internal("custody registry poisoned"))?;
+            let _store_lock = reg.lock_store().map_err(custody_err)?;
+            reg.refresh().map_err(custody_err)?;
             let offer = reg
                 .offer(
                     &task_id,
@@ -394,6 +582,12 @@ impl HarnessDaemon {
             ultra: req.ultra,
             plan_hash: hash_json(&plan)?,
             plan,
+            mobile_result_fields: req.mobile_result_fields,
+            desktop_result_fields: req.desktop_result_fields,
+            two_state_contract: req.two_state_contract,
+            state_trace: None,
+            mobile_field_captures: BTreeMap::new(),
+            desktop_field_captures: BTreeMap::new(),
             cursor: 0,
             state: TaskState::Active,
             open_action: Some(action),
@@ -411,6 +605,12 @@ impl HarnessDaemon {
             proof: req.proof,
             evidence: BTreeMap::new(),
             registered_evidence: BTreeSet::new(),
+            preview_source_generation: None,
+            preview_sources: BTreeMap::new(),
+            preview_action_sources: BTreeMap::new(),
+            visual_capture_coverage: None,
+            critique_issued_for: None,
+            critique_recorded_for: None,
             result: None,
             terminal_reason: None,
             branch_id: "main".into(),
@@ -422,6 +622,10 @@ impl HarnessDaemon {
             },
             ultra_skill_plan_hash: None,
             host_resume_handle_hash: Some(hex_sha256(host_resume_handle.as_bytes())),
+            recovery_key_hash: req
+                .recovery_key
+                .as_ref()
+                .map(|key| hex_sha256(key.as_bytes())),
             task_capability_hash: hex_sha256(task_capability.as_bytes()),
             store_schema_version: STORE_SCHEMA_VERSION,
         };
@@ -442,7 +646,573 @@ impl HarnessDaemon {
         ))
     }
 
-    pub fn next(&self, req: NextRequest) -> Result<NextResponse, ProtocolError> {
+    pub fn require_live_task(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+    ) -> Result<(), ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        self.live(task_id, epoch, capability).map(|_| ())
+    }
+
+    pub fn workspace(&self) -> &Path {
+        &self.policy.workspace
+    }
+
+    /// Bind a captured PNG to the local source snapshot and open action.
+    /// This does not authenticate host-supplied artifacts or a deployed shell.
+    /// Bind viewport-checked, first-party preview observations to this action.
+    /// A host cannot set this list through rex_submit or artifact_put.
+    pub fn bind_mobile_fields(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+        digest: &str,
+        visible_names: Vec<String>,
+        kind: &str,
+    ) -> Result<(), ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        let mut t = self.live(task_id, epoch, capability)?;
+        let action = t
+            .open_action
+            .as_ref()
+            .ok_or_else(|| perr(ErrorCode::TaskTerminal, "no open action", task_id))?
+            .action_id
+            .clone();
+        if !t
+            .preview_sources
+            .get(digest)
+            .is_some_and(|(_, a)| a == &action)
+            && !t
+                .preview_action_sources
+                .get(&action)
+                .is_some_and(|m| m.contains_key(digest))
+        {
+            return Err(perr(
+                ErrorCode::GateFailed,
+                "result observation needs a current-action first-party preview binding",
+                task_id,
+            ));
+        }
+        if !self
+            .artifacts
+            .bindings(task_id)
+            .iter()
+            .any(|b| b.sha256 == digest && b.kind == kind)
+        {
+            return Err(perr(
+                ErrorCode::GateFailed,
+                "result observation needs its render artifact",
+                task_id,
+            ));
+        }
+        let captures = if kind == "render.mobile390.first" {
+            &mut t.mobile_field_captures
+        } else if kind == "render.desktop.first" {
+            &mut t.desktop_field_captures
+        } else {
+            return Err(perr(
+                ErrorCode::GateFailed,
+                "invalid result render kind",
+                task_id,
+            ));
+        };
+        if let Some((prior_action, prior_names)) = captures.get(digest) {
+            if prior_action == &action && prior_names != &visible_names {
+                return Err(perr(
+                    ErrorCode::IdempotencyConflict,
+                    "identical pixels cannot bind contradictory field observations",
+                    task_id,
+                ));
+            }
+        }
+        captures.insert(digest.into(), (action.clone(), visible_names.clone()));
+        self.append_event(
+            &mut t,
+            "result_fields_observed",
+            json!({"sha256":digest,"action_id":action,"kind":kind,"visible_names":visible_names}),
+        )?;
+        self.persist(&t)
+    }
+
+    pub fn result_fields(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+        kind: &str,
+    ) -> Result<Option<Vec<MobileResultField>>, ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        let t = self.live(task_id, epoch, capability)?;
+        Ok(match kind {
+            "render.mobile390.first" => t.mobile_result_fields,
+            "render.desktop.first" => t.desktop_result_fields,
+            _ => None,
+        })
+    }
+
+    pub fn two_state_contract(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+    ) -> Result<Option<TwoStateContract>, ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        Ok(self.live(task_id, epoch, capability)?.two_state_contract)
+    }
+
+    pub fn require_state_start(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+        preview_id: &str,
+    ) -> Result<(), ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        let t = self.live(task_id, epoch, capability)?;
+        let action = t
+            .open_action
+            .as_ref()
+            .ok_or_else(|| perr(ErrorCode::TaskTerminal, "no open action", task_id))?;
+        if !t.state_trace.as_ref().is_some_and(|v| {
+            v.action_id == action.action_id
+                && v.preview_id == preview_id
+                && !v.activated
+                && v.end_digest.is_none()
+        }) {
+            return Err(perr(
+                ErrorCode::GateFailed,
+                "capture the two-state start in this preview before activation",
+                task_id,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Only MCP's successful first-party capture/activate paths call this.
+    /// Called only after an actual first-party pointer/key input succeeds in
+    /// the same preview after the settled end capture.
+    pub fn record_reverse_input(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+        preview_id: &str,
+    ) -> Result<(), ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        let mut t = self.live(task_id, epoch, capability)?;
+        let action = t
+            .open_action
+            .as_ref()
+            .ok_or_else(|| perr(ErrorCode::TaskTerminal, "no open action", task_id))?
+            .action_id
+            .clone();
+        if let Some(trace) = t.state_trace.as_mut().filter(|v| {
+            v.action_id == action && v.preview_id == preview_id && v.end_digest.is_some()
+        }) {
+            trace.reverse_action_observed = true;
+            self.append_event(
+                &mut t,
+                "reverse_input_observed",
+                json!({"action_id":action,"preview_id":preview_id}),
+            )?;
+            self.persist(&t)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_state_step(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+        preview_id: &str,
+        kind: &str,
+        digest: Option<&str>,
+        source: Option<&str>,
+        visible_names: &[String],
+    ) -> Result<(), ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        let mut t = self.live(task_id, epoch, capability)?;
+        let contract = t
+            .two_state_contract
+            .clone()
+            .ok_or_else(|| perr(ErrorCode::GateFailed, "no two-state contract", task_id))?;
+        let action = t
+            .open_action
+            .as_ref()
+            .ok_or_else(|| perr(ErrorCode::TaskTerminal, "no open action", task_id))?
+            .action_id
+            .clone();
+        match kind {
+            "start" => {
+                let digest = digest
+                    .ok_or_else(|| perr(ErrorCode::GateFailed, "start digest required", task_id))?;
+                let source = source
+                    .ok_or_else(|| perr(ErrorCode::GateFailed, "start source required", task_id))?;
+                if !visible_names.contains(&"state_start".into()) {
+                    return Err(perr(
+                        ErrorCode::GateFailed,
+                        "two-state start text is not fully visible",
+                        task_id,
+                    ));
+                }
+                if !self
+                    .artifacts
+                    .bindings(task_id)
+                    .iter()
+                    .any(|b| b.sha256 == digest && b.kind == "render.state.start")
+                {
+                    return Err(perr(
+                        ErrorCode::GateFailed,
+                        "two-state start needs its first-party state.start artifact",
+                        task_id,
+                    ));
+                }
+                if !t
+                    .preview_sources
+                    .get(digest)
+                    .is_some_and(|(s, a)| s == source && a == &action)
+                {
+                    return Err(perr(
+                        ErrorCode::GateFailed,
+                        "unbound two-state start capture",
+                        task_id,
+                    ));
+                }
+                t.state_trace = Some(StateTrace {
+                    action_id: action.clone(),
+                    preview_id: preview_id.into(),
+                    start_digest: digest.into(),
+                    source_sha256: source.into(),
+                    activated: false,
+                    end_digest: None,
+                    reverse_action_observed: false,
+                    reverse_digest: None,
+                });
+            }
+            "activate" => {
+                let trace = t
+                    .state_trace
+                    .as_mut()
+                    .filter(|v| {
+                        v.action_id == action
+                            && v.preview_id == preview_id
+                            && v.end_digest.is_none()
+                            && !v.activated
+                    })
+                    .ok_or_else(|| {
+                        perr(
+                            ErrorCode::GateFailed,
+                            "capture the two-state start in this preview before activation",
+                            task_id,
+                        )
+                    })?;
+                trace.activated = true;
+            }
+            "end" => {
+                let digest = digest
+                    .ok_or_else(|| perr(ErrorCode::GateFailed, "end digest required", task_id))?;
+                let source = source
+                    .ok_or_else(|| perr(ErrorCode::GateFailed, "end source required", task_id))?;
+                if !self
+                    .artifacts
+                    .bindings(task_id)
+                    .iter()
+                    .any(|b| b.sha256 == digest && b.kind == "render.state.end")
+                {
+                    return Err(perr(
+                        ErrorCode::GateFailed,
+                        "two-state end needs its first-party state.end artifact",
+                        task_id,
+                    ));
+                }
+                if !visible_names.contains(&"state_end".into()) {
+                    return Err(perr(
+                        ErrorCode::GateFailed,
+                        "two-state end text is not fully visible",
+                        task_id,
+                    ));
+                }
+                if let Some(missing) = contract.end_fields.as_ref().and_then(|fields| {
+                    fields
+                        .iter()
+                        .find(|field| !visible_names.contains(&field.name))
+                }) {
+                    return Err(perr(
+                        ErrorCode::GateFailed,
+                        format!(
+                            "two-state end field '{}' not observed at the frozen viewport: its complete text node must match (exact by default, or contains when specified), be fully inside the viewport, unobscured, at least its CSS font floor, and distinct from nodes used by other fields. This result alone cannot identify which condition failed; inspect the capture and DOM before recapturing",
+                            missing.name
+                        ),
+                        task_id,
+                    ));
+                }
+                if !t
+                    .preview_sources
+                    .get(digest)
+                    .is_some_and(|(s, a)| s == source && a == &action)
+                {
+                    return Err(perr(
+                        ErrorCode::GateFailed,
+                        "unbound two-state end capture",
+                        task_id,
+                    ));
+                }
+                let trace=t.state_trace.as_mut().filter(|v|v.action_id==action && v.preview_id==preview_id && v.activated && v.source_sha256==source && v.start_digest!=digest)
+                    .ok_or_else(||perr(ErrorCode::GateFailed,"two-state end needs a changed first-party frame after activation in the same preview and source revision",task_id))?;
+                trace.end_digest = Some(digest.into());
+            }
+            "reverse" => {
+                let digest = digest.ok_or_else(|| {
+                    perr(ErrorCode::GateFailed, "reverse digest required", task_id)
+                })?;
+                let source = source.ok_or_else(|| {
+                    perr(ErrorCode::GateFailed, "reverse source required", task_id)
+                })?;
+                if !visible_names.contains(&"state_reverse".into()) {
+                    return Err(perr(
+                        ErrorCode::GateFailed,
+                        "two-state reverse text is not fully visible",
+                        task_id,
+                    ));
+                }
+                if !self
+                    .artifacts
+                    .bindings(task_id)
+                    .iter()
+                    .any(|b| b.sha256 == digest && b.kind == "render.state.reverse")
+                {
+                    return Err(perr(
+                        ErrorCode::GateFailed,
+                        "two-state reverse needs its first-party reverse artifact",
+                        task_id,
+                    ));
+                }
+                if !t
+                    .preview_sources
+                    .get(digest)
+                    .is_some_and(|(s, a)| s == source && a == &action)
+                {
+                    return Err(perr(
+                        ErrorCode::GateFailed,
+                        "unbound two-state reverse capture",
+                        task_id,
+                    ));
+                }
+                let trace = t.state_trace.as_mut().filter(|v|
+                    v.action_id == action && v.preview_id == preview_id && v.activated &&
+                    v.source_sha256 == source && v.end_digest.as_deref().is_some_and(|end| end != digest) &&
+                    v.reverse_action_observed)
+                    .ok_or_else(|| perr(ErrorCode::GateFailed,
+                        "two-state reverse needs a different frame after a real pointer/key input, following end in the same preview and source revision", task_id))?;
+                trace.reverse_digest = Some(digest.into());
+            }
+            _ => {
+                return Err(perr(
+                    ErrorCode::MalformedRequest,
+                    "unknown two-state step",
+                    task_id,
+                ))
+            }
+        }
+        self.append_event(
+            &mut t,
+            "two_state_step",
+            json!({"action_id":action,"preview_id":preview_id,
+            "kind":kind,"sha256":digest,"control":contract.control}),
+        )?;
+        self.persist(&t)
+    }
+
+    pub fn bind_preview_source(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+        digest: &str,
+        source_sha256: &str,
+    ) -> Result<(), ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        let mut t = self.live(task_id, epoch, capability)?;
+        let action = t
+            .open_action
+            .as_ref()
+            .ok_or_else(|| perr(ErrorCode::TaskTerminal, "no open action", task_id))?
+            .action_id
+            .clone();
+        if !self
+            .artifacts
+            .bindings(task_id)
+            .iter()
+            .any(|b| b.sha256 == digest && b.kind.starts_with("render."))
+        {
+            return Err(perr(
+                ErrorCode::GateFailed,
+                "preview digest is not a task-bound render artifact",
+                task_id,
+            ));
+        }
+        if source_sha256.len() != 64 || !source_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(perr(
+                ErrorCode::MalformedRequest,
+                "invalid source snapshot digest",
+                task_id,
+            ));
+        }
+        // Only the MCP first-party capture path calls this after hashing the
+        // project tree before and after the browser frame. The content-addressed
+        // PNG alone cannot distinguish a fresh capture of unchanged desktop
+        // pixels after a mobile-only edit. Start a new evidence generation and
+        // discard all earlier bindings, observations and two-state trace.
+        if t.preview_source_generation.as_deref() != Some(source_sha256) {
+            t.preview_sources.clear();
+            t.preview_action_sources.clear();
+            t.mobile_field_captures.clear();
+            t.desktop_field_captures.clear();
+            t.state_trace = None;
+            t.preview_source_generation = Some(source_sha256.into());
+        }
+        if let Some((prior, prior_action)) = t.preview_sources.get(digest) {
+            if prior != source_sha256 {
+                return Err(perr(
+                    ErrorCode::IdempotencyConflict,
+                    "preview binding conflicts with the current source generation",
+                    task_id,
+                ));
+            }
+            if prior_action != &action {
+                // A fresh first-party capture under this action may reuse the
+                // immutable PNG bytes, but an old artifact ID cannot mint it.
+                t.preview_action_sources
+                    .entry(action.clone())
+                    .or_default()
+                    .insert(digest.into(), source_sha256.into());
+            }
+        } else {
+            t.preview_sources
+                .insert(digest.into(), (source_sha256.into(), action.clone()));
+        }
+        self.append_event(
+            &mut t,
+            "preview_source_bound",
+            json!({"sha256":digest,"source_sha256":source_sha256,"action_id":action}),
+        )?;
+        self.persist(&t)
+    }
+
+    /// Issue a challenge before checking the current action. The host must
+    /// respond to this exact action; earlier critiques cannot be carried over.
+    pub fn critique_prompt(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+    ) -> Result<Value, ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        let mut t = self.live(task_id, epoch, capability)?;
+        let action = t
+            .open_action
+            .as_ref()
+            .ok_or_else(|| perr(ErrorCode::TaskTerminal, "no open action", task_id))?
+            .clone();
+        t.critique_issued_for = Some(action.action_id.clone());
+        t.critique_recorded_for = None;
+        self.append_event(
+            &mut t,
+            "critique_prompt_issued",
+            json!({"action_id":action.action_id}),
+        )?;
+        self.persist(&t)?;
+        Ok(
+            json!({"task_id":task_id,"action_id":action.action_id,"prompt":format!(
+            "Attack this work as a skeptical expert before any check. Frozen task: {}. Current action: {}. Find the strongest ways it fails the brief, including misleading claims, bad pixels, broken interactions, accessibility, narrow viewport, missing/error/reverse states and false evidence. Inspect the real artifact. State at least one concrete defect or explain what you tried to break and could not. Do not grade generously or equate a receipt with a working result. Record what is unverified and repair before acceptance.", t.task, action.instructions)}),
+        )
+    }
+
+    pub fn critique_record(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+        action_id: &str,
+        findings: &str,
+    ) -> Result<Value, ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        let mut t = self.live(task_id, epoch, capability)?;
+        if t.open_action.as_ref().map(|a| a.action_id.as_str()) != Some(action_id)
+            || t.critique_issued_for.as_deref() != Some(action_id)
+        {
+            return Err(perr(
+                ErrorCode::GateFailed,
+                "request the critique prompt for the current action first",
+                task_id,
+            ));
+        }
+        if findings.trim().chars().count() < 80 || findings.len() > 16000 {
+            return Err(perr(
+                ErrorCode::MalformedRequest,
+                "critique findings must be 80-16000 characters",
+                task_id,
+            ));
+        }
+        t.critique_recorded_for = Some(action_id.to_string());
+        self.append_event(
+            &mut t,
+            "critique_recorded",
+            json!({"action_id":action_id,"findings":findings}),
+        )?;
+        self.persist(&t)?;
+        Ok(json!({"task_id":task_id,"action_id":action_id,"recorded":true}))
+    }
+
+    pub fn require_critique_issued(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+    ) -> Result<(), ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        let t = self.live(task_id, epoch, capability)?;
+        let action_id = t.open_action.as_ref().map(|a| a.action_id.as_str());
+        if action_id.is_none() || t.critique_issued_for.as_deref() != action_id {
+            return Err(perr(
+                ErrorCode::GateFailed,
+                "request rex_critique_prompt for the current action before preview checking",
+                task_id,
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn require_critique(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+    ) -> Result<(), ProtocolError> {
+        let _task_lock = self.lock_task(task_id)?;
+        self.require_critique_inner(task_id, capability, epoch)
+    }
+
+    fn require_critique_inner(
+        &self,
+        task_id: &str,
+        capability: &str,
+        epoch: u64,
+    ) -> Result<(), ProtocolError> {
+        let t = self.live(task_id, epoch, capability)?;
+        let action_id = t.open_action.as_ref().map(|a| a.action_id.as_str());
+        if t.critique_recorded_for.as_deref() != action_id || action_id.is_none() {
+            return Err(perr(ErrorCode::GateFailed, "request rex_critique_prompt and record findings for the current action before checking", task_id));
+        }
+        Ok(())
+    }
+
+    fn next_inner(&self, req: NextRequest) -> Result<NextResponse, ProtocolError> {
         let mut t = self.live(&req.task_id, req.lease_epoch, &req.capability)?;
         self.heartbeat(&mut t)?;
         self.persist(&t)?;
@@ -453,7 +1223,7 @@ impl HarnessDaemon {
         })
     }
 
-    pub fn read(&self, req: ReadRequest) -> Result<ReadResponse, ProtocolError> {
+    fn read_inner(&self, req: ReadRequest) -> Result<ReadResponse, ProtocolError> {
         let mut t = self.live(&req.task_id, req.lease_epoch, &req.capability)?;
         let result = self.call_tool(
             &mut t,
@@ -479,7 +1249,7 @@ impl HarnessDaemon {
         })
     }
 
-    pub fn edit(&self, req: EditRequest) -> Result<EditResponse, ProtocolError> {
+    fn edit_inner(&self, req: EditRequest) -> Result<EditResponse, ProtocolError> {
         let mut t = self.live(&req.task_id, req.lease_epoch, &req.capability)?;
         let tool = if req.create {
             ToolRequest::CreateFile {
@@ -507,7 +1277,7 @@ impl HarnessDaemon {
         })
     }
 
-    pub fn search(&self, req: SearchRequest) -> Result<SearchResponse, ProtocolError> {
+    fn search_inner(&self, req: SearchRequest) -> Result<SearchResponse, ProtocolError> {
         let mut t = self.live(&req.task_id, req.lease_epoch, &req.capability)?;
         let out = self.call_tool(
             &mut t,
@@ -525,8 +1295,27 @@ impl HarnessDaemon {
         })
     }
 
-    pub fn run(&self, req: RunRequest) -> Result<RunResponse, ProtocolError> {
+    pub fn validate_run(&self, req: &RunRequest) -> Result<(), ProtocolError> {
+        let _task_lock = self.lock_task(&req.task_id)?;
+        self.live(&req.task_id, req.lease_epoch, &req.capability)?;
+        Ok(())
+    }
+
+    fn run_inner(&self, req: RunRequest) -> Result<RunResponse, ProtocolError> {
         let mut t = self.live(&req.task_id, req.lease_epoch, &req.capability)?;
+        if visual_action(
+            &t.task,
+            t.open_action
+                .as_ref()
+                .map(|a| a.instructions.as_str())
+                .unwrap_or(""),
+        ) {
+            let action_id = t.open_action.as_ref().map(|a| a.action_id.as_str());
+            if t.critique_recorded_for.as_deref() != action_id || action_id.is_none() {
+                return Err(perr(ErrorCode::GateFailed,
+                    "record the current action's severe critique before running UI checks or build commands",&t.task_id));
+            }
+        }
         let out = self.call_tool(
             &mut t,
             ToolRequest::RunCommand {
@@ -545,7 +1334,8 @@ impl HarnessDaemon {
         })
     }
 
-    pub fn test(&self, req: TestRequest) -> Result<TestResponse, ProtocolError> {
+    fn test_inner(&self, req: TestRequest) -> Result<TestResponse, ProtocolError> {
+        self.require_critique_inner(&req.task_id, &req.capability, req.lease_epoch)?;
         let argv = match req.recipe.as_str() {
             "cargo-test" => vec!["cargo".into(), "test".into(), "--workspace".into()],
             "npm-test" => vec!["npm".into(), "test".into()],
@@ -556,7 +1346,7 @@ impl HarnessDaemon {
                 ))
             }
         };
-        let run = self.run(RunRequest {
+        let run = self.run_inner(RunRequest {
             task_id: req.task_id.clone(),
             capability: req.capability.clone(),
             lease_epoch: req.lease_epoch,
@@ -566,7 +1356,7 @@ impl HarnessDaemon {
             timeout_ms: Some(rex_tools::MAX_TIMEOUT_MS),
         })?;
         let passed = run.exit_code == Some(0);
-        let evidence_id = format!("evidence-{}", random_id());
+        let evidence_id = format!("evidence-{}", random_id()?);
         let mut t = self.load(&req.task_id)?;
         t.registered_evidence.insert(evidence_id.clone());
         t.evidence
@@ -590,7 +1380,98 @@ impl HarnessDaemon {
         })
     }
 
-    pub fn submit(&self, req: SubmitRequest) -> Result<SubmitResponse, ProtocolError> {
+    /// An evidence gate, not a renderer oracle: a host supplies these bytes.
+    /// We bind, decode and size-check them; authenticity and settled timing
+    /// still require a trusted capture integration or independent inspection.
+    fn validate_visual_evidence(
+        &self,
+        task_id: &str,
+        action_id: &str,
+        sources: &BTreeMap<String, (String, String)>,
+        action_sources: &BTreeMap<String, BTreeMap<String, String>>,
+        evidence: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let bindings = self.artifacts.bindings(task_id);
+        let mut captured_source: Option<&str> = None;
+        for (key, min_width, max_width) in [
+            ("render.desktop.first", 760, u32::MAX),
+            ("render.mobile390.first", 390, 390),
+            ("render.state.start", 1, u32::MAX),
+            ("render.state.mid", 1, u32::MAX),
+            ("render.state.end", 1, u32::MAX),
+            ("render.state.reverse", 1, u32::MAX),
+        ] {
+            let digest = evidence
+                .get(key)
+                .ok_or_else(|| format!("missing {key}: cite a task-bound rendered PNG artifact"))?;
+            let binding = bindings
+                .iter()
+                .find(|b| b.sha256 == *digest && b.kind == key)
+                .ok_or_else(|| format!("{key}: no matching task-bound artifact"))?;
+            let source = match sources.get(digest) {
+                Some((source, captured_action)) if captured_action == action_id => source,
+                _ => action_sources
+                    .get(action_id)
+                    .and_then(|per_action| per_action.get(digest))
+                    .ok_or_else(|| format!("{key}: capture belongs to another action or has no first-party preview source binding; recapture with rex_preview_capture for this action"))?,
+            };
+            if captured_source.is_some_and(|known| known != source) {
+                return Err(format!(
+                    "{key}: mixed preview source revisions; keep screenshot exports, videos and other review outputs outside the preview project directory (they change its source hash), then recapture all six states from one source revision. Do not omit rendered UI assets from the project to silence the gate"
+                ));
+            }
+            captured_source = Some(source);
+            let bytes = self
+                .artifacts
+                .get(&binding.sha256)
+                .map_err(|e| format!("{key}: artifact read failed: {e}"))?;
+            let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+            let mut reader = decoder
+                .read_info()
+                .map_err(|_| format!("{key}: invalid PNG"))?;
+            let info = reader.info();
+            let (w, h) = (info.width, info.height);
+            if !(min_width..=max_width).contains(&w) || !(240..=8192).contains(&h) || w > 8192 {
+                return Err(format!("{key}: invalid viewport dimensions {w}x{h}"));
+            }
+            let mut output = vec![
+                0;
+                reader
+                    .output_buffer_size()
+                    .ok_or_else(|| format!("{key}: invalid PNG size"))?
+            ];
+            reader
+                .next_frame(&mut output)
+                .map_err(|_| format!("{key}: PNG pixels did not decode"))?;
+        }
+        Ok(())
+    }
+
+    fn capture_coverage(
+        action_id: &str,
+        evidence: &BTreeMap<String, String>,
+    ) -> VisualCaptureCoverage {
+        let hashes: Vec<&str> = [
+            "render.desktop.first",
+            "render.mobile390.first",
+            "render.state.start",
+            "render.state.mid",
+            "render.state.end",
+            "render.state.reverse",
+        ]
+        .iter()
+        .filter_map(|key| evidence.get(*key).map(String::as_str))
+        .collect();
+        let unique = hashes.iter().copied().collect::<BTreeSet<_>>().len();
+        VisualCaptureCoverage {
+            action_id: action_id.into(),
+            cited_slots: hashes.len() as u8,
+            unique_frames: unique as u8,
+            duplicate_slots: (hashes.len() - unique) as u8,
+        }
+    }
+
+    fn submit_inner(&self, req: SubmitRequest) -> Result<SubmitResponse, ProtocolError> {
         let t0 = self.live(&req.task_id, req.lease_epoch, &req.capability)?;
         // State-machine join (audit finding 2): an Ultra task can never
         // complete, or advance, through the Standard submission path. Its
@@ -607,6 +1488,13 @@ impl HarnessDaemon {
             .open_action
             .clone()
             .ok_or_else(|| perr(ErrorCode::TaskTerminal, "no open action", &t.task_id))?;
+        if t.critique_recorded_for.as_deref() != Some(open.action_id.as_str()) {
+            return Err(perr(
+                ErrorCode::GateFailed,
+                "request rex_critique_prompt and record findings before acceptance",
+                &t.task_id,
+            ));
+        }
         if open.action_id != req.action_id {
             return Err(perr(
                 ErrorCode::LeaseConflict,
@@ -614,6 +1502,95 @@ impl HarnessDaemon {
                 &t.task_id,
             ));
         }
+        if visual_action(&t.task, &open.instructions) {
+            if let Err(repair) = self.validate_visual_evidence(
+                &t.task_id,
+                &open.action_id,
+                &t.preview_sources,
+                &t.preview_action_sources,
+                &req.evidence,
+            ) {
+                self.append_event(&mut t, "visual_evidence_rejected", json!({"repair":repair}))?;
+                self.persist(&t)?;
+                return Ok(SubmitResponse {
+                    state: TaskState::Active,
+                    accepted: false,
+                    repair: Some(repair),
+                    next: Some(open),
+                    visual_capture_coverage: None,
+                });
+            }
+        }
+        if visual_action(&t.task, &open.instructions) {
+            let missing = [
+                (
+                    "render.mobile390.first",
+                    &t.mobile_result_fields,
+                    &t.mobile_field_captures,
+                ),
+                (
+                    "render.desktop.first",
+                    &t.desktop_result_fields,
+                    &t.desktop_field_captures,
+                ),
+            ]
+            .into_iter()
+            .find_map(|(kind, fields, captures)| {
+                let fields = fields.as_ref()?;
+                let digest = req.evidence.get(kind).expect("validated render");
+                let observed = captures
+                    .get(digest)
+                    .filter(|(action, _)| action == &open.action_id);
+                let missing: Vec<_> = fields
+                    .iter()
+                    .filter(|f| !observed.is_some_and(|(_, names)| names.contains(&f.name)))
+                    .map(|f| f.name.clone())
+                    .collect();
+                (!missing.is_empty()).then_some((kind, missing))
+            });
+            if let Some((kind, missing)) = missing {
+                let repair = format!("{kind} result contract missing visible fields: {}. Recapture the complete first view", missing.join(", "));
+                self.append_event(&mut t, "result_fields_rejected", json!({"repair":repair}))?;
+                self.persist(&t)?;
+                return Ok(SubmitResponse {
+                    state: TaskState::Active,
+                    accepted: false,
+                    repair: Some(repair),
+                    next: Some(open),
+                    visual_capture_coverage: None,
+                });
+            }
+        }
+        if visual_action(&t.task, &open.instructions) && t.two_state_contract.is_some() {
+            let valid = t.state_trace.as_ref().is_some_and(|trace| {
+                trace.action_id == open.action_id
+                    && trace.activated
+                    && trace.end_digest.as_ref() == req.evidence.get("render.state.end")
+                    && req.evidence.get("render.state.start") == Some(&trace.start_digest)
+                    && t.two_state_contract.as_ref().is_none_or(|c| {
+                        c.reverse_text.is_none()
+                            || trace.reverse_digest.as_ref()
+                                == req.evidence.get("render.state.reverse")
+                    })
+            });
+            if !valid {
+                let repair="two-state contract requires cited start and end first-party captures from the same preview and source revision, with a successful creator-named control activation and distinct visible result literals; if reverse_text was frozen, cite a reverse capture after a real input with its visible literal and a frame different from end".to_string();
+                self.append_event(&mut t, "two_state_rejected", json!({"repair":repair}))?;
+                self.persist(&t)?;
+                return Ok(SubmitResponse {
+                    state: TaskState::Active,
+                    accepted: false,
+                    repair: Some(repair),
+                    next: Some(open),
+                    visual_capture_coverage: None,
+                });
+            }
+        }
+        let coverage = if visual_action(&t.task, &open.instructions) {
+            Some(Self::capture_coverage(&open.action_id, &req.evidence))
+        } else {
+            None
+        };
         t.state = TaskState::Verifying;
         let narrative = req.narrative.clone();
         let evidence = req.evidence.clone();
@@ -635,12 +1612,14 @@ impl HarnessDaemon {
                 "action_accepted",
                 json!({"action_id":open.action_id}),
             )?;
+            t.visual_capture_coverage = coverage.clone();
             self.persist(&t)?;
             return Ok(SubmitResponse {
                 state: t.state,
                 accepted: true,
                 repair: None,
                 next: Some(next),
+                visual_capture_coverage: coverage.clone(),
             });
         }
         // Fable completion gate: the claim may only cite evidence the
@@ -661,6 +1640,7 @@ impl HarnessDaemon {
                 accepted: false,
                 repair: Some(repair),
                 next: Some(open),
+                visual_capture_coverage: None,
             });
         }
         t.open_action = None;
@@ -672,13 +1652,14 @@ impl HarnessDaemon {
             .custody
             .lock()
             .map_err(|_| internal("custody registry poisoned"))?
-            .claim_completion(&t.token, &claim, &evaluator, now_ms());
+            .transact(|reg| reg.claim_completion(&t.token, &claim, &evaluator, now_ms()));
         match completion {
             Ok(_) => {
                 t.operation_status = OperationStatus::Committed;
                 t.state = TaskState::Completed;
                 t.result = Some(req.narrative);
                 t.terminal_reason = Some("verified completion".into());
+                t.visual_capture_coverage = coverage.clone();
                 let ev = t.evidence.clone();
                 self.append_event(&mut t, "task_completed", json!({"evidence":ev}))?;
                 self.persist(&t)?;
@@ -687,6 +1668,7 @@ impl HarnessDaemon {
                     accepted: true,
                     repair: None,
                     next: None,
+                    visual_capture_coverage: coverage.clone(),
                 })
             }
             Err(e) => {
@@ -704,12 +1686,13 @@ impl HarnessDaemon {
                     accepted: false,
                     repair: Some(e.to_string()),
                     next: Some(open),
+                    visual_capture_coverage: None,
                 })
             }
         }
     }
 
-    pub fn status(&self, req: TaskRefRequest) -> Result<StatusResponse, ProtocolError> {
+    fn status_inner(&self, req: TaskRefRequest) -> Result<StatusResponse, ProtocolError> {
         let mut t = self.load(&req.task_id)?;
         self.sync_lease_from_custody(&mut t)?;
         let lease = lease_view(&t);
@@ -734,6 +1717,9 @@ impl HarnessDaemon {
             host: t.host,
             lease,
             open_action: t.open_action,
+            mobile_result_fields: t.mobile_result_fields,
+            desktop_result_fields: t.desktop_result_fields,
+            two_state_contract: t.two_state_contract,
             budgets: BudgetView {
                 max_tool_calls: t.max_tool_calls,
                 used_tool_calls: t.used_tool_calls,
@@ -741,12 +1727,13 @@ impl HarnessDaemon {
                 used_wall_ms: used_wall,
             },
             last_event_seq: t.last_event_seq,
+            visual_capture_coverage: t.visual_capture_coverage,
             operation,
             packet,
         })
     }
 
-    pub fn events(&self, req: EventsRequest) -> Result<EventsResponse, ProtocolError> {
+    fn events_inner(&self, req: EventsRequest) -> Result<EventsResponse, ProtocolError> {
         let t = self.load(&req.task_id)?;
         let path = self.task_dir(&t.task_id).join("events.jsonl");
         let data = fs::read_to_string(path).unwrap_or_default();
@@ -763,7 +1750,7 @@ impl HarnessDaemon {
         })
     }
 
-    pub fn result(&self, req: TaskRefRequest) -> Result<ResultResponse, ProtocolError> {
+    fn result_inner(&self, req: TaskRefRequest) -> Result<ResultResponse, ProtocolError> {
         let t = self.load(&req.task_id)?;
         if !t.state.is_terminal() {
             return Err(perr(
@@ -785,7 +1772,7 @@ impl HarnessDaemon {
         })
     }
 
-    pub fn cancel(&self, req: CancelRequest) -> Result<CancelResponse, ProtocolError> {
+    fn cancel_inner(&self, req: CancelRequest) -> Result<CancelResponse, ProtocolError> {
         // Operator cancellation: the per-task capability is the authority.
         // The distinct final human Stop is `human_stop`, a separate route.
         let t0 = self.load(&req.task_id)?;
@@ -811,6 +1798,8 @@ impl HarnessDaemon {
                 .custody
                 .lock()
                 .map_err(|_| internal("custody registry poisoned"))?;
+            let _store_lock = reg.lock_store().map_err(custody_err)?;
+            reg.refresh().map_err(custody_err)?;
             if t.operator_is_agent {
                 reg.operator_cancel(&t.token, now_ms())
                     .map_err(custody_err)?;
@@ -841,7 +1830,7 @@ impl HarnessDaemon {
     /// alter it afterwards, and reusing one digest across candidates or
     /// rounds is rejected. Later gates cite the returned digest and the
     /// daemon re-hashes stored bytes when resolving it.
-    pub fn artifact_put(
+    fn artifact_put_inner(
         &self,
         req: ArtifactPutRequest,
     ) -> Result<ArtifactPutResponse, ProtocolError> {
@@ -880,6 +1869,9 @@ impl HarnessDaemon {
                     perr(ErrorCode::Internal, e.to_string(), &req.task_id)
                 }
             })?;
+        // The artifact's digest becomes a registered citation for this task.
+        // Validation still checks the binding, bytes and required evidence kind.
+        t.registered_evidence.insert(binding.sha256.clone());
         self.append_event(
             &mut t,
             "artifact_registered",
@@ -904,6 +1896,46 @@ impl HarnessDaemon {
     }
 
     pub fn dispatch(&self, tool: ToolName, args: Value) -> Result<Value, ProtocolError> {
+        // A task's MCP call is a read/modify/write transaction across the
+        // task record and event chain. Distinct hosts on one state directory
+        // must never load the same revision and then both persist.
+        // The lock file is stable and survives a task.json rename.
+        let task_id = args.get("task_id").and_then(Value::as_str).or_else(|| {
+            args.get("execute")
+                .and_then(|v| v.get("task_id"))
+                .and_then(Value::as_str)
+        });
+        let _request_lock = if tool == ToolName::Execute {
+            let request_id = args.get("request_id").and_then(Value::as_str).unwrap_or("");
+            let key = hex_sha256(request_id.as_bytes());
+            let dir = self.root.join("requests");
+            fs::create_dir_all(&dir).map_err(internal)?;
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(dir.join(format!("{key}.lock")))
+                .map_err(internal)?;
+            file.lock().map_err(internal)?;
+            Some(file)
+        } else {
+            None
+        };
+        // An idempotent execute without task_id can still resume a task
+        // found by request_id. Serialize that task as well as the request
+        // lookup; otherwise an explicit task_id call can rotate the same
+        // handle concurrently.
+        let replay_task_id = if tool == ToolName::Execute && task_id.is_none() {
+            self.find_task_id_by_request(
+                args.get("request_id").and_then(Value::as_str).unwrap_or(""),
+            )?
+        } else {
+            None
+        };
+        let _task_lock = task_id
+            .or(replay_task_id.as_deref())
+            .map(|id| self.lock_task(id))
+            .transpose()?;
         fn parse<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, ProtocolError> {
             serde_json::from_value(v).map_err(|e| {
                 ProtocolError::new(ErrorCode::MalformedRequest, format!("bad arguments: {e}"))
@@ -916,32 +1948,32 @@ impl HarnessDaemon {
             }};
         }
         match tool {
-            ToolName::Execute => go!(args, execute),
-            ToolName::Next => go!(args, next),
-            ToolName::Read => go!(args, read),
-            ToolName::Edit => go!(args, edit),
-            ToolName::Search => go!(args, search),
-            ToolName::Run => go!(args, run),
-            ToolName::Test => go!(args, test),
-            ToolName::Submit => go!(args, submit),
-            ToolName::Status => go!(args, status),
-            ToolName::Events => go!(args, events),
-            ToolName::Result => go!(args, result),
-            ToolName::Cancel => go!(args, cancel),
-            ToolName::UltraOpen => go!(args, ultra_open),
-            ToolName::UltraSubmit => go!(args, ultra_submit),
-            ToolName::UltraPromote => go!(args, ultra_promote),
-            ToolName::Proof => go!(args, proof_bundle),
-            ToolName::ProofVerify => go!(args, verify_proof_bundle),
-            ToolName::HumanStop => go!(args, human_stop),
-            ToolName::ArtifactPut => go!(args, artifact_put),
+            ToolName::Execute => go!(args, execute_inner),
+            ToolName::Next => go!(args, next_inner),
+            ToolName::Read => go!(args, read_inner),
+            ToolName::Edit => go!(args, edit_inner),
+            ToolName::Search => go!(args, search_inner),
+            ToolName::Run => go!(args, run_inner),
+            ToolName::Test => go!(args, test_inner),
+            ToolName::Submit => go!(args, submit_inner),
+            ToolName::Status => go!(args, status_inner),
+            ToolName::Events => go!(args, events_inner),
+            ToolName::Result => go!(args, result_inner),
+            ToolName::Cancel => go!(args, cancel_inner),
+            ToolName::UltraOpen => go!(args, ultra_open_inner),
+            ToolName::UltraSubmit => go!(args, ultra_submit_inner),
+            ToolName::UltraPromote => go!(args, ultra_promote_inner),
+            ToolName::Proof => go!(args, proof_bundle_inner),
+            ToolName::ProofVerify => go!(args, verify_proof_bundle_inner),
+            ToolName::HumanStop => go!(args, human_stop_inner),
+            ToolName::ArtifactPut => go!(args, artifact_put_inner),
         }
     }
 
     /// Open the Ultra external-host loop for a live agent-operated task.
     /// The first open attaches the host at the task's lease epoch; later
     /// opens are pure views over the durable kernel.
-    pub fn ultra_open(&self, req: UltraOpenRequest) -> Result<UltraViewResponse, ProtocolError> {
+    fn ultra_open_inner(&self, req: UltraOpenRequest) -> Result<UltraViewResponse, ProtocolError> {
         let mut t = self.live(&req.task_id, req.lease_epoch, &req.capability)?;
         require_agent(&t)?;
         require_ultra(&t)?;
@@ -1064,7 +2096,7 @@ impl HarnessDaemon {
 
     /// Submit one candidate response or one adversary/verifier evidence item.
     /// The kernel alone decides whether the evidence gates a transition.
-    pub fn ultra_submit(
+    fn ultra_submit_inner(
         &self,
         req: UltraSubmitRequest,
     ) -> Result<UltraViewResponse, ProtocolError> {
@@ -1164,10 +2196,24 @@ impl HarnessDaemon {
         Ok(ultra_view(t.task_id.clone(), &view, plan))
     }
 
+    /// Fast authorization check for a host-visible asynchronous promotion.
+    /// The worker calls ultra_promote again so state changes after this check
+    /// still fail closed under the daemon's normal rules.
+    pub fn validate_ultra_promotion(
+        &self,
+        req: &rex_protocol::UltraPromoteRequest,
+    ) -> Result<(), ProtocolError> {
+        let _task_lock = self.lock_task(&req.task_id)?;
+        let task = self.live(&req.task_id, req.lease_epoch, &req.capability)?;
+        require_agent(&task)?;
+        require_ultra(&task)?;
+        Ok(())
+    }
+
     /// Promote the qualified candidate into the task workspace. Live lease,
     /// agent-operated tasks only; the kernel must be completed and the
     /// rollback path is verified by the promotion store.
-    pub fn ultra_promote(
+    fn ultra_promote_inner(
         &self,
         req: rex_protocol::UltraPromoteRequest,
     ) -> Result<rex_protocol::UltraPromoteResponse, ProtocolError> {
@@ -1467,7 +2513,7 @@ impl HarnessDaemon {
     /// promotion path underneath it landed with phase F, and the join
     /// itself is exercised directly.
     #[allow(dead_code)]
-    pub(crate) fn promote_and_join(
+    fn promote_and_join(
         &self,
         req: &rex_protocol::UltraPromoteRequest,
     ) -> Result<rex_ultra::promotion::PromotionReceipt, ProtocolError> {
@@ -1535,6 +2581,9 @@ impl HarnessDaemon {
         };
         for entry in read.flatten() {
             let id = entry.file_name().to_string_lossy().into_owned();
+            let Ok(_task_lock) = self.lock_task(&id) else {
+                continue;
+            };
             let Ok(mut t) = self.load(&id) else {
                 continue;
             };
@@ -1542,12 +2591,12 @@ impl HarnessDaemon {
         }
     }
 
-    pub fn proof_bundle(&self, req: TaskRefRequest) -> Result<TaskProofBundle, ProtocolError> {
+    fn proof_bundle_inner(&self, req: TaskRefRequest) -> Result<TaskProofBundle, ProtocolError> {
         let bundle = self.assemble_proof_bundle(&req.task_id)?;
         let dir = self.root.join("proofs");
         fs::create_dir_all(&dir).map_err(internal)?;
         let path = dir.join(format!("{}.json", bundle.task_id));
-        let temporary = path.with_extension("json.tmp");
+        let temporary = path.with_extension(format!("{}.json.tmp", random_hex(8)?));
         fs::write(
             &temporary,
             serde_json::to_vec_pretty(&bundle).map_err(internal)?,
@@ -1696,7 +2745,7 @@ impl HarnessDaemon {
             .to_string()
         });
         let mut events = self
-            .events(EventsRequest {
+            .events_inner(EventsRequest {
                 task_id: t.task_id.clone(),
                 after_seq: 0,
                 limit: None,
@@ -1742,7 +2791,7 @@ impl HarnessDaemon {
     /// records must reproduce the same hash (the proof is deterministic
     /// and bound to the frozen plan), and every recorded candidate
     /// response hash must match the stored content.
-    pub fn verify_proof_bundle(
+    fn verify_proof_bundle_inner(
         &self,
         req: TaskRefRequest,
     ) -> Result<ProofVerificationReport, ProtocolError> {
@@ -1770,7 +2819,14 @@ impl HarnessDaemon {
             Some(p) => (
                 true,
                 Self::proof_content_hash(p)? == p.bundle_hash,
-                hmac_sha256_hex(proof_key.as_bytes(), p.bundle_hash.as_bytes()) == p.bundle_mac,
+                {
+                    let expected = hmac_sha256_hex(proof_key.as_bytes(), p.bundle_hash.as_bytes());
+                    expected
+                        .as_bytes()
+                        .ct_eq(p.bundle_mac.as_bytes())
+                        .unwrap_u8()
+                        == 1
+                },
                 p.bundle_hash == fresh.bundle_hash,
                 manifest_ok(&p.evidence_manifest) && manifest_ok(&fresh.evidence_manifest),
             ),
@@ -1858,14 +2914,16 @@ impl HarnessDaemon {
         self.custody
             .lock()
             .map_err(|_| internal("custody registry poisoned"))?
-            .consume(
-                &t.token,
-                Consumption {
-                    tool_calls: 1,
-                    ..Default::default()
-                },
-                now_ms(),
-            )
+            .transact(|reg| {
+                reg.consume(
+                    &t.token,
+                    Consumption {
+                        tool_calls: 1,
+                        ..Default::default()
+                    },
+                    now_ms(),
+                )
+            })
             .map_err(custody_err)?;
         self.append_event(
             t,
@@ -1935,7 +2993,7 @@ impl HarnessDaemon {
         self.custody
             .lock()
             .map_err(|_| internal("custody registry poisoned"))?
-            .verify_token(&t.token, now)
+            .transact(|reg| reg.verify_token(&t.token, now).map(|_| ()))
             .map_err(custody_err)?;
         Ok(t)
     }
@@ -1949,6 +3007,8 @@ impl HarnessDaemon {
                 .custody
                 .lock()
                 .map_err(|_| internal("custody registry poisoned"))?;
+            let _store_lock = reg.lock_store().map_err(custody_err)?;
+            reg.refresh().map_err(custody_err)?;
             let seq = match reg.grant(&t.grant_id) {
                 Some(g) => g.lease.next_seq,
                 None => t.heartbeat_seq,
@@ -2004,11 +3064,11 @@ impl HarnessDaemon {
             return Ok(false);
         }
         let phase = {
-            let reg = self
-                .custody
+            self.custody
                 .lock()
-                .map_err(|_| internal("custody registry poisoned"))?;
-            reg.grant(&t.grant_id).map(|g| g.phase)
+                .map_err(|_| internal("custody registry poisoned"))?
+                .transact(|reg| Ok(reg.grant(&t.grant_id).map(|g| g.phase)))
+                .map_err(custody_err)?
         };
         match phase {
             Some(rex_custody::CustodyPhase::Active) => {
@@ -2034,9 +3094,39 @@ impl HarnessDaemon {
     /// Called at creation and on every verified resume: the rotated
     /// resume handle vouches for the new capability.
     fn rotate_capability(&self, t: &mut DurableTask) -> Result<String, ProtocolError> {
-        let capability = format!("cap-{}", random_hex(24));
+        let capability = format!("cap-{}", random_hex(24)?);
         t.task_capability_hash = hex_sha256(capability.as_bytes());
         Ok(capability)
+    }
+
+    fn verify_resume_credential(
+        &self,
+        t: &DurableTask,
+        req: &ExecuteRequest,
+    ) -> Result<bool, ProtocolError> {
+        if req.resume_handle.is_some() && req.recovery_key.is_some() {
+            return Err(perr(ErrorCode::ScopeDenied,
+                "present either the current resume handle or the precommitted recovery key, not both", &t.task_id));
+        }
+        if let Some(key) = req.recovery_key.as_deref() {
+            let expected = t.recovery_key_hash.as_deref().ok_or_else(|| {
+                perr(
+                    ErrorCode::ScopeDenied,
+                    "no unused precommitted recovery key for this task",
+                    &t.task_id,
+                )
+            })?;
+            if hex_sha256(key.as_bytes()) != expected {
+                return Err(perr(
+                    ErrorCode::ScopeDenied,
+                    "recovery key mismatch",
+                    &t.task_id,
+                ));
+            }
+            return Ok(true);
+        }
+        self.verify_resume_handle(t, req)?;
+        Ok(false)
     }
 
     fn verify_resume_handle(
@@ -2070,9 +3160,8 @@ impl HarnessDaemon {
 
     /// Only after the verified resume has passed every gate.
     fn rotate_resume_handle(&self, t: &mut DurableTask) -> Result<String, ProtocolError> {
-        let rotated = format!("hrh-{}", random_hex(24));
+        let rotated = format!("hrh-{}", random_hex(24)?);
         t.host_resume_handle_hash = Some(hex_sha256(rotated.as_bytes()));
-        self.persist(t)?;
         Ok(rotated)
     }
 
@@ -2091,11 +3180,19 @@ impl HarnessDaemon {
             task_capability,
             next: t.open_action.clone(),
             lease: lease_view(t),
+            mobile_result_fields: t.mobile_result_fields.clone(),
+            desktop_result_fields: t.desktop_result_fields.clone(),
+            two_state_contract: t.two_state_contract.clone(),
             discipline: Some(operator_discipline()),
         }
     }
     fn task_dir(&self, id: &str) -> PathBuf {
         self.root.join("tasks").join(id)
+    }
+    /// Stable per-task lock. Acquire before the custody store lock whenever
+    /// both task state and custody need to be consulted or changed.
+    fn lock_task(&self, id: &str) -> Result<std::fs::File, ProtocolError> {
+        lock_task_at(&self.root, id)
     }
     fn persist(&self, t: &DurableTask) -> Result<(), ProtocolError> {
         let dir = self.task_dir(&t.task_id);
@@ -2145,19 +3242,24 @@ impl HarnessDaemon {
         }
         Ok(t)
     }
-    fn find_by_request(&self, request_id: &str) -> Result<Option<DurableTask>, ProtocolError> {
+    fn find_task_id_by_request(&self, request_id: &str) -> Result<Option<String>, ProtocolError> {
         let dirs = fs::read_dir(self.root.join("tasks")).map_err(internal)?;
         for ent in dirs.flatten() {
             if let Ok(bytes) = fs::read(ent.path().join("task.json")) {
                 if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                     if v.get("request_id").and_then(|r| r.as_str()) == Some(request_id) {
-                        let id = v.get("task_id").and_then(|i| i.as_str()).unwrap_or("task");
-                        return self.parse_task(&bytes, id).map(Some);
+                        return Ok(v.get("task_id").and_then(|i| i.as_str()).map(str::to_owned));
                     }
                 }
             }
         }
         Ok(None)
+    }
+    fn find_by_request(&self, request_id: &str) -> Result<Option<DurableTask>, ProtocolError> {
+        match self.find_task_id_by_request(request_id)? {
+            Some(id) => self.load(&id).map(Some),
+            None => Ok(None),
+        }
     }
     fn append_event(
         &self,
@@ -2210,6 +3312,30 @@ impl GateEvaluator for FinalEvaluator {
     }
 }
 
+fn visual_action(task: &str, action: &str) -> bool {
+    let text = format!("{task} {action}").to_ascii_lowercase();
+    let terms = [
+        "visual",
+        "user interface",
+        "product interface",
+        "interface design",
+        "web page",
+        "webpage",
+        "web app",
+        "mobile app",
+        "landing page",
+        "website",
+        "dashboard",
+        "screen design",
+        "animated page",
+        "animated landing",
+    ];
+    terms.iter().any(|term| text.contains(term))
+        || text
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == "ui")
+}
+
 fn validate_execute(r: &ExecuteRequest) -> Result<(), ProtocolError> {
     if r.request_id.is_empty() || r.request_id.len() > 200 || r.task.trim().is_empty() {
         return Err(ProtocolError::new(
@@ -2217,8 +3343,149 @@ fn validate_execute(r: &ExecuteRequest) -> Result<(), ProtocolError> {
             "request_id and task are required",
         ));
     }
+    if let Some(key) = &r.recovery_key {
+        if key.len() != 68
+            || !key.starts_with("rrk-")
+            || !key[4..].bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::MalformedRequest,
+                "recovery_key must be caller-generated rrk- plus 64 hex digits (256 bits)",
+            ));
+        }
+    }
+    for (surface, fields) in [
+        ("mobile", &r.mobile_result_fields),
+        ("desktop", &r.desktop_result_fields),
+    ] {
+        if let Some(fields) = fields {
+            if r.ultra || !visual_action(&r.task, "") || fields.is_empty() || fields.len() > 24 {
+                return Err(ProtocolError::new(
+                    ErrorCode::MalformedRequest,
+                    format!(
+                        "{surface} result contract requires a Standard visual task and 1-24 fields"
+                    ),
+                ));
+            }
+            let mut names = BTreeSet::new();
+            for field in fields {
+                if field.name.trim().is_empty()
+                    || field.name.len() > 80
+                    || !names.insert(field.name.as_str())
+                    || !matches!(field.kind.as_str(), "text" | "control" | "list_count")
+                    || (field.kind == "list_count"
+                        && (field.min_count.is_none_or(|n| !(2..=12).contains(&n))
+                            || field.region.as_deref().is_none_or(|r| !valid_region_id(r))))
+                    || (field.kind != "list_count"
+                        && (field.min_count.is_some() || field.region.is_some()))
+                    || !matches!(
+                        field.match_mode.as_deref().unwrap_or("exact"),
+                        "exact" | "contains"
+                    )
+                    || field.min_font_px.is_some_and(|px| !(8..=32).contains(&px))
+                    || (field.kind == "list_count" && !field.alternatives.is_empty())
+                    || (field.kind != "list_count" && field.alternatives.is_empty())
+                    || field.alternatives.len() > 8
+                    || field
+                        .alternatives
+                        .iter()
+                        .any(|v| v.trim().is_empty() || v.len() > 120)
+                {
+                    return Err(ProtocolError::new(
+                        ErrorCode::MalformedRequest,
+                        format!("invalid {surface} result field"),
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(c) = &r.two_state_contract {
+        if let Some(fields) = &c.end_fields {
+            let mut names = BTreeSet::new();
+            if fields.is_empty()
+                || fields.len() > 8
+                || fields.iter().any(|f| {
+                    f.name.trim().is_empty()
+                        || f.name.len() > 80
+                        || f.name == "state_start"
+                        || f.name == "state_end"
+                        || !names.insert(f.name.as_str())
+                        || f.kind != "text"
+                        || f.alternatives.is_empty()
+                        || f.alternatives.len() > 8
+                        || f.alternatives.iter().any(|v| {
+                            v.trim().is_empty()
+                                || v.len() > 120
+                                || (f.match_mode.as_deref().unwrap_or("exact") == "exact"
+                                    && v.split_whitespace()
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                        .eq_ignore_ascii_case(
+                                            &c.end_text
+                                                .split_whitespace()
+                                                .collect::<Vec<_>>()
+                                                .join(" "),
+                                        ))
+                        })
+                        || !matches!(
+                            f.match_mode.as_deref().unwrap_or("exact"),
+                            "exact" | "contains"
+                        )
+                        || f.min_font_px.is_some_and(|px| !(8..=32).contains(&px))
+                        || f.region.is_some()
+                        || f.min_count.is_some()
+                })
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::MalformedRequest,
+                    "invalid two-state end fields: provide 1-8 distinct visible text fields; an exact end field must not duplicate end_text",
+                ));
+            }
+        }
+        if r.ultra
+            || !visual_action(&r.task, "")
+            || !matches!(c.viewport.as_str(), "mobile390" | "desktop")
+            || !valid_region_id(&c.control)
+            || !(8..=32).contains(&c.min_font_px)
+            || c.start_text.trim().is_empty()
+            || c.end_text.trim().is_empty()
+            || c.start_text.len() > 120
+            || c.end_text.len() > 120
+            || c.reverse_text.as_ref().is_some_and(|v| {
+                v.trim().is_empty()
+                    || v.len() > 120
+                    || v.split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .eq_ignore_ascii_case(
+                            &c.end_text.split_whitespace().collect::<Vec<_>>().join(" "),
+                        )
+            })
+            || c.start_text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .eq_ignore_ascii_case(&c.end_text.split_whitespace().collect::<Vec<_>>().join(" "))
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::MalformedRequest,
+                "invalid two-state contract",
+            ));
+        }
+    }
     Ok(())
 }
+fn valid_region_id(region: &str) -> bool {
+    let Some(id) = region.strip_prefix('#') else {
+        return false;
+    };
+    (1..=80).contains(&id.len())
+        && id.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn capability_set(workspace: &Path) -> CapabilitySet {
     CapabilitySet {
         workspace_root: workspace.to_path_buf(),
@@ -2431,6 +3698,9 @@ fn request_hash(r: &ExecuteRequest) -> Result<String, ProtocolError> {
     // change the request hash or every resume would look like a conflict.
     let mut normalized = r.clone();
     normalized.resume_handle = None;
+    // The optional recovery key is separately hashed in durable state, never
+    // embedded in the request identity (which remains readable as a digest).
+    normalized.recovery_key = None;
     hash_json(&normalized)
 }
 fn hash_json<T: Serialize>(v: &T) -> Result<String, ProtocolError> {
@@ -2439,52 +3709,62 @@ fn hash_json<T: Serialize>(v: &T) -> Result<String, ProtocolError> {
 }
 fn atomic_json<T: Serialize>(path: &Path, v: &T) -> Result<(), ProtocolError> {
     let bytes = serde_json::to_vec_pretty(v).map_err(internal)?;
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes).map_err(internal)?;
-    fs::rename(tmp, path).map_err(internal)
+    let tmp = path.with_extension(format!("{}.tmp", random_hex(8)?));
+    let written = fs::write(&tmp, bytes).and_then(|()| fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written.map_err(internal)
 }
 /// Load or create the daemon's human-stop token. The token file is the
 /// human authority boundary: only the trusted local launcher can read a
 /// 0600 file in the daemon state dir; a remote MCP host cannot mint one.
 fn load_or_create_human_token(root: &Path) -> Result<String, ProtocolError> {
-    let path = root.join("human-stop-token");
-    if let Ok(existing) = fs::read_to_string(&path) {
-        let trimmed = existing.trim();
-        if !trimmed.is_empty() {
-            return Ok(hex_sha256(trimmed.as_bytes()));
-        }
-    }
-    let token = format!("hst-{}", random_hex(32));
-    {
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&path).map_err(internal)?;
-        f.write_all(token.as_bytes()).map_err(internal)?;
-        f.sync_all().map_err(internal)?;
-    }
+    let token = load_or_create_secret(&root.join("human-stop-token"), "hst-")?;
     Ok(hex_sha256(token.as_bytes()))
 }
 
-/// Load or create the daemon-held proof-bundle MAC key. Same authority
-/// boundary as the human-stop token: a 0600 file in the daemon state dir a
-/// remote MCP host cannot read, so it cannot mint a valid bundle MAC.
+/// Load or create the daemon-held proof-bundle MAC key under the same
+/// atomic publication and first-writer serialization as the Stop token.
 fn load_or_create_proof_key(root: &Path) -> Result<String, ProtocolError> {
     let dir = root.join("proofs");
     fs::create_dir_all(&dir).map_err(internal)?;
-    let path = dir.join("hmac-key");
-    if let Ok(existing) = fs::read_to_string(&path) {
-        let trimmed = existing.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-    let key = format!("prk-{}", random_hex(32));
+    load_or_create_secret(&dir.join("hmac-key"), "prk-")
+}
+
+/// All readers take a stable sidecar lock. Never publish a partially
+/// written authority key, and never replace a corrupt existing key.
+fn load_or_create_secret(path: &Path, prefix: &str) -> Result<String, ProtocolError> {
+    let mut lock_opts = OpenOptions::new();
+    lock_opts.write(true).create(true);
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        lock_opts.mode(0o600);
+    }
+    let lock = lock_opts
+        .open(path.with_extension("lock"))
+        .map_err(internal)?;
+    lock.lock().map_err(internal)?;
+    match fs::read_to_string(path) {
+        Ok(existing) => {
+            let key = existing.trim();
+            if key
+                .strip_prefix(prefix)
+                .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
+                return Ok(key.to_string());
+            }
+            return Err(internal(
+                "invalid durable authority key; refusing replacement",
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(internal(e)),
+    }
+    let key = format!("{prefix}{}", random_hex(32)?);
+    let tmp = path.with_extension(format!("{}.tmp", random_hex(16)?));
+    let written = (|| -> std::io::Result<()> {
         let mut opts = OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
@@ -2492,11 +3772,38 @@ fn load_or_create_proof_key(root: &Path) -> Result<String, ProtocolError> {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut f = opts.open(&path).map_err(internal)?;
-        f.write_all(key.as_bytes()).map_err(internal)?;
-        f.sync_all().map_err(internal)?;
+        let mut file = opts.open(&tmp)?;
+        file.write_all(key.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
+        // Persist the directory entry as well as the key bytes.
+        fs::File::open(path.parent().expect("authority key has parent"))?.sync_all()?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
+    written.map_err(internal)?;
     Ok(key)
+}
+
+fn lock_task_at(root: &Path, id: &str) -> Result<std::fs::File, ProtocolError> {
+    if !safe_id(id) {
+        return Err(ProtocolError::new(
+            ErrorCode::MalformedRequest,
+            "invalid task id",
+        ));
+    }
+    let dir = root.join("tasks").join(id);
+    fs::create_dir_all(&dir).map_err(internal)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("task.lock"))
+        .map_err(internal)?;
+    file.lock().map_err(internal)?;
+    Ok(file)
 }
 
 fn safe_id(s: &str) -> bool {
@@ -2511,8 +3818,8 @@ fn now_ms() -> u128 {
         .unwrap_or_default()
         .as_millis()
 }
-fn random_id() -> String {
-    random_hex(8)
+fn random_id() -> Result<String, ProtocolError> {
+    random_hex(8).map_err(internal)
 }
 fn elapsed(t: &DurableTask) -> u64 {
     now_ms().saturating_sub(t.created_ms) as u64
@@ -2544,6 +3851,9 @@ fn host_label(h: HostKind) -> &'static str {
     match h {
         HostKind::Human => "human-ui",
         HostKind::ClaudeCode => "claude-code",
+        HostKind::Codex => "codex",
+        HostKind::OpenCode => "opencode",
+        HostKind::Hermes => "hermes",
         HostKind::Antigravity => "antigravity",
         HostKind::GenericAgent => "generic-mcp",
     }
@@ -2603,8 +3913,12 @@ mod tests {
         ExecuteRequest {
             request_id: id.into(),
             task: "make hello".into(),
+            mobile_result_fields: None,
+            desktop_result_fields: None,
+            two_state_contract: None,
             task_id: None,
             resume_handle: None,
+            recovery_key: None,
             follow_up: None,
             host: HostKind::ClaudeCode,
             operator_is_agent: true,
@@ -2661,12 +3975,215 @@ mod tests {
         assert_eq!(e.code, ErrorCode::VersionMismatch);
     }
     #[test]
+    fn parallel_hosts_cannot_duplicate_a_request_id() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let root = d.path().join("state");
+        let a = Arc::new(HarnessDaemon::open(&root, DaemonPolicy::conservative(&w)).unwrap());
+        let b = Arc::new(HarnessDaemon::open(&root, DaemonPolicy::conservative(&w)).unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = [a, b]
+            .into_iter()
+            .map(|daemon| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    daemon.dispatch(
+                        ToolName::Execute,
+                        serde_json::to_value(req("same-request")).unwrap(),
+                    )
+                })
+            })
+            .collect();
+        let mut created = 0;
+        for thread in threads {
+            match thread.join().unwrap() {
+                Ok(_) => created += 1,
+                Err(error) => assert!(
+                    matches!(error.code, ErrorCode::ScopeDenied | ErrorCode::Unauthorized),
+                    "{error:?}"
+                ),
+            }
+        }
+        assert_eq!(created, 1, "only one host may mint this request id");
+        let task_count = fs::read_dir(root.join("tasks"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().join("task.json").exists())
+            .count();
+        assert_eq!(task_count, 1);
+        CustodyRegistry::open(root.join("custody")).unwrap();
+    }
+
+    #[test]
+    fn parallel_hosts_serialize_task_events_and_heartbeats() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let root = d.path().join("state");
+        let a = Arc::new(HarnessDaemon::open(&root, DaemonPolicy::conservative(&w)).unwrap());
+        let b = Arc::new(HarnessDaemon::open(&root, DaemonPolicy::conservative(&w)).unwrap());
+        let ex = a
+            .dispatch(
+                ToolName::Execute,
+                serde_json::to_value(req("next-race")).unwrap(),
+            )
+            .unwrap();
+        let id = ex["task_id"].as_str().unwrap().to_owned();
+        let cap = ex["task_capability"].as_str().unwrap().to_owned();
+        let epoch = ex["lease"]["epoch"].as_u64().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = [a, b]
+            .into_iter()
+            .map(|daemon| {
+                let barrier = Arc::clone(&barrier);
+                let id = id.clone();
+                let cap = cap.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    daemon.dispatch(
+                        ToolName::Next,
+                        json!({"task_id":id,"capability":cap,"lease_epoch":epoch}),
+                    )
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        let task: Value = serde_json::from_slice(
+            &fs::read(root.join("tasks").join(&id).join("task.json")).unwrap(),
+        )
+        .unwrap();
+        let reg = CustodyRegistry::open(root.join("custody")).unwrap();
+        let grant = reg.grant(task["grant_id"].as_str().unwrap()).unwrap();
+        assert_eq!(task["heartbeat_seq"].as_u64(), Some(grant.lease.next_seq));
+        assert_eq!(
+            grant.lease.next_seq, 3,
+            "initial sequence plus two serial heartbeats"
+        );
+        CustodyRegistry::open(root.join("custody"))
+            .unwrap()
+            .audit_chain(&grant.grant_id)
+            .unwrap();
+    }
+
+    #[test]
+    fn parallel_stop_and_next_leave_terminal_task_and_released_grant() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let root = d.path().join("state");
+        let a = Arc::new(HarnessDaemon::open(&root, DaemonPolicy::conservative(&w)).unwrap());
+        let b = Arc::new(HarnessDaemon::open(&root, DaemonPolicy::conservative(&w)).unwrap());
+        let ex = a
+            .dispatch(
+                ToolName::Execute,
+                serde_json::to_value(req("stop-race")).unwrap(),
+            )
+            .unwrap();
+        let id = ex["task_id"].as_str().unwrap().to_owned();
+        let cap = ex["task_capability"].as_str().unwrap().to_owned();
+        let epoch = ex["lease"]["epoch"].as_u64().unwrap();
+        let token = fs::read_to_string(root.join("human-stop-token")).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let b1 = Arc::clone(&barrier);
+        let id1 = id.clone();
+        let next = std::thread::spawn(move || {
+            b1.wait();
+            a.dispatch(
+                ToolName::Next,
+                json!({"task_id":id1,"capability":cap,"lease_epoch":epoch}),
+            )
+        });
+        let b2 = Arc::clone(&barrier);
+        let id2 = id.clone();
+        let stop = std::thread::spawn(move || {
+            b2.wait();
+            b.dispatch(
+                ToolName::HumanStop,
+                json!({"task_id":id2,"human_token":token,"reason":"stop"}),
+            )
+        });
+        let _ = next.join().unwrap();
+        stop.join().unwrap().unwrap();
+        let task: Value = serde_json::from_slice(
+            &fs::read(root.join("tasks").join(&id).join("task.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(task["state"], "cancelled");
+        let reg = CustodyRegistry::open(root.join("custody")).unwrap();
+        assert_eq!(
+            reg.grant(task["grant_id"].as_str().unwrap()).unwrap().phase,
+            rex_custody::CustodyPhase::Released
+        );
+        let events: Vec<_> = fs::read_to_string(root.join("tasks").join(&id).join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect();
+        assert_eq!(events.last().unwrap()["kind"], "human_stop");
+    }
+
+    #[test]
+    fn replay_by_request_and_explicit_task_id_cannot_both_rotate() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let root = d.path().join("state");
+        let a = Arc::new(HarnessDaemon::open(&root, DaemonPolicy::conservative(&w)).unwrap());
+        let b = Arc::new(HarnessDaemon::open(&root, DaemonPolicy::conservative(&w)).unwrap());
+        let ex = a
+            .dispatch(
+                ToolName::Execute,
+                serde_json::to_value(req("replay-race")).unwrap(),
+            )
+            .unwrap();
+        let id = ex["task_id"].as_str().unwrap().to_string();
+        let handle = ex["host_resume_handle"].as_str().unwrap().to_string();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = [(a, None), (b, Some(id.clone()))]
+            .into_iter()
+            .map(|(daemon, task_id)| {
+                let barrier = Arc::clone(&barrier);
+                let handle = handle.clone();
+                std::thread::spawn(move || {
+                    let mut replay = req("replay-race");
+                    replay.task_id = task_id;
+                    replay.resume_handle = Some(handle);
+                    barrier.wait();
+                    daemon.dispatch(ToolName::Execute, serde_json::to_value(replay).unwrap())
+                })
+            })
+            .collect();
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "{results:?}"
+        );
+        let task: Value = serde_json::from_slice(
+            &fs::read(root.join("tasks").join(id).join("task.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(task["last_event_seq"].as_u64(), Some(1));
+    }
+
+    #[test]
     fn idempotency_and_recovery() {
         let d = tempdir().unwrap();
         let w = d.path().join("ws");
         let root = d.path().join("state");
         let daemon = HarnessDaemon::open(&root, DaemonPolicy::conservative(&w)).unwrap();
         let a = daemon.execute(req("r1")).unwrap();
+        let mut missing_plan = req("r1");
+        missing_plan.plan = None;
+        missing_plan.resume_handle = a.host_resume_handle.clone();
+        let mismatch = daemon.execute(missing_plan).unwrap_err();
+        assert_eq!(mismatch.code, ErrorCode::IdempotencyConflict);
+        assert!(mismatch.message.contains("identical full creation payload"));
+        assert!(mismatch.message.contains("plan"));
+        assert!(mismatch.message.contains("task_id"));
         let mut replay = req("r1");
         replay.resume_handle = a.host_resume_handle.clone();
         let b = daemon.execute(replay).unwrap();
@@ -2917,6 +4434,1200 @@ mod tests {
             writer.write_image_data(&rgb).unwrap();
         }
         out
+    }
+
+    #[test]
+    fn visual_run_cannot_bypass_critique_and_nonvisual_build_remains_available() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let daemon =
+            HarnessDaemon::open(d.path().join("state"), DaemonPolicy::conservative(&w)).unwrap();
+        let mut visual = req("visual-run-critique");
+        visual.ultra = false;
+        visual.task = "Build a visual UI page".into();
+        let ex = daemon.execute(visual).unwrap();
+        let run = RunRequest {
+            task_id: ex.task_id.clone(),
+            capability: cap_of(&ex),
+            lease_epoch: ex.lease.epoch,
+            argv: vec!["cargo".into(), "--version".into()],
+            timeout_ms: Some(5000),
+        };
+        assert_eq!(
+            daemon.run(run.clone()).unwrap_err().code,
+            ErrorCode::GateFailed
+        );
+        let mut invalid_list = req("invalid-list-region");
+        invalid_list.ultra = false;
+        invalid_list.task = "Build a landing page".into();
+        invalid_list.desktop_result_fields = Some(vec![MobileResultField {
+            name: "moves".into(),
+            alternatives: vec![],
+            kind: "list_count".into(),
+            match_mode: None,
+            min_font_px: Some(14),
+            region: Some("body .moves".into()),
+            min_count: Some(3),
+        }]);
+        assert_eq!(
+            daemon.execute(invalid_list).unwrap_err().code,
+            ErrorCode::MalformedRequest
+        );
+        daemon
+            .critique_prompt(&ex.task_id, &cap_of(&ex), ex.lease.epoch)
+            .unwrap();
+        assert_eq!(
+            daemon.run(run.clone()).unwrap_err().code,
+            ErrorCode::GateFailed
+        );
+        daemon.critique_record(&ex.task_id,&cap_of(&ex),ex.lease.epoch,
+            &ex.next.as_ref().unwrap().action_id,
+            "The build command may pass while the UI remains white, cropped, inaccessible or inert. Check rendered desktop/mobile pixels and keyboard states before claiming success.").unwrap();
+        // The actual command may be denied by conservative launcher policy; the
+        // important boundary is that critique no longer blocks its dispatch.
+        assert_ne!(daemon.run(run).unwrap_err().code, ErrorCode::GateFailed);
+        let mut plain = req("plain-run");
+        plain.ultra = false;
+        plain.task = "Inspect source files".into();
+        let other = daemon.execute(plain).unwrap();
+        let ordinary = RunRequest {
+            task_id: other.task_id.clone(),
+            capability: cap_of(&other),
+            lease_epoch: other.lease.epoch,
+            argv: vec!["cargo".into(), "--version".into()],
+            timeout_ms: Some(5000),
+        };
+        assert_ne!(
+            daemon.run(ordinary).unwrap_err().code,
+            ErrorCode::GateFailed
+        );
+    }
+
+    #[test]
+    fn critique_gate_is_bound_to_action_and_cannot_be_skipped() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let daemon =
+            HarnessDaemon::open(d.path().join("state"), DaemonPolicy::conservative(&w)).unwrap();
+        let mut r = req("critique-gate");
+        r.ultra = false;
+        r.plan = Some(vec![
+            PlanStep {
+                instructions: "first".into(),
+                acceptance: None,
+            },
+            PlanStep {
+                instructions: "second".into(),
+                acceptance: None,
+            },
+        ]);
+        let ex = daemon.execute(r).unwrap();
+        let cap = cap_of(&ex);
+        let first = ex.next.as_ref().unwrap().action_id.clone();
+        assert_eq!(
+            daemon
+                .require_critique(&ex.task_id, &cap, ex.lease.epoch)
+                .unwrap_err()
+                .code,
+            ErrorCode::GateFailed
+        );
+        let issued = daemon
+            .critique_prompt(&ex.task_id, &cap, ex.lease.epoch)
+            .unwrap();
+        assert_eq!(issued["action_id"], first);
+        assert_eq!(
+            daemon
+                .require_critique(&ex.task_id, &cap, ex.lease.epoch)
+                .unwrap_err()
+                .code,
+            ErrorCode::GateFailed
+        );
+        daemon.critique_record(&ex.task_id,&cap,ex.lease.epoch,&first,
+            "The source is untested and may not satisfy the brief. Try malformed input, a narrow viewport, keyboard use and failure recovery before accepting this action.").unwrap();
+        daemon
+            .require_critique(&ex.task_id, &cap, ex.lease.epoch)
+            .unwrap();
+        fs::write(w.join("proof.txt"), "a").unwrap();
+        let receipt = daemon
+            .read(ReadRequest {
+                task_id: ex.task_id.clone(),
+                capability: cap.clone(),
+                lease_epoch: ex.lease.epoch,
+                path: "proof.txt".into(),
+                byte_range: None,
+            })
+            .unwrap()
+            .receipt
+            .unwrap();
+        let next = daemon
+            .submit(SubmitRequest {
+                task_id: ex.task_id.clone(),
+                capability: cap.clone(),
+                lease_epoch: ex.lease.epoch,
+                action_id: first,
+                narrative: "First action inspected".into(),
+                evidence: [("read".into(), receipt.clone())].into(),
+            })
+            .unwrap();
+        let second = next.next.unwrap().action_id;
+        assert_eq!(
+            daemon
+                .require_critique(&ex.task_id, &cap, ex.lease.epoch)
+                .unwrap_err()
+                .code,
+            ErrorCode::GateFailed
+        );
+        let rejected = daemon
+            .submit(SubmitRequest {
+                task_id: ex.task_id.clone(),
+                capability: cap.clone(),
+                lease_epoch: ex.lease.epoch,
+                action_id: second.clone(),
+                narrative: "Second without critique".into(),
+                evidence: [("read".into(), receipt)].into(),
+            })
+            .unwrap_err();
+        assert_eq!(rejected.code, ErrorCode::GateFailed);
+        assert_eq!(
+            daemon
+                .status(TaskRefRequest {
+                    task_id: ex.task_id
+                })
+                .unwrap()
+                .open_action
+                .unwrap()
+                .action_id,
+            second
+        );
+    }
+
+    #[test]
+    fn frozen_mobile_contract_rejects_missing_fields_and_resume_changes() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let daemon =
+            HarnessDaemon::open(d.path().join("state"), DaemonPolicy::conservative(&w)).unwrap();
+        let mut r = req("mobile-result-contract");
+        r.ultra = false;
+        r.task = "Build a landing page".into();
+        r.mobile_result_fields = Some(vec![MobileResultField {
+            name: "movement".into(),
+            alternatives: vec!["Chair squat".into()],
+            kind: "text".into(),
+            match_mode: None,
+            min_font_px: None,
+            region: None,
+            min_count: None,
+        }]);
+        r.plan = Some(vec![PlanStep {
+            instructions: "Build landing page".into(),
+            acceptance: None,
+        }]);
+        let ex = daemon.execute(r).unwrap();
+        let action_id = ex.next.as_ref().unwrap().action_id.clone();
+        assert_eq!(
+            daemon
+                .result_fields(
+                    &ex.task_id,
+                    &cap_of(&ex),
+                    ex.lease.epoch,
+                    "render.mobile390.first"
+                )
+                .unwrap()
+                .unwrap()[0]
+                .name,
+            "movement"
+        );
+        let mut changed = req("mobile-result-contract");
+        changed.ultra = false;
+        changed.task = "Build a landing page".into();
+        changed.task_id = Some(ex.task_id.clone());
+        changed.resume_handle = ex.host_resume_handle.clone();
+        changed.mobile_result_fields = Some(vec![MobileResultField {
+            name: "category".into(),
+            alternatives: vec!["Full-body basics".into()],
+            kind: "text".into(),
+            match_mode: None,
+            min_font_px: None,
+            region: None,
+            min_count: None,
+        }]);
+        assert_eq!(
+            daemon.execute(changed).unwrap_err().code,
+            ErrorCode::IdempotencyConflict
+        );
+        let mut invalid = req("invalid-match-mode");
+        invalid.ultra = false;
+        invalid.task = "Build a landing page".into();
+        invalid.mobile_result_fields = Some(vec![MobileResultField {
+            name: "ordered".into(),
+            alternatives: vec!["12".into()],
+            kind: "text".into(),
+            match_mode: Some("regex".into()),
+            min_font_px: None,
+            region: None,
+            min_count: None,
+        }]);
+        assert_eq!(
+            daemon.execute(invalid).unwrap_err().code,
+            ErrorCode::MalformedRequest
+        );
+        let mut invalid_font = req("invalid-font-size");
+        invalid_font.ultra = false;
+        invalid_font.task = "Build a landing page".into();
+        invalid_font.desktop_result_fields = Some(vec![MobileResultField {
+            name: "source".into(),
+            alternatives: vec!["12".into()],
+            kind: "text".into(),
+            match_mode: Some("contains".into()),
+            min_font_px: Some(7),
+            region: None,
+            min_count: None,
+        }]);
+        assert_eq!(
+            daemon.execute(invalid_font).unwrap_err().code,
+            ErrorCode::MalformedRequest
+        );
+        daemon
+            .critique_prompt(&ex.task_id, &cap_of(&ex), ex.lease.epoch)
+            .unwrap();
+        daemon.critique_record(&ex.task_id, &cap_of(&ex), ex.lease.epoch, &action_id,
+            "A category-only result must not satisfy the frozen movement contract; test missing and present fields.").unwrap();
+        let keys = [
+            "render.desktop.first",
+            "render.mobile390.first",
+            "render.state.start",
+            "render.state.mid",
+            "render.state.end",
+            "render.state.reverse",
+        ];
+        let mut evidence = BTreeMap::new();
+        for (i, key) in keys.iter().enumerate() {
+            let (width, height) = if i == 1 { (390, 650) } else { (1024, 768) };
+            let png = make_png(width, height, |x, y| {
+                [((x + i as u32) % 255) as u8, (y % 255) as u8, 33]
+            });
+            let artifact = daemon
+                .artifact_put(ArtifactPutRequest {
+                    task_id: ex.task_id.clone(),
+                    capability: cap_of(&ex),
+                    lease_epoch: ex.lease.epoch,
+                    kind: (*key).into(),
+                    bytes_base64: B64.encode(&png),
+                    candidate_id: None,
+                    round: None,
+                })
+                .unwrap();
+            daemon
+                .bind_preview_source(
+                    &ex.task_id,
+                    &cap_of(&ex),
+                    ex.lease.epoch,
+                    &artifact.sha256,
+                    &"a".repeat(64),
+                )
+                .unwrap();
+            evidence.insert((*key).into(), artifact.sha256);
+        }
+        let submit = |evidence| SubmitRequest {
+            task_id: ex.task_id.clone(),
+            capability: cap_of(&ex),
+            lease_epoch: ex.lease.epoch,
+            action_id: action_id.clone(),
+            narrative: "Rendered study".into(),
+            evidence,
+        };
+        let denied = daemon.submit(submit(evidence.clone())).unwrap();
+        assert!(!denied.accepted);
+        assert!(denied.repair.unwrap().contains("movement"));
+        let mobile = &evidence["render.mobile390.first"];
+        let forged = daemon.bind_mobile_fields(
+            &ex.task_id,
+            &cap_of(&ex),
+            ex.lease.epoch,
+            &evidence["render.desktop.first"],
+            vec!["movement".into()],
+            "render.mobile390.first",
+        );
+        assert_eq!(forged.unwrap_err().code, ErrorCode::GateFailed);
+        daemon
+            .bind_mobile_fields(
+                &ex.task_id,
+                &cap_of(&ex),
+                ex.lease.epoch,
+                mobile,
+                vec![],
+                "render.mobile390.first",
+            )
+            .unwrap();
+        assert!(!daemon.submit(submit(evidence.clone())).unwrap().accepted);
+        assert_eq!(
+            daemon
+                .bind_mobile_fields(
+                    &ex.task_id,
+                    &cap_of(&ex),
+                    ex.lease.epoch,
+                    mobile,
+                    vec!["movement".into()],
+                    "render.mobile390.first"
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+        // A fresh captured pixel digest with a matching first-party observation advances.
+        let png = make_png(390, 650, |x, y| {
+            [((x + 19) % 255) as u8, (y % 255) as u8, 33]
+        });
+        let artifact = daemon
+            .artifact_put(ArtifactPutRequest {
+                task_id: ex.task_id.clone(),
+                capability: cap_of(&ex),
+                lease_epoch: ex.lease.epoch,
+                kind: "render.mobile390.first".into(),
+                bytes_base64: B64.encode(&png),
+                candidate_id: None,
+                round: None,
+            })
+            .unwrap();
+        daemon
+            .bind_preview_source(
+                &ex.task_id,
+                &cap_of(&ex),
+                ex.lease.epoch,
+                &artifact.sha256,
+                &"a".repeat(64),
+            )
+            .unwrap();
+        daemon
+            .bind_mobile_fields(
+                &ex.task_id,
+                &cap_of(&ex),
+                ex.lease.epoch,
+                &artifact.sha256,
+                vec!["movement".into()],
+                "render.mobile390.first",
+            )
+            .unwrap();
+        evidence.insert("render.mobile390.first".into(), artifact.sha256);
+        assert!(daemon.submit(submit(evidence)).unwrap().accepted);
+    }
+
+    #[test]
+    fn two_state_contract_rejects_missing_trace_and_forged_order() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let daemon =
+            HarnessDaemon::open(d.path().join("state"), DaemonPolicy::conservative(&w)).unwrap();
+        let mut r = req("two-state-contract");
+        r.ultra = false;
+        r.task = "Build a landing page".into();
+        r.two_state_contract = Some(TwoStateContract {
+            viewport: "mobile390".into(),
+            control: "#change".into(),
+            start_text: "Example A".into(),
+            end_text: "Example B".into(),
+            reverse_text: None,
+            min_font_px: 14,
+            end_fields: Some(vec![MobileResultField {
+                name: "order_unchanged".into(),
+                alternatives: vec!["Order unchanged".into()],
+                kind: "text".into(),
+                match_mode: None,
+                min_font_px: Some(14),
+                region: None,
+                min_count: None,
+            }]),
+        });
+        let ex = daemon.execute(r).unwrap();
+        let cap = cap_of(&ex);
+        let action = ex.next.as_ref().unwrap().action_id.clone();
+        let mut bad_fields = req("bad-two-state-end-fields");
+        bad_fields.ultra = false;
+        bad_fields.task = "Build a landing page".into();
+        bad_fields.two_state_contract = Some(TwoStateContract {
+            viewport: "mobile390".into(),
+            control: "#change".into(),
+            start_text: "Example A".into(),
+            end_text: "Example B".into(),
+            reverse_text: None,
+            min_font_px: 14,
+            end_fields: Some(vec![MobileResultField {
+                name: "state_end".into(),
+                alternatives: vec!["false field".into()],
+                kind: "text".into(),
+                match_mode: None,
+                min_font_px: None,
+                region: None,
+                min_count: None,
+            }]),
+        });
+        assert_eq!(
+            daemon.execute(bad_fields).unwrap_err().code,
+            ErrorCode::MalformedRequest
+        );
+        let mut duplicate = req("duplicate-two-state-end-text");
+        duplicate.ultra = false;
+        duplicate.task = "Build a landing page".into();
+        duplicate.two_state_contract = Some(TwoStateContract {
+            viewport: "mobile390".into(),
+            control: "#change".into(),
+            start_text: "Awaiting review".into(),
+            end_text: "Rejected, order unchanged".into(),
+            reverse_text: None,
+            min_font_px: 14,
+            end_fields: Some(vec![MobileResultField {
+                name: "duplicate_outcome".into(),
+                alternatives: vec![" Rejected,   order unchanged ".into()],
+                kind: "text".into(),
+                match_mode: None,
+                min_font_px: Some(14),
+                region: None,
+                min_count: None,
+            }]),
+        });
+        let error = daemon.execute(duplicate).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+        assert!(error.message.contains("duplicate end_text"));
+        let mut changed = req("two-state-contract");
+        changed.ultra = false;
+        changed.task = "Build a landing page".into();
+        changed.task_id = Some(ex.task_id.clone());
+        changed.resume_handle = ex.host_resume_handle.clone();
+        changed.two_state_contract = Some(TwoStateContract {
+            viewport: "mobile390".into(),
+            control: "#other".into(),
+            start_text: "Example A".into(),
+            end_text: "Example B".into(),
+            reverse_text: None,
+            min_font_px: 14,
+            end_fields: None,
+        });
+        assert_eq!(
+            daemon.execute(changed).unwrap_err().code,
+            ErrorCode::IdempotencyConflict
+        );
+        for (id, control, start, end) in [
+            ("bad-selector", "body .change", "A", "B"),
+            ("same-text", "#change", "A", " a "),
+        ] {
+            let mut invalid = req(id);
+            invalid.ultra = false;
+            invalid.task = "Build a landing page".into();
+            invalid.two_state_contract = Some(TwoStateContract {
+                viewport: "mobile390".into(),
+                control: control.into(),
+                start_text: start.into(),
+                end_text: end.into(),
+                reverse_text: None,
+                min_font_px: 14,
+                end_fields: None,
+            });
+            assert_eq!(
+                daemon.execute(invalid).unwrap_err().code,
+                ErrorCode::MalformedRequest
+            );
+        }
+        daemon
+            .critique_prompt(&ex.task_id, &cap, ex.lease.epoch)
+            .unwrap();
+        daemon.critique_record(&ex.task_id,&cap,ex.lease.epoch,&action,
+            "A click trace must link a visible start and changed visible end in one preview at one source revision.").unwrap();
+        let mut evidence = BTreeMap::new();
+        for (i, key) in [
+            "render.desktop.first",
+            "render.mobile390.first",
+            "render.state.start",
+            "render.state.mid",
+            "render.state.end",
+            "render.state.reverse",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let (width, height) = if i == 1 || i == 2 || i == 4 {
+                (390, 650)
+            } else {
+                (1280, 800)
+            };
+            let png = make_png(width, height, |x, y| {
+                [((x + i as u32) % 255) as u8, (y % 255) as u8, 33]
+            });
+            let artifact = daemon
+                .artifact_put(ArtifactPutRequest {
+                    task_id: ex.task_id.clone(),
+                    capability: cap.clone(),
+                    lease_epoch: ex.lease.epoch,
+                    kind: (*key).into(),
+                    bytes_base64: B64.encode(&png),
+                    candidate_id: None,
+                    round: None,
+                })
+                .unwrap();
+            daemon
+                .bind_preview_source(
+                    &ex.task_id,
+                    &cap,
+                    ex.lease.epoch,
+                    &artifact.sha256,
+                    &"a".repeat(64),
+                )
+                .unwrap();
+            evidence.insert((*key).into(), artifact.sha256);
+        }
+        let submit = |evidence| SubmitRequest {
+            task_id: ex.task_id.clone(),
+            capability: cap.clone(),
+            lease_epoch: ex.lease.epoch,
+            action_id: action.clone(),
+            narrative: "Two states".into(),
+            evidence,
+        };
+        let denied = daemon.submit(submit(evidence.clone())).unwrap();
+        assert!(!denied.accepted);
+        assert!(denied.repair.unwrap().contains("two-state contract"));
+        let start = &evidence["render.state.start"];
+        let end = &evidence["render.state.end"];
+        assert_eq!(
+            daemon
+                .require_state_start(&ex.task_id, &cap, ex.lease.epoch, "preview-a")
+                .unwrap_err()
+                .code,
+            ErrorCode::GateFailed
+        );
+        assert_eq!(
+            daemon
+                .record_state_step(
+                    &ex.task_id,
+                    &cap,
+                    ex.lease.epoch,
+                    "preview-a",
+                    "start",
+                    Some(start),
+                    Some(&"a".repeat(64)),
+                    &[]
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::GateFailed
+        );
+        daemon
+            .record_state_step(
+                &ex.task_id,
+                &cap,
+                ex.lease.epoch,
+                "preview-a",
+                "start",
+                Some(start),
+                Some(&"a".repeat(64)),
+                &["state_start".into()],
+            )
+            .unwrap();
+        assert_eq!(
+            daemon
+                .record_state_step(
+                    &ex.task_id,
+                    &cap,
+                    ex.lease.epoch,
+                    "preview-b",
+                    "activate",
+                    None,
+                    None,
+                    &[]
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::GateFailed
+        );
+        daemon
+            .record_state_step(
+                &ex.task_id,
+                &cap,
+                ex.lease.epoch,
+                "preview-a",
+                "activate",
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            daemon
+                .record_state_step(
+                    &ex.task_id,
+                    &cap,
+                    ex.lease.epoch,
+                    "preview-a",
+                    "end",
+                    Some(end),
+                    Some(&"a".repeat(64)),
+                    &[]
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::GateFailed
+        );
+        assert!(!daemon.submit(submit(evidence.clone())).unwrap().accepted);
+        let missing = daemon
+            .record_state_step(
+                &ex.task_id,
+                &cap,
+                ex.lease.epoch,
+                "preview-a",
+                "end",
+                Some(end),
+                Some(&"a".repeat(64)),
+                &["state_end".into()],
+            )
+            .unwrap_err();
+        assert_eq!(missing.code, ErrorCode::GateFailed);
+        assert!(missing.message.contains("order_unchanged"));
+        daemon
+            .record_state_step(
+                &ex.task_id,
+                &cap,
+                ex.lease.epoch,
+                "preview-a",
+                "end",
+                Some(end),
+                Some(&"a".repeat(64)),
+                &["state_end".into(), "order_unchanged".into()],
+            )
+            .unwrap();
+        let mut swapped = evidence.clone();
+        swapped.insert("render.state.end".into(), start.clone());
+        assert!(!daemon.submit(submit(swapped)).unwrap().accepted);
+        assert!(daemon.submit(submit(evidence)).unwrap().accepted);
+    }
+
+    #[test]
+    fn desktop_result_contract_is_frozen_and_rejects_missing_first_view() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let daemon =
+            HarnessDaemon::open(d.path().join("state"), DaemonPolicy::conservative(&w)).unwrap();
+        let mut r = req("desktop-result-contract");
+        r.ultra = false;
+        r.task = "Build a landing page".into();
+        r.desktop_result_fields = Some(vec![MobileResultField {
+            name: "source".into(),
+            alternatives: vec!["12".into()],
+            kind: "text".into(),
+            match_mode: Some("contains".into()),
+            min_font_px: Some(14),
+            region: None,
+            min_count: None,
+        }]);
+        let ex = daemon.execute(r).unwrap();
+        let cap = cap_of(&ex);
+        let action = ex.next.as_ref().unwrap().action_id.clone();
+        let mut changed = req("desktop-result-contract");
+        changed.ultra = false;
+        changed.task = "Build a landing page".into();
+        changed.task_id = Some(ex.task_id.clone());
+        changed.resume_handle = ex.host_resume_handle.clone();
+        changed.desktop_result_fields = Some(vec![MobileResultField {
+            name: "other".into(),
+            alternatives: vec!["10".into()],
+            kind: "text".into(),
+            match_mode: Some("contains".into()),
+            min_font_px: Some(14),
+            region: None,
+            min_count: None,
+        }]);
+        assert_eq!(
+            daemon.execute(changed).unwrap_err().code,
+            ErrorCode::IdempotencyConflict
+        );
+        daemon
+            .critique_prompt(&ex.task_id, &cap, ex.lease.epoch)
+            .unwrap();
+        daemon.critique_record(&ex.task_id, &cap, ex.lease.epoch, &action,
+            "Check desktop result visibility and refuse empty field observations even when six render captures exist.").unwrap();
+        let mut evidence = BTreeMap::new();
+        for (i, kind) in [
+            "render.desktop.first",
+            "render.mobile390.first",
+            "render.state.start",
+            "render.state.mid",
+            "render.state.end",
+            "render.state.reverse",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let (width, height) = if i == 1 { (390, 650) } else { (1280, 800) };
+            let png = make_png(width, height, |x, y| {
+                [((x + i as u32) % 255) as u8, (y % 255) as u8, 33]
+            });
+            let artifact = daemon
+                .artifact_put(ArtifactPutRequest {
+                    task_id: ex.task_id.clone(),
+                    capability: cap.clone(),
+                    lease_epoch: ex.lease.epoch,
+                    kind: (*kind).into(),
+                    bytes_base64: B64.encode(&png),
+                    candidate_id: None,
+                    round: None,
+                })
+                .unwrap();
+            daemon
+                .bind_preview_source(
+                    &ex.task_id,
+                    &cap,
+                    ex.lease.epoch,
+                    &artifact.sha256,
+                    &"a".repeat(64),
+                )
+                .unwrap();
+            evidence.insert((*kind).into(), artifact.sha256);
+        }
+        let submit = |evidence| SubmitRequest {
+            task_id: ex.task_id.clone(),
+            capability: cap.clone(),
+            lease_epoch: ex.lease.epoch,
+            action_id: action.clone(),
+            narrative: "Rendered study".into(),
+            evidence,
+        };
+        let denied = daemon.submit(submit(evidence.clone())).unwrap();
+        assert!(!denied.accepted);
+        assert!(denied
+            .repair
+            .unwrap()
+            .contains("render.desktop.first result contract missing visible fields: source"));
+        let desktop = &evidence["render.desktop.first"];
+        assert_eq!(
+            daemon
+                .bind_mobile_fields(
+                    &ex.task_id,
+                    &cap,
+                    ex.lease.epoch,
+                    &evidence["render.mobile390.first"],
+                    vec!["source".into()],
+                    "render.desktop.first"
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::GateFailed
+        );
+        daemon
+            .bind_mobile_fields(
+                &ex.task_id,
+                &cap,
+                ex.lease.epoch,
+                desktop,
+                vec![],
+                "render.desktop.first",
+            )
+            .unwrap();
+        assert!(!daemon.submit(submit(evidence.clone())).unwrap().accepted);
+        assert_eq!(
+            daemon
+                .bind_mobile_fields(
+                    &ex.task_id,
+                    &cap,
+                    ex.lease.epoch,
+                    desktop,
+                    vec!["source".into()],
+                    "render.desktop.first"
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+        let png = make_png(1280, 800, |x, y| {
+            [((x + 19) % 255) as u8, (y % 255) as u8, 33]
+        });
+        let artifact = daemon
+            .artifact_put(ArtifactPutRequest {
+                task_id: ex.task_id.clone(),
+                capability: cap.clone(),
+                lease_epoch: ex.lease.epoch,
+                kind: "render.desktop.first".into(),
+                bytes_base64: B64.encode(&png),
+                candidate_id: None,
+                round: None,
+            })
+            .unwrap();
+        daemon
+            .bind_preview_source(
+                &ex.task_id,
+                &cap,
+                ex.lease.epoch,
+                &artifact.sha256,
+                &"a".repeat(64),
+            )
+            .unwrap();
+        daemon
+            .bind_mobile_fields(
+                &ex.task_id,
+                &cap,
+                ex.lease.epoch,
+                &artifact.sha256,
+                vec!["source".into()],
+                "render.desktop.first",
+            )
+            .unwrap();
+        evidence.insert("render.desktop.first".into(), artifact.sha256);
+        assert!(daemon.submit(submit(evidence)).unwrap().accepted);
+    }
+
+    #[test]
+    fn standard_visual_action_rejects_source_receipt_and_invalid_render_artifacts() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let daemon =
+            HarnessDaemon::open(d.path().join("state"), DaemonPolicy::conservative(&w)).unwrap();
+        let mut r = req("standard-visual-gate");
+        r.ultra = false;
+        r.task = "Build a landing page with a clarity dial".into();
+        r.plan = Some(vec![PlanStep {
+            instructions: "Write the landing page".into(),
+            acceptance: None,
+        }]);
+        let ex = daemon.execute(r).unwrap();
+        fs::write(w.join("source.txt"), "source").unwrap();
+        let receipt = daemon
+            .read(ReadRequest {
+                task_id: ex.task_id.clone(),
+                capability: cap_of(&ex),
+                lease_epoch: ex.lease.epoch,
+                path: "source.txt".into(),
+                byte_range: None,
+            })
+            .unwrap()
+            .receipt
+            .unwrap();
+        let action_id = ex.next.as_ref().unwrap().action_id.clone();
+        daemon
+            .critique_prompt(&ex.task_id, &cap_of(&ex), ex.lease.epoch)
+            .unwrap();
+        daemon.critique_record(&ex.task_id, &cap_of(&ex), ex.lease.epoch, &action_id,
+            "The source receipt says nothing about the rendered page. Probe desktop, mobile, start, middle, end and reverse pixels; missing screenshots should block acceptance.").unwrap();
+        let submission = |evidence| SubmitRequest {
+            task_id: ex.task_id.clone(),
+            capability: cap_of(&ex),
+            lease_epoch: ex.lease.epoch,
+            action_id: action_id.clone(),
+            narrative: "Rendered study".into(),
+            evidence,
+        };
+        let denied = daemon
+            .submit(submission([("source".into(), receipt.clone())].into()))
+            .unwrap();
+        assert!(!denied.accepted);
+        assert!(denied.repair.unwrap().contains("render.desktop.first"));
+        assert_eq!(denied.next.unwrap().action_id, action_id);
+        let wrong = daemon
+            .artifact_put(ArtifactPutRequest {
+                task_id: ex.task_id.clone(),
+                capability: cap_of(&ex),
+                lease_epoch: ex.lease.epoch,
+                kind: "render.desktop.first".into(),
+                bytes_base64: B64.encode(b"not-png"),
+                candidate_id: None,
+                round: None,
+            })
+            .unwrap();
+        let mut wrong_evidence: BTreeMap<String, String> =
+            [("source".into(), receipt.clone())].into();
+        for key in [
+            "render.desktop.first",
+            "render.mobile390.first",
+            "render.state.start",
+            "render.state.mid",
+            "render.state.end",
+            "render.state.reverse",
+        ] {
+            wrong_evidence.insert(key.into(), wrong.sha256.clone());
+        }
+        daemon
+            .bind_preview_source(
+                &ex.task_id,
+                &cap_of(&ex),
+                ex.lease.epoch,
+                &wrong.sha256,
+                &"a".repeat(64),
+            )
+            .unwrap();
+        let rejected = daemon.submit(submission(wrong_evidence)).unwrap();
+        assert!(!rejected.accepted);
+        let repair = rejected.repair.unwrap();
+        assert!(
+            repair.contains("no matching task-bound artifact") || repair.contains("invalid PNG"),
+            "{repair}"
+        );
+        let keys = [
+            "render.desktop.first",
+            "render.mobile390.first",
+            "render.state.start",
+            "render.state.mid",
+            "render.state.end",
+            "render.state.reverse",
+        ];
+        let mut evidence: BTreeMap<String, String> = [("source".into(), receipt)].into();
+        for (i, key) in keys.iter().enumerate() {
+            let (width, height) = if i == 1 { (390, 844) } else { (1024, 768) };
+            let png = make_png(width, height, |x, y| {
+                [((x + i as u32) % 255) as u8, (y % 255) as u8, 33]
+            });
+            let artifact = daemon
+                .artifact_put(ArtifactPutRequest {
+                    task_id: ex.task_id.clone(),
+                    capability: cap_of(&ex),
+                    lease_epoch: ex.lease.epoch,
+                    kind: (*key).into(),
+                    bytes_base64: B64.encode(&png),
+                    candidate_id: None,
+                    round: None,
+                })
+                .unwrap();
+            daemon
+                .bind_preview_source(
+                    &ex.task_id,
+                    &cap_of(&ex),
+                    ex.lease.epoch,
+                    &artifact.sha256,
+                    &"a".repeat(64),
+                )
+                .unwrap();
+            evidence.insert((*key).into(), artifact.sha256);
+        }
+        // A fresh first-party recapture may bind identical desktop bytes to
+        // the new source. All other old slots are invalidated, not carried.
+        let stable_digest = evidence["render.desktop.first"].clone();
+        daemon
+            .bind_preview_source(
+                &ex.task_id,
+                &cap_of(&ex),
+                ex.lease.epoch,
+                &stable_digest,
+                &"b".repeat(64),
+            )
+            .unwrap();
+        let rebound = daemon.load(&ex.task_id).unwrap();
+        assert!(rebound.mobile_field_captures.is_empty());
+        assert!(rebound.desktop_field_captures.is_empty());
+        assert!(rebound.state_trace.is_none());
+        assert_eq!(rebound.preview_source_generation, Some("b".repeat(64)));
+        assert_eq!(rebound.preview_sources.len(), 1);
+        assert_eq!(
+            rebound.preview_sources[&stable_digest],
+            ("b".repeat(64), action_id.clone())
+        );
+        let missing = daemon.submit(submission(evidence.clone())).unwrap();
+        assert!(!missing.accepted);
+        assert!(missing.repair.unwrap().contains("recapture"));
+        for digest in keys.iter().map(|key| &evidence[*key]) {
+            daemon
+                .bind_preview_source(
+                    &ex.task_id,
+                    &cap_of(&ex),
+                    ex.lease.epoch,
+                    digest,
+                    &"b".repeat(64),
+                )
+                .unwrap();
+        }
+        let outcome = daemon.submit(submission(evidence)).unwrap();
+        assert!(outcome.accepted, "{:?}", outcome.repair);
+        let summary = outcome.visual_capture_coverage.unwrap();
+        assert_eq!(summary.action_id, action_id);
+        assert_eq!(
+            (
+                summary.cited_slots,
+                summary.unique_frames,
+                summary.duplicate_slots
+            ),
+            (6, 6, 0)
+        );
+        let durable = daemon
+            .status(TaskRefRequest {
+                task_id: ex.task_id,
+            })
+            .unwrap();
+        assert_eq!(durable.visual_capture_coverage.unwrap(), summary);
+    }
+
+    #[test]
+    fn unchanged_visual_pixels_can_be_recaptured_for_a_later_action_but_not_reused() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let daemon =
+            HarnessDaemon::open(d.path().join("state"), DaemonPolicy::conservative(&w)).unwrap();
+        let mut r = req("visual-multi-action-same-source");
+        r.ultra = false;
+        r.task = "Build a landing page".into();
+        r.plan = Some(vec![
+            PlanStep {
+                instructions: "Build the page".into(),
+                acceptance: None,
+            },
+            PlanStep {
+                instructions: "Review the same page in a second action".into(),
+                acceptance: None,
+            },
+        ]);
+        let ex = daemon.execute(r).unwrap();
+        let cap = cap_of(&ex);
+        let task = ex.task_id.clone();
+        let epoch = ex.lease.epoch;
+        let first_action = ex.next.as_ref().unwrap().action_id.clone();
+        let keys = [
+            "render.desktop.first",
+            "render.mobile390.first",
+            "render.state.start",
+            "render.state.mid",
+            "render.state.end",
+            "render.state.reverse",
+        ];
+        let mut evidence = BTreeMap::new();
+        for (i, key) in keys.iter().enumerate() {
+            let width = if i == 1 { 390 } else { 1024 };
+            let png = make_png(width, 650, |x, y| {
+                [((x + i as u32) % 255) as u8, (y % 255) as u8, 33]
+            });
+            let artifact = daemon
+                .artifact_put(ArtifactPutRequest {
+                    task_id: task.clone(),
+                    capability: cap.clone(),
+                    lease_epoch: epoch,
+                    kind: (*key).into(),
+                    bytes_base64: B64.encode(&png),
+                    candidate_id: None,
+                    round: None,
+                })
+                .unwrap();
+            daemon
+                .bind_preview_source(&task, &cap, epoch, &artifact.sha256, &"a".repeat(64))
+                .unwrap();
+            evidence.insert((*key).into(), artifact.sha256);
+        }
+        daemon.critique_prompt(&task, &cap, epoch).unwrap();
+        daemon.critique_record(&task, &cap, epoch, &first_action, "Review source, viewport, and all captured states before claiming the first visual action complete; do not infer visual quality from receipt count.").unwrap();
+        let first = daemon
+            .submit(SubmitRequest {
+                task_id: task.clone(),
+                capability: cap.clone(),
+                lease_epoch: epoch,
+                action_id: first_action,
+                narrative: "First captured review".into(),
+                evidence: evidence.clone(),
+            })
+            .unwrap();
+        assert!(first.accepted);
+        let second_action = first.next.unwrap().action_id;
+        daemon.critique_prompt(&task, &cap, epoch).unwrap();
+        daemon
+            .critique_record(
+                &task,
+                &cap,
+                epoch,
+                &second_action,
+                "Recheck the unchanged page and recapture these states for this new action; the earlier action receipt cannot supply its visual evidence.",
+            )
+            .unwrap();
+        let second = || SubmitRequest {
+            task_id: task.clone(),
+            capability: cap.clone(),
+            lease_epoch: epoch,
+            action_id: second_action.clone(),
+            narrative: "Second action review".into(),
+            evidence: evidence.clone(),
+        };
+        let reused = daemon.submit(second()).unwrap();
+        assert!(!reused.accepted);
+        assert!(reused.repair.unwrap().contains("another action"));
+        // A new revision invalidates old action bindings. An old artifact ID
+        // in submit alone cannot transfer it; each slot needs a fresh capture.
+        daemon
+            .bind_preview_source(
+                &task,
+                &cap,
+                epoch,
+                &evidence["render.desktop.first"],
+                &"b".repeat(64),
+            )
+            .unwrap();
+        let revised = daemon.submit(second()).unwrap();
+        assert!(!revised.accepted);
+        assert!(revised.repair.unwrap().contains("recapture"));
+        for digest in keys.iter().map(|key| &evidence[*key]) {
+            daemon
+                .bind_preview_source(&task, &cap, epoch, digest, &"b".repeat(64))
+                .unwrap();
+        }
+        let rebound = daemon.load(&task).unwrap();
+        assert_eq!(rebound.preview_sources.len(), 6);
+        assert!(!rebound.preview_action_sources.contains_key(&second_action));
+        let accepted = daemon.submit(second()).unwrap();
+        assert!(accepted.accepted, "{:?}", accepted.repair);
+        assert_eq!(accepted.state, TaskState::Completed);
+        assert_eq!(accepted.visual_capture_coverage.unwrap().cited_slots, 6);
+        let collision = daemon.bind_preview_source(
+            &task,
+            &cap,
+            epoch,
+            &evidence["render.desktop.first"],
+            &"b".repeat(64),
+        );
+        assert!(collision.is_err()); // completed task is terminal
+    }
+
+    #[test]
+    fn capture_coverage_reports_identical_frames_without_rejecting_them() {
+        let evidence = [
+            ("render.desktop.first".into(), "desktop".into()),
+            ("render.mobile390.first".into(), "mobile".into()),
+            ("render.state.start".into(), "mobile".into()),
+            ("render.state.mid".into(), "mobile".into()),
+            ("render.state.end".into(), "desktop".into()),
+            ("render.state.reverse".into(), "desktop".into()),
+        ]
+        .into();
+        let coverage = HarnessDaemon::capture_coverage("action-1", &evidence);
+        assert_eq!(
+            (
+                coverage.cited_slots,
+                coverage.unique_frames,
+                coverage.duplicate_slots
+            ),
+            (6, 2, 4)
+        );
+        assert_eq!(coverage.action_id, "action-1");
+        let legacy: DurableTask = serde_json::from_value({
+            let d = tempdir().unwrap();
+            let w = d.path().join("ws");
+            let daemon =
+                HarnessDaemon::open(d.path().join("state"), DaemonPolicy::conservative(&w))
+                    .unwrap();
+            let ex = daemon
+                .execute(req("coverage-legacy-serialization"))
+                .unwrap();
+            let mut value = serde_json::to_value(daemon.load(&ex.task_id).unwrap()).unwrap();
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("visual_capture_coverage");
+            value
+        })
+        .unwrap();
+        assert!(legacy.visual_capture_coverage.is_none());
+    }
+
+    #[test]
+    fn visual_classification_is_word_bounded_for_ui() {
+        assert!(visual_action("Create a UI", "write a screen"));
+        assert!(visual_action("Build a landing page", "write"));
+        assert!(visual_action("Design a webpage", "write"));
+        assert!(visual_action("Design a mobile app", "write"));
+        assert!(visual_action("Build a web app", "write"));
+        assert!(visual_action("Create a product interface", "write"));
+        assert!(visual_action("Create an interface design", "write"));
+        assert!(!visual_action("build a guild audit", "write"));
+        assert!(!visual_action("Build an application server", "write"));
+        assert!(!visual_action("Analyze app logs", "write a parser"));
     }
 
     #[test]
@@ -3677,6 +6388,92 @@ mod tests {
         assert!(format!("{err:?}").contains("frozen skill plan hash drift"));
     }
     #[test]
+    fn precommitted_recovery_key_is_one_time_and_never_logged() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        let root = d.path().join("state");
+        let daemon = HarnessDaemon::open(&root, DaemonPolicy::conservative(&w)).unwrap();
+        let key = format!("rrk-{}", "a".repeat(64));
+        let mut create = req("r-precommitted");
+        create.recovery_key = Some(key.clone());
+        let first = daemon.execute(create).unwrap();
+        let persisted =
+            fs::read_to_string(root.join("tasks").join(&first.task_id).join("task.json")).unwrap();
+        let events =
+            fs::read_to_string(root.join("tasks").join(&first.task_id).join("events.jsonl"))
+                .unwrap();
+        assert!(!persisted.contains(&key) && !events.contains(&key));
+        assert_eq!(
+            daemon.execute(req("r-precommitted")).unwrap_err().code,
+            ErrorCode::ScopeDenied
+        );
+        let mut forged = req("r-precommitted");
+        forged.recovery_key = Some(format!("rrk-{}", "b".repeat(64)));
+        assert_eq!(
+            daemon.execute(forged).unwrap_err().code,
+            ErrorCode::ScopeDenied
+        );
+        let mut both = req("r-precommitted");
+        both.recovery_key = Some(key.clone());
+        both.resume_handle = first.host_resume_handle.clone();
+        assert_eq!(
+            daemon.execute(both).unwrap_err().code,
+            ErrorCode::ScopeDenied
+        );
+        let mut recover = req("r-precommitted");
+        recover.recovery_key = Some(key.clone());
+        let second = daemon.execute(recover.clone()).unwrap();
+        assert!(second.resumed);
+        assert_eq!(second.task_id, first.task_id);
+        assert_ne!(second.host_resume_handle, first.host_resume_handle);
+        assert_ne!(second.task_capability, first.task_capability);
+        assert_eq!(
+            daemon.execute(recover).unwrap_err().code,
+            ErrorCode::ScopeDenied
+        );
+        let mut stale = req("r-precommitted");
+        stale.resume_handle = first.host_resume_handle.clone();
+        assert_eq!(
+            daemon.execute(stale).unwrap_err().code,
+            ErrorCode::ScopeDenied
+        );
+        let mut current = req("r-precommitted");
+        current.resume_handle = second.host_resume_handle.clone();
+        assert!(daemon.execute(current).unwrap().resumed);
+        let persisted =
+            fs::read_to_string(root.join("tasks").join(&first.task_id).join("task.json")).unwrap();
+        let events =
+            fs::read_to_string(root.join("tasks").join(&first.task_id).join("events.jsonl"))
+                .unwrap();
+        assert!(!persisted.contains(&key) && !events.contains(&key));
+        assert!(events.contains("recovery_key_consumed"));
+        let mut create_by_id = req("r-precommitted-id");
+        create_by_id.recovery_key = Some(key.clone());
+        let by_id = daemon.execute(create_by_id).unwrap();
+        let mut recover_by_id = req("another-request-id");
+        recover_by_id.task_id = Some(by_id.task_id.clone());
+        recover_by_id.recovery_key = Some(key.clone());
+        assert_eq!(
+            daemon.execute(recover_by_id).unwrap().task_id,
+            by_id.task_id
+        );
+        let old = daemon.execute(req("r-without-key")).unwrap();
+        let mut attempted = req("r-without-key");
+        attempted.task_id = Some(old.task_id);
+        attempted.recovery_key = Some(key.clone());
+        assert_eq!(
+            daemon.execute(attempted).unwrap_err().code,
+            ErrorCode::ScopeDenied
+        );
+        let mut invalid = req("r-invalid-key");
+        invalid.recovery_key = Some("rrk-short".into());
+        assert_eq!(
+            daemon.execute(invalid).unwrap_err().code,
+            ErrorCode::MalformedRequest
+        );
+    }
+
+    #[test]
     fn host_resume_requires_and_rotates_the_handle() {
         let d = tempdir().unwrap();
         let w = d.path().join("ws");
@@ -3788,6 +6585,12 @@ mod tests {
             .unwrap()
             .receipt
             .unwrap();
+        let action_id = first.next.as_ref().unwrap().action_id.clone();
+        daemon
+            .critique_prompt(&first.task_id, &cap_of(&first), first.lease.epoch)
+            .unwrap();
+        daemon.critique_record(&first.task_id, &cap_of(&first), first.lease.epoch, &action_id,
+            "The file read proves a local source exists, not that an external process used it. Check the frozen contract, source bytes and remaining unknowns before acceptance.").unwrap();
         let completed = daemon
             .submit(SubmitRequest {
                 task_id: first.task_id.clone(),

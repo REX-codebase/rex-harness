@@ -132,6 +132,9 @@ impl ToolName {
 pub enum HostKind {
     Human,
     ClaudeCode,
+    Codex,
+    OpenCode,
+    Hermes,
     Antigravity,
     GenericAgent,
 }
@@ -178,6 +181,12 @@ impl ProtocolError {
     pub fn for_task(mut self, task_id: &str) -> Self {
         self.task_id = Some(task_id.to_string());
         self
+    }
+}
+
+impl From<std::io::Error> for ProtocolError {
+    fn from(e: std::io::Error) -> Self {
+        ProtocolError::new(ErrorCode::Internal, e.to_string())
     }
 }
 
@@ -232,18 +241,75 @@ pub struct ActionSpec {
     pub max_wall_ms: u64,
 }
 
+/// Creator-supplied, frozen, literal mobile first-view assertions. This is not
+/// an AI interpretation of the brief or proof of spatial/semantic correctness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileResultField {
+    pub name: String,
+    /// Literal visible text, or one of the literal alternatives.
+    pub alternatives: Vec<String>,
+    /// `text` or `control` (button/link/form control).
+    pub kind: String,
+    /// `exact` (default, including existing tasks) or `contains`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_mode: Option<String>,
+    /// Minimum computed font size in CSS pixels; absent preserves earlier contracts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_font_px: Option<u8>,
+    /// `list_count`: ID selector of the creator-named list region (e.g. #moves).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// `list_count`: minimum distinct, fully visible list items in region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_count: Option<u8>,
+}
+
+/// Creator-frozen, narrow two-state text and control contract. It checks
+/// co-occurrence after a real local preview activation, not causal truth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TwoStateContract {
+    /// `mobile390` (390x650) or `desktop` (1280x800).
+    pub viewport: String,
+    /// Simple ID selector of the button/link to activate between captures.
+    pub control: String,
+    /// A visible exact text node before activation.
+    pub start_text: String,
+    /// A different visible exact text node after activation.
+    pub end_text: String,
+    /// Optional creator-frozen visible text after a real reverse input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse_text: Option<String>,
+    /// CSS-pixel size floor for both result nodes.
+    pub min_font_px: u8,
+    /// Optional creator-frozen visible facts for the settled end capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_fields: Option<Vec<MobileResultField>>,
+}
+
 /// rex_execute request: create or resume one durable task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecuteRequest {
     /// Idempotency key. Same key + same task text resumes the same task.
     pub request_id: String,
     pub task: String,
+    /// Optional execute-time acceptance fields frozen before any builder action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mobile_result_fields: Option<Vec<MobileResultField>>,
+    /// Independently frozen desktop first-view assertions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_result_fields: Option<Vec<MobileResultField>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub two_state_contract: Option<TwoStateContract>,
     /// Optional explicit task id for resume-by-id from a fresh session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     /// Host resume handle issued at creation; required on every resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_handle: Option<String>,
+    /// Optional caller-generated 256-bit one-time recovery secret, precommitted
+    /// at task creation. Never returned or logged. Store outside the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_key: Option<String>,
     /// Optional human follow-up recorded against the same durable task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up: Option<String>,
@@ -307,6 +373,14 @@ pub struct ExecuteResponse {
     pub task_capability: Option<String>,
     pub next: Option<ActionSpec>,
     pub lease: LeaseView,
+    /// Frozen creator contract, returned so builders cannot silently omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mobile_result_fields: Option<Vec<MobileResultField>>,
+    /// Independently frozen desktop first-view assertions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_result_fields: Option<Vec<MobileResultField>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub two_state_contract: Option<TwoStateContract>,
     /// The Fable completion discipline every operator must honor. Host
     /// agents never see REX's system prompt, so the rules travel here.
     /// Added in protocol 1.0; absent means a pre-discipline daemon.
@@ -469,6 +543,15 @@ pub struct SubmitRequest {
     pub evidence: BTreeMap<String, String>,
 }
 
+/// Informational only: matching bytes do not establish whether a transition was tested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisualCaptureCoverage {
+    pub action_id: String,
+    pub cited_slots: u8,
+    pub unique_frames: u8,
+    pub duplicate_slots: u8,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitResponse {
     pub state: TaskState,
@@ -477,6 +560,9 @@ pub struct SubmitResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair: Option<String>,
     pub next: Option<ActionSpec>,
+    /// Present for an accepted Standard visual action, never a quality verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_capture_coverage: Option<VisualCaptureCoverage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -493,8 +579,18 @@ pub struct StatusResponse {
     pub host: HostKind,
     pub lease: LeaseView,
     pub open_action: Option<ActionSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mobile_result_fields: Option<Vec<MobileResultField>>,
+    /// Independently frozen desktop first-view assertions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_result_fields: Option<Vec<MobileResultField>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub two_state_contract: Option<TwoStateContract>,
     pub budgets: BudgetView,
     pub last_event_seq: u64,
+    /// Latest accepted Standard visual action only; none before a visual submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_capture_coverage: Option<VisualCaptureCoverage>,
     #[serde(default)]
     pub operation: packets::OperationStatus,
     #[serde(default)]
