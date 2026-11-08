@@ -92,14 +92,29 @@ runs:
         # Bound via env: so the secret never touches shell text (no quoting or
         # injection issues). The CLI also accepts REX_<PROVIDER>_API_KEY.
         REX_API_KEY: ${{ inputs.api-key }}
+        # Every input crosses into the shell through env:, never through
+        # ${{ }} splicing, so task text with quotes or $(...) stays data.
+        REX_IN_PROVIDER: ${{ inputs.provider }}
+        REX_IN_TASK: ${{ inputs.task }}
+        REX_IN_MODEL: ${{ inputs.model }}
+        REX_IN_WORKSPACE: ${{ inputs.workspace }}
+        REX_IN_MAX_STEPS: ${{ inputs.max-steps }}
+        REX_IN_MAX_TOOL_CALLS: ${{ inputs.max-tool-calls }}
+        REX_IN_TIMEOUT_SECS: ${{ inputs.timeout-secs }}
       run: |
         set -euo pipefail
-        args=(exec --yes --json --provider "${{ inputs.provider }}" --task "${{ inputs.task }}")
-        [ -n "${{ inputs.model }}" ] && args+=(--model "${{ inputs.model }}")
-        args+=(--workspace "${{ inputs.workspace }}")
-        args+=(--max-steps "${{ inputs.max-steps }}")
-        args+=(--max-tool-calls "${{ inputs.max-tool-calls }}")
-        args+=(--timeout-secs "${{ inputs.timeout-secs }}")
+        # An empty key (secret not configured, or unavailable to fork PRs)
+        # would otherwise surface later as an opaque provider_error receipt.
+        if [ -z "$REX_API_KEY" ]; then
+          echo "::error title=REX run::api-key is empty. Configure the provider secret in the repository settings (Settings -> Secrets and variables -> Actions) and pass it as api-key."
+          exit 2
+        fi
+        args=(exec --yes --json --provider "$REX_IN_PROVIDER" --task "$REX_IN_TASK")
+        if [ -n "$REX_IN_MODEL" ]; then args+=(--model "$REX_IN_MODEL"); fi
+        args+=(--workspace "$REX_IN_WORKSPACE")
+        args+=(--max-steps "$REX_IN_MAX_STEPS")
+        args+=(--max-tool-calls "$REX_IN_MAX_TOOL_CALLS")
+        args+=(--timeout-secs "$REX_IN_TIMEOUT_SECS")
         "$GITHUB_WORKSPACE/rex-harness/target/release/rex" "${args[@]}" | tee "$RUNNER_TEMP/rex-receipt.json"
         {
           echo "receipt=$RUNNER_TEMP/rex-receipt.json"
@@ -131,6 +146,10 @@ runs:
         REX_STATE_DIR: ${{ runner.temp }}/rex-state
       run: |
         set -uo pipefail
+        if [ ! -s "$RUNNER_TEMP/rex-receipt.json" ]; then
+          echo "No receipt was produced; skipping proof replay."
+          exit 0
+        fi
         # The replay report is the verdict carrier; its exit code (3 on
         # failure) must not fail this step — proof_summary.py decides.
         "$GITHUB_WORKSPACE/rex-harness/target/release/rex" replay \
@@ -146,23 +165,33 @@ runs:
         REX_BUNDLE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         set -euo pipefail
+        if [ ! -s "$RUNNER_TEMP/rex-receipt.json" ]; then
+          echo "No receipt was produced; nothing to summarize."
+          exit 0
+        fi
         out="$RUNNER_TEMP/rex-proof"
         REX_BUNDLE_URL="$REX_BUNDLE_URL" python3 \
           "$GITHUB_ACTION_PATH/proof_summary.py" \
           "$RUNNER_TEMP/rex-receipt.json" "$RUNNER_TEMP/rex-replay.json" "$out"
         conclusion=$(jq -r .conclusion "$out/verdict.json")
         title=$(jq -r .title "$out/verdict.json")
+        # Always leave the summary on the workflow run page, even when the
+        # token cannot create check runs or comments.
+        cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"
 
         # "verified by REX" check run, with a link to the run bundle
-        # (the receipt artifact lives on the workflow run page).
-        gh api --method POST "repos/${{ github.repository }}/check-runs" \
+        # (the receipt artifact lives on the workflow run page). A token
+        # without checks: write must not mask the run's own verdict.
+        if ! gh api --method POST "repos/${{ github.repository }}/check-runs" \
           -f name="verified by REX" \
           -f head_sha="${{ github.sha }}" \
           -f status="completed" \
           -f conclusion="$conclusion" \
           -f "output[title]=$title" \
           -F "output[summary]=@$out/summary.md" \
-          --jq .id
+          --jq .id; then
+          echo "::warning title=REX run::Could not create the 'verified by REX' check run. Grant the calling workflow 'permissions: checks: write'."
+        fi
 
         # Proof-replay summary on the PR: create once, update after.
         pr="${{ github.event.pull_request.number }}"
