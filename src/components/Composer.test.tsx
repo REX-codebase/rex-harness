@@ -102,3 +102,40 @@ describe("Composer run options", () => {
     expect(screen.getByRole("button", { name: "Run options" })).toBeTruthy();
   });
 });
+
+describe("Composer lean-prompt switch", () => {
+  const select = (provider: string) =>
+    window.localStorage.setItem("rex-model-selection", JSON.stringify({ provider, id: "m" }));
+  afterEach(() => window.localStorage.clear());
+
+  it("is off for a paid provider and reports an explicit choice", () => {
+    select("gemini");
+    const set = vi.fn();
+    renderComposer({ setLean: set, lean: null });
+    fireEvent.click(screen.getByRole("button", { name: /Run options/ }));
+    const box = screen.getByLabelText("Lean prompt") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(box.closest("label")?.getAttribute("title")).toContain("web search");
+    fireEvent.click(box);
+    expect(set).toHaveBeenCalledWith(true);
+  });
+
+  it("starts on for a free-tier provider, shows it in the options badge, and can be turned off", () => {
+    select("groq");
+    const set = vi.fn();
+    renderComposer({ setLean: set, lean: null });
+    expect(screen.getByRole("button", { name: /Run options, 1 on/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Run options/ }));
+    const box = screen.getByLabelText("Lean prompt") as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    fireEvent.click(box);
+    expect(set).toHaveBeenCalledWith(false);
+  });
+
+  it("an explicit off overrides the free-tier default", () => {
+    select("groq");
+    renderComposer({ setLean: vi.fn(), lean: false });
+    fireEvent.click(screen.getByRole("button", { name: /Run options/ }));
+    expect((screen.getByLabelText("Lean prompt") as HTMLInputElement).checked).toBe(false);
+  });
+});

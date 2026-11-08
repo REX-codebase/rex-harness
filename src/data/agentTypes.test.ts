@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  humanizeProviderDetail,
   formatClock,
   formatTokens,
   phaseOf,
@@ -68,5 +69,42 @@ describe("agent snapshot view model", () => {
     expect(formatClock(20 * 60 * 1000)).toBe("20:00");
     expect(formatTokens(999)).toBe("999");
     expect(formatTokens(250_000)).toBe("250.0k");
+  });
+});
+
+describe("humanizeProviderDetail", () => {
+  const rec = (status: number, extra: Record<string, unknown> = {}) =>
+    `provider HTTP ${status}: ${JSON.stringify({ http_status: status, ...extra, redacted: true })}`;
+
+  it("explains a rate limit and what to do, with the provider's own wait", () => {
+    const text = humanizeProviderDetail(rec(429, { retry_after_secs: 33.8, provider_error_code: "rate_limit_exceeded" }));
+    expect(text).toContain("rate limit");
+    expect(text).toContain("retry in about 34 s");
+    expect(text).toContain("lean prompt");
+    expect(text).not.toContain("{");
+  });
+
+  it("scales the wait to minutes and hours", () => {
+    expect(humanizeProviderDetail(rec(429, { retry_after_secs: 120 }))).toContain("about 2 min");
+    expect(humanizeProviderDetail(rec(429, { retry_after_secs: 10920 }))).toContain("about 3 h");
+    expect(humanizeProviderDetail(rec(429))).not.toContain("retry in");
+  });
+
+  it("names the likely fix for auth and missing-model errors", () => {
+    expect(humanizeProviderDetail(rec(401))).toContain("rejected the API key");
+    expect(humanizeProviderDetail(rec(403))).toContain("HTTP 403");
+    expect(humanizeProviderDetail(rec(404))).toContain("Pick another model");
+  });
+
+  it("keeps the code on other errors and never drops unknown text", () => {
+    expect(humanizeProviderDetail(rec(500, { provider_error_code: "overloaded" }))).toContain("overloaded");
+    expect(humanizeProviderDetail("provider transport failed: io error")).toBe("provider transport failed: io error");
+    expect(humanizeProviderDetail("provider HTTP 429: not json {")).toBe("provider HTTP 429: not json {");
+  });
+
+  it("is what the terminal label shows for a provider error", () => {
+    const label = terminalLabel({ kind: "provider_error", detail: rec(429, { retry_after_secs: 5 }) });
+    expect(label.startsWith("Failed - ")).toBe(true);
+    expect(label).toContain("rate limit");
   });
 });

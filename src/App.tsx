@@ -147,6 +147,9 @@ export default function App() {
   const [planMode, setPlanMode] = useState(false);
   // Opt-in per run: each history summary is an extra model call.
   const [summarizeHistory, setSummarizeHistory] = useState(false);
+  // Lean prompt: null follows the provider (on for the free-tier presets), an
+  // explicit true/false is the person's own choice and is kept across runs.
+  const [lean, setLean] = useState<boolean | null>(null);
   const [planDeciding, setPlanDeciding] = useState(false);
   const livePoll = useRef<number | null>(null);
   const [installedRun, setInstalledRun] = useState<InstalledRunSnapshot | null>(null);
@@ -502,7 +505,7 @@ export default function App() {
       const summarize = summarizeHistory;
       setPlanMode(false);
       setSummarizeHistory(false);
-      custodyBegin(label, mode, summarize)
+      custodyBegin(label, mode, summarize, lean ?? undefined)
         .then((view) => {
           setCustody({ grantId: view.grant_id, phase: view.phase, operator: view.operator });
           setLiveRun(view.snapshot);
@@ -751,6 +754,8 @@ export default function App() {
                       setPlanMode={setPlanMode}
                       summarizeHistory={summarizeHistory}
                       setSummarizeHistory={setSummarizeHistory}
+                      lean={lean}
+                      setLean={setLean}
                       fableGate={fableGate}
                       setFableGate={toggleFableGate}
                       executionPath={executionPath}

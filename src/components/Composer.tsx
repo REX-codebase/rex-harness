@@ -3,6 +3,8 @@ import { ModelStatus } from "./ModelStatus";
 import { EXAMPLE_TASKS, type RunState } from "../data/mock";
 import type { ExecutionPath } from "../data/executionPath";
 import { useSlideIndicator } from "./Fx";
+import { defaultLean } from "../data/providers";
+import { selectedModel } from "../data/custodyRun";
 
 // The headline arrives word by word; REX itself catches a single sheen.
 const HEADLINE = ["Tell", "REX", "what", "to", "do."];
@@ -17,7 +19,7 @@ export function planShortcut(e: { altKey: boolean; ctrlKey: boolean; metaKey: bo
   return null;
 }
 
-export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, summarizeHistory = false, setSummarizeHistory, fableGate, setFableGate, executionPath }: { task: string; setTask: (t: string) => void; state: RunState; onRun: () => void; planMode: boolean; setPlanMode: (v: boolean) => void; summarizeHistory?: boolean; setSummarizeHistory?: (v: boolean) => void; fableGate: boolean; setFableGate: (v: boolean) => void; executionPath: ExecutionPath }) {
+export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, summarizeHistory = false, setSummarizeHistory, lean = null, setLean, fableGate, setFableGate, executionPath }: { task: string; setTask: (t: string) => void; state: RunState; onRun: () => void; planMode: boolean; setPlanMode: (v: boolean) => void; summarizeHistory?: boolean; setSummarizeHistory?: (v: boolean) => void; lean?: boolean | null; setLean?: (v: boolean) => void; fableGate: boolean; setFableGate: (v: boolean) => void; executionPath: ExecutionPath }) {
   const busy = state === "working" || state === "verifying";
   const canRun = task.trim().length > 0 && !busy;
   const areaRef = useRef<HTMLTextAreaElement>(null);
@@ -25,7 +27,10 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
   const modeRef = useRef<HTMLDivElement>(null);
   useSlideIndicator(modeRef, planMode, ".is-on");
   const [optionsOpen, setOptionsOpen] = useState(false);
-  const extrasOn = (setSummarizeHistory && summarizeHistory ? 1 : 0) + (fableGate ? 1 : 0);
+  // Lean follows the selected provider until the person decides; the switch
+  // shows what the next run will actually do.
+  const leanOn = lean ?? defaultLean(selectedModel().provider);
+  const extrasOn = (setSummarizeHistory && summarizeHistory ? 1 : 0) + (fableGate ? 1 : 0) + (setLean && leanOn ? 1 : 0);
 
   useEffect(() => {
     if (!optionsOpen) return;
@@ -100,6 +105,12 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
                     <label className="switch-row" title="Summarize old results: when older tool results no longer fit in REX's working memory, the model writes a short summary of them. Each summary is an extra model call on your key, so this is off by default.">
                       <span className="switch-copy"><b>Summarize old results</b><small>When old tool output no longer fits, the model writes a short summary. Costs an extra model call on your key.</small></span>
                       <input type="checkbox" role="switch" className="switch" checked={summarizeHistory} disabled={busy} onChange={(e) => setSummarizeHistory(e.target.checked)} aria-label="Summarize old results" />
+                    </label>
+                  )}
+                  {setLean && (
+                    <label className="switch-row" title="Lean prompt: sends about half as much to the model on every turn by offering 11 core tools, no skills catalog and compact state. It gives up web search and fetch, skills, memory and sub-agent exploration. On by default for free-tier providers, whose token limits are small.">
+                      <span className="switch-copy"><b>Lean prompt</b><small>About half the tokens per turn, for free and small models. Drops web access, skills and memory.</small></span>
+                      <input type="checkbox" role="switch" className="switch" checked={leanOn} disabled={busy} onChange={(e) => setLean(e.target.checked)} aria-label="Lean prompt" />
                     </label>
                   )}
                   <label className="switch-row" title="Fable gate: opens a THINK→PROVE→ATTACK→WRITE session with a mechanical deliberation timer and evidence-gated unlock. The countdown shows above the run.">

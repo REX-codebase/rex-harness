@@ -396,6 +396,9 @@ export function ModelStatus() {
                     </label>
                   )}
                 </div>
+                {selectedPreset.note && (
+                  <p className="dialog-truth"><span aria-hidden="true">i</span>{selectedPreset.note}</p>
+                )}
                 {connectError && <p className="provider-err-line" role="alert">{connectError}</p>}
                 <button
                   type="button"

@@ -89,3 +89,32 @@ describe("custody run bridge", () => {
     await expect(custodyBegin("offline")).rejects.toThrow("no backend");
   });
 });
+
+describe("lean prompt option", () => {
+  const view = {
+    grant_id: "g", task_id: "t", operator: "human", worker: "w", phase: "active",
+    snapshot: { id: "agent-1", status: "planning" },
+  };
+  async function begin(provider: string | null, lean?: boolean) {
+    window.localStorage.clear();
+    if (provider) window.localStorage.setItem("rex-model-selection", JSON.stringify({ provider, id: "m" }));
+    const fetchMock = sidecarFetch({ "/api/agent/custody/runs": view });
+    vi.stubGlobal("fetch", fetchMock);
+    const { custodyBegin } = await import("./custodyRun");
+    await custodyBegin("t", false, false, lean);
+    const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/agent/custody/runs"));
+    return JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>;
+  }
+
+  it("follows the provider when the person has not chosen", async () => {
+    expect((await begin("groq")).lean).toBe(true);
+    expect((await begin("nvidia")).lean).toBe(true);
+    expect((await begin("gemini")).lean).toBe(false);
+    expect((await begin(null)).lean).toBe(false);
+  });
+
+  it("an explicit choice always wins", async () => {
+    expect((await begin("groq", false)).lean).toBe(false);
+    expect((await begin("gemini", true)).lean).toBe(true);
+  });
+});
