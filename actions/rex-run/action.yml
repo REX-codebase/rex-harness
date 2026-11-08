@@ -44,6 +44,16 @@ inputs:
     description: 'Post the proof-replay summary as a check run and PR comment'
     required: false
     default: 'true'
+  allow-unconfined-commands:
+    description: >
+      Let agent commands run without the OS sandbox when the runner cannot
+      provide user/network namespaces (GitHub-hosted ubuntu runners cannot).
+      Off by default: commands are then refused, and the agent can still read
+      files. Turn on only for a disposable runner and a trusted task, since an
+      unconfined command can reach anything the runner user can, including
+      the provider key held by the rex process.
+    required: false
+    default: 'false'
 
 # Required permissions on the calling workflow (GITHUB_TOKEN):
 #   checks: write         # the "verified by REX" check run
@@ -101,6 +111,7 @@ runs:
         REX_IN_MAX_STEPS: ${{ inputs.max-steps }}
         REX_IN_MAX_TOOL_CALLS: ${{ inputs.max-tool-calls }}
         REX_IN_TIMEOUT_SECS: ${{ inputs.timeout-secs }}
+        REX_IN_ALLOW_UNCONFINED: ${{ inputs.allow-unconfined-commands }}
       run: |
         set -euo pipefail
         # An empty key (secret not configured, or unavailable to fork PRs)
@@ -108,6 +119,9 @@ runs:
         if [ -z "$REX_API_KEY" ]; then
           echo "::error title=REX run::api-key is empty. Configure the provider secret in the repository settings (Settings -> Secrets and variables -> Actions) and pass it as api-key."
           exit 2
+        fi
+        if [ "$REX_IN_ALLOW_UNCONFINED" = "true" ]; then
+          export REX_ALLOW_UNCONFINED_COMMANDS=1
         fi
         args=(exec --yes --json --provider "$REX_IN_PROVIDER" --task "$REX_IN_TASK")
         if [ -n "$REX_IN_MODEL" ]; then args+=(--model "$REX_IN_MODEL"); fi

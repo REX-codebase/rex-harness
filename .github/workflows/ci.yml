@@ -32,6 +32,13 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+        env:
+          # GitHub's ubuntu-latest runners cannot create unprivileged user
+          # namespaces, so the command sandbox is unavailable and commands
+          # fail closed. The suite exercises command execution on purpose,
+          # so this disposable runner opts into unconfined execution (same
+          # as the rex-mcp CI). Hosts that can confine commands never need it.
+          REX_ALLOW_UNCONFINED_COMMANDS: "1"
 
   frontend:
     name: Frontend (test, build)
