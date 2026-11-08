@@ -1,7 +1,7 @@
 # REX Harness
 
 Desktop interface for the REX general agent. Tauri 2 shell, React + TypeScript +
-Tailwind frontend, backed by a real Rust backend: **62 Tauri commands**, a real
+Tailwind frontend, backed by a real Rust backend: **98 Tauri commands**, a real
 model-calling agent loop with tool use, a model-driven adversary and clean-room
 judge, a permission-locked (0600) credential store, and atomic daemon
 persistence.
@@ -36,17 +36,19 @@ One task surface, one truthful session spine:
 
 Behavior is inspired by the Fable workflow (evidence, verification, receipts)
 without exposing any protocol internals. The mechanical Fable gate
-(Think → Prove → Attack → Write with enforced time-locks) is not yet
-implemented in the harness — that is tracked work, not a current feature.
+(Think → Prove → Attack → Write with an enforced authority timer) lives in
+`crates/rex-fable` and is reachable through the `fable_*` commands and the
+Fable toggle; it enforces the lifecycle, not the host's own permissions.
 
 ## Architecture
 
 The frontend (`src/`) never touches credentials or models directly. It reaches
 the backend through one of two transports, both serving the same Rust core:
 
-- `src-tauri/` — Tauri 2 shell registering **62 commands** in `main.rs`
+- `src-tauri/` — Tauri 2 shell registering **98 commands** in `main.rs`
   (`provider_*`, `tool_*`, `preview_*`, `run_*`, `custody_*`, `rex_task_*`,
-  `agent_*`, `ultra_*`, `installed_agent_*`, `search_*`).
+  `agent_*`, `ultra_*`, `installed_agent_*`, `search_*`, `fable_*`,
+  `terminal_*`, `git_*`, `checkpoint_*`, `workspace_*`, `mcp_*`, `cost_*`).
 - `rex-dev-server` (`crates/rex-mcp/src/bin/rex-dev-server.rs`) — the same
   provider/tool/run services over localhost-only HTTP (127.0.0.1:8787) for
   browser dev. `--replay <provider>=<fixture.json>` seeds a recorded catalog,
