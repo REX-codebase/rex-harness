@@ -8,6 +8,13 @@ Design rule: **the harness never trusts the builder's own claim.** Completion
 requires independent, executable evidence for every obligation in an explicit
 acceptance contract.
 
+## Worker core
+
+Ultra's builder is the standard worker loop. How that loop behaves on free and
+small models (rate-limit waiting, the one-shot final check for a stalled run,
+the lean prompt profile, shared provider state) is documented in
+[execution-core.md](execution-core.md), with the measurements behind it.
+
 ## Roles
 
 - **Worker model** - the model selected in the prompt box. It drafts the
