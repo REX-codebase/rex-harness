@@ -1,0 +1,441 @@
+/* ==========================================================================
+   REX Harness - depth and motion layer
+   Loaded after index.css. Contract (docs/motion.md):
+   - .reduced-fx (resolved Reduce) zeroes durations AND delays, and removes
+     every ambient/looping effect. Nothing here reads the OS media query
+     except the .motion-system mirror at the bottom.
+   - Entrances use fill-mode `backwards`: the element returns to its normal
+     styles when the animation ends, so hover/active transforms still work.
+   - Motion carries meaning: light follows focus, state changes draw
+     attention to themselves, evidence arrives in order. No decoration loops
+     except the backdrop's slow breathing and genuine "working" indicators.
+   ========================================================================== */
+
+@property --amb { syntax: "<color>"; inherits: true; initial-value: #a99af7; }
+@property --fx-angle { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --wipe { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
+@property --spot { syntax: "<number>"; inherits: false; initial-value: 0; }
+
+:root {
+  --ease-out-expo: cubic-bezier(.16, 1, .3, 1);
+  --ease-out-quint: cubic-bezier(.22, 1, .36, 1);
+  --ease-in-out: cubic-bezier(.65, 0, .35, 1);
+  /* Fallbacks first; real springs (damped-spring step response) where the
+     engine supports linear(). Durations are the springs' settle times. */
+  --spring-soft: cubic-bezier(.34, 1.36, .64, 1);
+  --spring-snappy: cubic-bezier(.3, 1.55, .5, 1);
+  --spring-bouncy: cubic-bezier(.3, 1.85, .5, 1);
+  --dur-soft: 660ms;
+  --dur-snappy: 490ms;
+  --dur-bouncy: 850ms;
+  --glow: color-mix(in srgb, var(--color-accent) 70%, transparent);
+}
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    --spring-soft: linear(0, 0.036, 0.127, 0.248, 0.381, 0.514, 0.637, 0.745, 0.836, 0.909, 0.964, 1.005, 1.031, 1.048, 1.055, 1.057, 1.054, 1.048, 1.041, 1.033, 1.026, 1.019, 1.013, 1.008, 1.004, 1.001, 0.999, 0.998, 0.997, 0.997, 0.997, 0.997, 0.997, 0.998, 1);
+    --spring-snappy: linear(0, 0.038, 0.134, 0.263, 0.404, 0.545, 0.674, 0.786, 0.879, 0.952, 1.005, 1.041, 1.063, 1.074, 1.076, 1.072, 1.064, 1.053, 1.043, 1.032, 1.023, 1.014, 1.008, 1.003, 0.999, 0.996, 0.995, 0.994, 0.994, 0.995, 0.995, 0.996, 0.997, 0.998, 1);
+    --spring-bouncy: linear(0, 0.082, 0.279, 0.526, 0.769, 0.971, 1.114, 1.195, 1.221, 1.205, 1.162, 1.108, 1.054, 1.008, 0.976, 0.957, 0.951, 0.954, 0.964, 0.976, 0.988, 0.998, 1.005, 1.009, 1.011, 1.01, 1.008, 1.006, 1.003, 1.001, 0.999, 0.998, 0.998, 0.998, 1);
+  }
+}
+
+html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--color-text) 16%, transparent) transparent; }
+
+/* --------------------------------------------------------------------------
+   Keyframes
+   -------------------------------------------------------------------------- */
+@keyframes rise-in { from { opacity: 0; transform: translate3d(0, 14px, 0); } to { opacity: 1; transform: none; } }
+@keyframes rise-in-sm { from { opacity: 0; transform: translate3d(0, 8px, 0); } to { opacity: 1; transform: none; } }
+@keyframes drop-in { from { opacity: 0; transform: translate3d(0, -10px, 0); } to { opacity: 1; transform: none; } }
+@keyframes row-in { from { opacity: 0; transform: translate3d(-8px, 0, 0); } to { opacity: 1; transform: none; } }
+@keyframes pop-in { from { opacity: 0; transform: scale(.6); } to { opacity: 1; transform: none; } }
+@keyframes menu-pop { from { opacity: 0; transform: translate3d(0, 6px, 0) scale(.94); } to { opacity: 1; transform: none; } }
+@keyframes word-rise { from { opacity: 0; transform: translate3d(0, .5em, 0); filter: blur(10px); } to { opacity: 1; transform: none; filter: none; } }
+@keyframes sheen { from { background-position: 100% 0; } to { background-position: 0% 0; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes draw-check { from { stroke-dashoffset: 14; } to { stroke-dashoffset: 0; } }
+@keyframes wipe-in { from { --wipe: 0%; } to { --wipe: 140%; } }
+
+/* --------------------------------------------------------------------------
+   Backdrop: a lit horizon over a faint ledger grid
+   -------------------------------------------------------------------------- */
+.ambient { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; --amb: var(--color-accent); transition: --amb 1100ms ease; }
+.harness-shell[data-run="waiting"] .ambient, .harness-shell[data-run="blocked"] .ambient { --amb: var(--color-blocked); }
+.amb-cone {
+  position: absolute; left: 50%; top: -22vh; width: min(1200px, 140vw); height: 88vh; margin-left: calc(min(1200px, 140vw) / -2);
+  background:
+    radial-gradient(60% 55% at 50% 0%, color-mix(in srgb, var(--amb) 16%, transparent), transparent 72%),
+    conic-gradient(from 180deg at 50% 0%, transparent 154deg, color-mix(in srgb, var(--amb) 8%, transparent) 180deg, transparent 206deg);
+  -webkit-mask-image: linear-gradient(180deg, #000 30%, transparent 96%); mask-image: linear-gradient(180deg, #000 30%, transparent 96%);
+  animation: amb-breathe 9s ease-in-out infinite alternate; transform-origin: 50% 0;
+}
+.harness-shell[data-run="working"] .amb-cone { animation-duration: 3.4s; }
+.harness-shell[data-run="waiting"] .amb-cone { animation-duration: 2.2s; }
+@keyframes amb-breathe { from { opacity: .72; transform: scaleX(.96); } to { opacity: 1; transform: scaleX(1.06); } }
+.amb-grid {
+  position: absolute; inset: 0; opacity: .5;
+  background-image: radial-gradient(color-mix(in srgb, var(--color-text) 15%, transparent) 1px, transparent 1.3px); background-size: 28px 28px; background-position: 50% 0;
+  -webkit-mask-image: radial-gradient(ellipse 62% 56% at 50% 0%, #000 0%, transparent 76%); mask-image: radial-gradient(ellipse 62% 56% at 50% 0%, #000 0%, transparent 76%);
+}
+.amb-halo {
+  position: absolute; left: 0; top: 0; width: 680px; height: 680px; --px: 50vw; --py: 22vh;
+  transform: translate3d(calc(var(--px) - 340px), calc(var(--py) - 340px), 0);
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--amb) 7%, transparent), transparent);
+  will-change: transform;
+}
+.amb-bloom { position: absolute; left: 50%; top: 46%; width: 90vmax; height: 90vmax; margin: -45vmax 0 0 -45vmax; opacity: 0; border-radius: 50%;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--color-done) 20%, transparent), transparent 70%); }
+.harness-shell[data-run="done"] .amb-bloom { animation: amb-bloom 2200ms var(--ease-out-quint) both; }
+@keyframes amb-bloom { 0% { opacity: 0; transform: scale(.35); } 22% { opacity: 1; } 100% { opacity: 0; transform: scale(1); } }
+.amb-grain {
+  position: absolute; inset: 0; opacity: .045;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .9 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+@media (forced-colors: active) { .ambient { display: none; } }
+
+/* --------------------------------------------------------------------------
+   Page choreography: anything that mounts in the main column rises in
+   -------------------------------------------------------------------------- */
+:where(.harness-shell:not(.fast-on)) .main-spine > :where(:not(.hero-wrap)) { animation: rise-in 640ms var(--ease-out-expo) backwards; }
+:where(.harness-shell:not(.fast-on)) .main-spine > :where(:nth-child(2)) { animation-delay: 50ms; }
+:where(.harness-shell:not(.fast-on)) .main-spine > :where(:nth-child(3)) { animation-delay: 100ms; }
+:where(.harness-shell:not(.fast-on)) .main-spine > :where(:nth-child(n+4)) { animation-delay: 150ms; }
+.harness-shell .main-spine > .settings-view { animation: none; }
+
+/* The operator/backend row sits above the Ultra atmosphere like the bar and spine do (it was painted over, so the chip vanished in Ultra). */
+.status-wrap { position: relative; z-index: 2; }
+
+/* Top bar */
+.top-shell .brand-lockup { animation: drop-in 760ms var(--ease-out-expo) backwards; }
+.top-shell .view-tabs { animation: drop-in 760ms var(--ease-out-expo) 90ms backwards; }
+.top-shell .fast-control { animation: drop-in 760ms var(--ease-out-expo) 170ms backwards; }
+.top-shell .ultra-control { animation: drop-in 760ms var(--ease-out-expo) 240ms backwards; }
+.rex-logo { transition: filter 450ms ease; animation: logo-ignite 1700ms 160ms var(--ease-out-quint) backwards; }
+.brand-frame:hover .rex-logo { filter: drop-shadow(0 0 10px color-mix(in srgb, var(--color-accent) 55%, transparent)); }
+@keyframes logo-ignite {
+  0% { opacity: 0; filter: brightness(.4) drop-shadow(0 0 0 transparent); }
+  38% { opacity: 1; filter: brightness(1.7) drop-shadow(0 0 16px color-mix(in srgb, var(--color-accent) 75%, transparent)); }
+  100% { opacity: 1; filter: none; }
+}
+
+/* --------------------------------------------------------------------------
+   Segmented controls: one pill that glides (see useSlideIndicator)
+   -------------------------------------------------------------------------- */
+.view-tabs, .mode-seg, .seg-control { position: relative; isolation: isolate; }
+.view-tabs > button, .mode-seg > button, .seg-control > button { position: relative; z-index: 1; }
+.view-tabs[data-ind]::before, .mode-seg[data-ind]::before, .seg-control[data-ind]::before {
+  content: ""; position: absolute; z-index: 0; left: 0; top: 0; width: var(--ind-w); height: var(--ind-h);
+  transform: translate3d(var(--ind-x), var(--ind-y), 0); border-radius: 7px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--color-lift) 92%, white 8%), var(--color-lift));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-text) 10%, transparent), 0 6px 16px -8px rgba(0, 0, 0, .7);
+}
+.mode-seg[data-ind]::before { border-radius: 999px; }
+[data-ind-live]::before { transition: transform var(--dur-soft) var(--spring-soft), width var(--dur-soft) var(--spring-soft), height var(--dur-soft) var(--spring-soft); }
+.view-tabs[data-ind] > button.is-current, .mode-seg[data-ind] > button.is-on, .seg-control[data-ind] > .seg-option.is-on { background: transparent; box-shadow: none; }
+.task-field.is-plan .mode-seg[data-ind] > button.is-on { background: transparent; box-shadow: none; }
+.task-field.is-plan .mode-seg[data-ind]::before { background: color-mix(in srgb, #6aa8ff 16%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, #6aa8ff 40%, transparent); }
+.view-tabs button, .seg-option { transition: color 260ms ease; }
+
+/* --------------------------------------------------------------------------
+   Fields: light that follows the cursor, a sweep on focus, an orbit while busy
+   -------------------------------------------------------------------------- */
+.task-field, .followup-field {
+  position: relative; z-index: 1; isolation: isolate;
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--color-text) 4%, transparent) inset, 0 24px 48px -32px rgba(0, 0, 0, .8);
+  background-image: radial-gradient(460px circle at var(--mx, 50%) var(--my, -30%), color-mix(in srgb, var(--color-accent) calc(var(--spot) * 7%), transparent), transparent 62%);
+  transition: border-color 220ms ease, background-color 220ms ease, box-shadow 300ms ease, --spot 380ms ease, transform 600ms var(--ease-out-expo);
+}
+.task-field:hover, .followup-field:hover { --spot: 1; }
+.task-field:focus-within, .followup-field:focus-within { --spot: 1; box-shadow: 0 1px 0 color-mix(in srgb, var(--color-text) 6%, transparent) inset, 0 0 0 3px color-mix(in srgb, var(--color-accent) 7%, transparent), 0 28px 60px -30px color-mix(in srgb, var(--color-accent) 40%, transparent); }
+.task-field::before, .task-field::after, .followup-field::before, .followup-field::after, .operator-option::after {
+  content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+}
+/* pointer ring */
+.task-field::after, .followup-field::after, .operator-option::after {
+  background: radial-gradient(210px circle at var(--mx, 50%) var(--my, 50%), color-mix(in srgb, var(--color-accent) 80%, transparent), transparent 66%);
+  opacity: 0; transition: opacity 320ms ease;
+}
+.task-field:hover::after, .followup-field:hover::after, .operator-option:hover::after { opacity: 1; }
+/* focus sweep / busy orbit */
+.task-field::before, .followup-field::before {
+  background: conic-gradient(from var(--fx-angle), transparent 0 58%, color-mix(in srgb, var(--color-accent) 96%, white 4%) 90%, transparent 100%);
+  opacity: 0;
+}
+.task-field:focus-within::before, .followup-field:focus-within::before { animation: fx-sweep 1500ms var(--ease-out-expo) both; }
+.task-field.is-busy::before, .followup-field.is-busy::before { opacity: .95; animation: fx-orbit 2600ms linear infinite; }
+@keyframes fx-sweep { 0% { --fx-angle: 0deg; opacity: 1; } 70% { opacity: 1; } 100% { --fx-angle: 360deg; opacity: 0; } }
+@keyframes fx-orbit { from { --fx-angle: 0deg; } to { --fx-angle: 360deg; } }
+.task-field.is-plan::before, .task-field.is-plan::after { filter: hue-rotate(-38deg); }
+.task-input, .followup-input { caret-color: var(--color-accent); }
+
+/* --------------------------------------------------------------------------
+   Hero: the headline arrives word by word
+   -------------------------------------------------------------------------- */
+.hero-settle-inner section > div:first-child > .eyebrow { animation: rise-in-sm 700ms var(--ease-out-expo) 100ms backwards; }
+.hero-settle-inner section > div:first-child > p:not(.eyebrow) { animation: rise-in 800ms var(--ease-out-expo) 520ms backwards; }
+.hero-settle-inner .task-field { animation: rise-in 900ms var(--ease-out-expo) 360ms backwards; }
+.hero-settle-inner .composer-meta { animation: rise-in-sm 800ms var(--ease-out-expo) 560ms backwards; }
+.hero-settle-inner .example-prompt { animation: rise-in-sm 800ms var(--ease-out-expo) 680ms backwards; }
+.fx-word { display: inline-block; animation: word-rise 900ms var(--ease-out-expo) calc(160ms + var(--w, 0) * 70ms) backwards; }
+.fx-sheen { display: inline-block; animation: word-rise 900ms var(--ease-out-expo) calc(160ms + var(--w, 0) * 70ms) backwards; }
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .fx-sheen {
+    background: linear-gradient(100deg, var(--color-text) 38%, color-mix(in srgb, var(--color-accent) 70%, white) 50%, var(--color-text) 62%) 100% 0 / 260% 100%;
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+    animation: word-rise 900ms var(--ease-out-expo) calc(160ms + var(--w, 0) * 70ms) backwards, sheen 1900ms var(--ease-in-out) 950ms both;
+  }
+}
+.example-prompt span:last-of-type { transition: transform 300ms var(--ease-out-expo); }
+.example-prompt:hover span:last-of-type { transform: translate(2px, -2px); }
+
+/* --------------------------------------------------------------------------
+   Run button: lit, with a sheen on hover, a ripple when it becomes ready
+   -------------------------------------------------------------------------- */
+.run-button {
+  position: relative; overflow: hidden; isolation: isolate;
+  transition: background 160ms ease, transform 260ms var(--spring-snappy), box-shadow 320ms ease, color 160ms ease;
+}
+.run-button > * { position: relative; z-index: 1; }
+.run-button:not(:disabled) {
+  box-shadow: 0 0 0 0 transparent, 0 12px 28px -12px var(--glow), inset 0 1px 0 rgb(255 255 255 / .34), inset 0 -1px 0 rgb(0 0 0 / .14);
+  animation: run-ready 900ms var(--ease-out-expo) backwards;
+}
+.run-button:hover:not(:disabled) { box-shadow: 0 0 0 0 transparent, 0 16px 34px -12px var(--glow), inset 0 1px 0 rgb(255 255 255 / .4), inset 0 -1px 0 rgb(0 0 0 / .14); }
+.run-button:active:not(:disabled) { transform: translateY(1px) scale(.97); }
+.run-button::before {
+  content: ""; position: absolute; z-index: 0; top: 0; bottom: 0; left: 0; width: 55%;
+  background: linear-gradient(100deg, transparent, rgb(255 255 255 / .5), transparent); transform: translateX(-140%) skewX(-18deg);
+  transition: transform 800ms var(--ease-out-expo); pointer-events: none;
+}
+.run-button:hover:not(:disabled)::before { transform: translateX(260%) skewX(-18deg); }
+.run-button svg { transition: transform 320ms var(--spring-snappy); }
+.run-button:hover:not(:disabled) svg { transform: translateX(3px); }
+@keyframes run-ready {
+  from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 55%, transparent), 0 12px 28px -12px var(--glow), inset 0 1px 0 rgb(255 255 255 / .34), inset 0 -1px 0 rgb(0 0 0 / .14); }
+  to { box-shadow: 0 0 0 14px transparent, 0 12px 28px -12px var(--glow), inset 0 1px 0 rgb(255 255 255 / .34), inset 0 -1px 0 rgb(0 0 0 / .14); }
+}
+.run-button[data-busy]::before { transform: none; left: -60%; width: 60%; animation: run-busy 1700ms linear infinite; opacity: .5; }
+.run-button[data-busy] svg { display: none; }
+.run-button[data-busy]::after { content: ""; position: relative; z-index: 1; width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid color-mix(in srgb, currentColor 28%, transparent); border-top-color: currentColor; animation: spin 800ms linear infinite; }
+@keyframes run-busy { from { left: -60%; } to { left: 110%; } }
+
+/* --------------------------------------------------------------------------
+   Menus, switches, chips
+   -------------------------------------------------------------------------- */
+.options-menu { transform-origin: 100% 0; animation: menu-pop var(--dur-soft) var(--spring-soft) backwards; box-shadow: 0 28px 60px -20px rgba(0, 0, 0, .7), inset 0 1px 0 color-mix(in srgb, var(--color-text) 6%, transparent); }
+.model-menu, .provider-menu { transform-origin: 0 100%; animation: menu-pop var(--dur-soft) var(--spring-soft) backwards; box-shadow: 0 28px 60px -20px rgba(0, 0, 0, .7), inset 0 1px 0 color-mix(in srgb, var(--color-text) 6%, transparent); }
+.options-menu > .switch-row { animation: rise-in-sm 480ms var(--ease-out-expo) backwards; }
+.options-menu > .switch-row:nth-child(2) { animation-delay: 70ms; }
+.options-menu > .switch-row:nth-child(3) { animation-delay: 120ms; }
+.options-menu > .switch-row:nth-child(4) { animation-delay: 170ms; }
+.provider-menu-actions button { animation: rise-in-sm 480ms var(--ease-out-expo) backwards; }
+.provider-menu-actions button:nth-child(1) { animation-delay: 80ms; }
+.provider-menu-actions button:nth-child(2) { animation-delay: 130ms; }
+.provider-menu-actions button:nth-child(3) { animation-delay: 180ms; }
+.model-option { transition: background 160ms ease, transform 300ms var(--ease-out-expo); }
+.model-option:hover:not(.is-disabled) { background: color-mix(in srgb, var(--color-accent) 7%, transparent); transform: translateX(2px); }
+.switch { transition: background 220ms ease, box-shadow 320ms ease; }
+.switch::after { transition: transform var(--dur-snappy) var(--spring-snappy), width 220ms var(--spring-snappy), background 150ms ease; }
+.switch:active:not(:disabled)::after { width: 18px; }
+.switch:checked:active:not(:disabled)::after { transform: translateX(10px); }
+.switch:checked { box-shadow: 0 0 16px -3px var(--glow); }
+.options-button { transition: color 140ms ease, border-color 140ms ease, background 140ms ease, transform 300ms var(--spring-snappy); }
+.options-button:hover { transform: rotate(-8deg); }
+.options-button:active { transform: scale(.92); }
+.options-count { animation: pop-in var(--dur-bouncy) var(--spring-bouncy) backwards; }
+.operator-chip, .newtask-button, .reset-button, .setup-btn, .agent-cancel, .live-cancel, .rex-close { transition: color 150ms ease, border-color 150ms ease, background 150ms ease, transform 260ms var(--spring-snappy); }
+.operator-chip:active, .newtask-button:active, .reset-button:active, .setup-btn:active, .agent-cancel:active, .live-cancel:active, .rex-close:active { transform: scale(.96); }
+.newtask-button svg { transition: transform 420ms var(--spring-snappy); }
+.newtask-button:hover svg { transform: rotate(90deg); }
+.operator-chip-dot { position: relative; }
+.operator-chip-dot::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: dot-ping 2.8s var(--ease-out-quint) infinite; }
+@keyframes dot-ping { 0% { transform: scale(1); opacity: .6; } 70%, 100% { transform: scale(3); opacity: 0; } }
+.backend-badge > span { position: relative; }
+.backend-badge > span::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: dot-ping 3.4s var(--ease-out-quint) infinite; }
+
+/* --------------------------------------------------------------------------
+   State rail: nodes that light, links that fill, a check that draws
+   -------------------------------------------------------------------------- */
+.rail { display: flex; align-items: center; margin: 0; padding: 0; list-style: none; }
+.rail-stage { display: flex; min-width: 0; align-items: center; }
+.rail-node {
+  position: relative; display: grid; place-items: center; flex: none; width: 16px; height: 16px; border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--color-faint) 65%, transparent); background: transparent;
+  transition: background 460ms var(--ease-out-expo), border-color 460ms var(--ease-out-expo), box-shadow 600ms ease;
+}
+.rail-node::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); opacity: 0; transform: scale(0); transition: opacity 300ms ease, transform 420ms var(--spring-soft); }
+.rail-check { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.rail-check path { fill: none; stroke: var(--color-ink); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 14; stroke-dashoffset: 14; transition: stroke-dashoffset 480ms var(--ease-out-expo) 140ms; }
+.rail-stage[data-st="active"] .rail-node { border-color: var(--color-accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 13%, transparent), 0 0 20px -2px var(--glow); }
+.rail-stage[data-st="active"] .rail-node::before { opacity: 1; transform: scale(1); animation: node-breathe 1.8s ease-in-out infinite; }
+.rail-stage[data-st="active"] .rail-node::after { content: ""; position: absolute; inset: -1px; border-radius: 50%; border: 1px solid var(--color-accent); animation: node-ripple 1.9s var(--ease-out-quint) infinite; }
+.rail-stage[data-st="complete"] .rail-node { background: var(--color-done); border-color: var(--color-done); box-shadow: 0 0 16px -4px color-mix(in srgb, var(--color-done) 70%, transparent); animation: node-pop var(--dur-bouncy) var(--spring-bouncy); }
+.rail-stage[data-st="complete"] .rail-node::after { content: ""; position: absolute; inset: -1px; border-radius: 50%; border: 1px solid var(--color-done); animation: node-burst 800ms var(--ease-out-quint) both; }
+.rail-stage[data-st="complete"] .rail-check path { stroke-dashoffset: 0; }
+@keyframes node-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(.7); } }
+@keyframes node-ripple { 0% { transform: scale(1); opacity: .75; } 100% { transform: scale(2.6); opacity: 0; } }
+@keyframes node-pop { 0% { transform: scale(.55); } 100% { transform: scale(1); } }
+@keyframes node-burst { 0% { transform: scale(1); opacity: .8; } 100% { transform: scale(2.8); opacity: 0; } }
+.rail-label { margin-left: 10px; font-size: 12px; font-weight: 500; transition: color 400ms ease; }
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .rail-stage[data-st="active"] .rail-label {
+    background: linear-gradient(100deg, var(--color-text) 36%, color-mix(in srgb, var(--color-accent) 60%, white) 50%, var(--color-text) 64%) 100% 0 / 260% 100%;
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; animation: sheen 2200ms linear infinite;
+  }
+}
+.rail-link { position: relative; display: block; width: 34px; height: 1px; margin: 0 12px; overflow: hidden; border-radius: 1px; background: var(--color-line); flex: none; }
+@media (min-width: 640px) { .rail-link { width: 64px; } }
+.rail-link i { position: absolute; top: 0; bottom: 0; left: 0; right: 0; transform: scaleX(0); transform-origin: left; background: color-mix(in srgb, var(--color-done) 75%, transparent); transition: transform 900ms var(--ease-out-expo); }
+.rail-link[data-st="complete"] i { transform: scaleX(1); }
+.rail-link[data-st="active"] i { right: auto; width: 46%; transform: none; background: linear-gradient(90deg, transparent, var(--color-accent), transparent); animation: link-travel 1500ms linear infinite; }
+@keyframes link-travel { from { transform: translateX(-100%); } to { transform: translateX(230%); } }
+.state-row { animation: rise-in-sm 520ms var(--ease-out-expo) backwards; }
+.blocked-dot { position: relative; box-shadow: 0 0 16px -2px color-mix(in srgb, var(--color-blocked) 80%, transparent); animation: nudge 600ms var(--ease-out-quint) both; }
+.blocked-dot::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: dot-ping 2.4s var(--ease-out-quint) infinite; }
+@keyframes nudge { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-3px); } 45% { transform: translateX(3px); } 70% { transform: translateX(-1.5px); } }
+
+/* --------------------------------------------------------------------------
+   Result and evidence: the receipt prints in order
+   -------------------------------------------------------------------------- */
+.reveal-wipe {
+  --wipe: 140%;
+  -webkit-mask-image: linear-gradient(100deg, #000 calc(var(--wipe) - 22%), transparent var(--wipe));
+  mask-image: linear-gradient(100deg, #000 calc(var(--wipe) - 22%), transparent var(--wipe));
+  animation: wipe-in 1200ms var(--ease-out-quint) 220ms backwards;
+}
+.receipt-seal { display: inline-block; animation: seal-stamp 700ms var(--spring-soft) 300ms backwards; transform-origin: 100% 50%; }
+@keyframes seal-stamp { from { opacity: 0; transform: scale(1.5); letter-spacing: .3em; } to { opacity: 1; transform: none; } }
+.tl-list > .tl-row { animation: row-in 560ms var(--ease-out-expo) backwards; }
+.tl-list > .tl-row:nth-child(2) { animation-delay: 35ms; }
+.tl-list > .tl-row:nth-child(3) { animation-delay: 70ms; }
+.tl-list > .tl-row:nth-child(4) { animation-delay: 105ms; }
+.tl-list > .tl-row:nth-child(n+5) { animation-delay: 140ms; }
+.session-evidence > .tl-row { animation-delay: calc(var(--r, 0) * 110ms + 260ms); }
+.tl-mark.is-ok { animation: pop-in var(--dur-bouncy) var(--spring-bouncy) calc(var(--r, 0) * 110ms + 360ms) backwards; }
+.tl-mark.is-ok svg path { stroke-dasharray: 14; animation: draw-check 480ms var(--ease-out-expo) calc(var(--r, 0) * 110ms + 460ms) backwards; }
+.tl-mark.is-err { animation: pop-in var(--dur-bouncy) var(--spring-bouncy) calc(var(--r, 0) * 110ms + 360ms) backwards; }
+.session-evidence .tl-row { transition: background 220ms ease; }
+.session-evidence .tl-row:hover { background: color-mix(in srgb, var(--color-text) 3%, transparent); }
+.verification-grid { animation: fade-in 700ms ease calc(var(--r, 0) * 110ms + 700ms) backwards; }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+.verification-toggle svg { transition: transform 420ms var(--spring-soft); }
+.session-head .newtask-button { animation: pop-in var(--dur-soft) var(--spring-soft) 200ms backwards; }
+
+/* --------------------------------------------------------------------------
+   History: rows slide, wash and point
+   -------------------------------------------------------------------------- */
+.history-section li { animation: rise-in-sm 560ms var(--ease-out-expo) backwards; }
+.history-section li:nth-child(1) { animation-delay: 140ms; }
+.history-section li:nth-child(2) { animation-delay: 200ms; }
+.history-section li:nth-child(3) { animation-delay: 260ms; }
+.history-section li:nth-child(n+4) { animation-delay: 320ms; }
+.history-row { position: relative; isolation: isolate; transition: padding-left 360ms var(--ease-out-expo); }
+.history-row::before { content: ""; position: absolute; z-index: -1; inset: 4px -10px; border-radius: 10px; background: linear-gradient(90deg, color-mix(in srgb, var(--color-accent) 9%, transparent), transparent 75%); opacity: 0; transition: opacity 320ms ease; }
+.history-row:hover::before, .history-row:focus-visible::before { opacity: 1; }
+.history-row:hover { padding-left: 8px; }
+.history-row::after { content: "→"; content: "→" / ""; margin-left: auto; padding-right: 4px; color: var(--color-accent); opacity: 0; transform: translateX(-8px); transition: opacity 260ms ease, transform 360ms var(--ease-out-expo); }
+.history-row:hover::after, .history-row:focus-visible::after { opacity: 1; transform: none; }
+.history-row > span:first-child { transition: transform 360ms var(--spring-snappy); }
+.history-row:hover > span:first-child { transform: scale(1.7); }
+.history-row[aria-current="true"] .text-text { color: var(--color-accent); }
+
+/* --------------------------------------------------------------------------
+   Settings and operator gate
+   -------------------------------------------------------------------------- */
+.settings-view > * { animation: rise-in 680ms var(--ease-out-expo) backwards; }
+.settings-view > :nth-child(2) { animation-delay: 70ms; }
+.settings-view > :nth-child(3) { animation-delay: 120ms; }
+.settings-view > :nth-child(4) { animation-delay: 170ms; }
+.settings-view > :nth-child(5) { animation-delay: 220ms; }
+.settings-view > :nth-child(6) { animation-delay: 270ms; }
+.settings-view > :nth-child(n+7) { animation-delay: 320ms; }
+.settings-section { transition: background 300ms ease; }
+.operator-gate { position: relative; z-index: 2; }
+.operator-gate > * { animation: rise-in 900ms var(--ease-out-expo) backwards; }
+.operator-gate > :nth-child(1) { animation-delay: 60ms; }
+.operator-gate > :nth-child(2) { animation-delay: 140ms; }
+.operator-gate > :nth-child(3) { animation-delay: 240ms; }
+.operator-gate > :nth-child(4) { animation-delay: 340ms; }
+.operator-gate > :nth-child(5) { animation-delay: 460ms; }
+.operator-gate > :nth-child(n+6) { animation-delay: 540ms; }
+.operator-option { position: relative; isolation: isolate; transition: border-color 200ms ease, background 200ms ease, transform 520ms var(--spring-soft), box-shadow 420ms ease; }
+.operator-option::before { content: ""; position: absolute; z-index: -1; inset: 0; border-radius: inherit; opacity: 0; transition: opacity 320ms ease; background: radial-gradient(320px circle at var(--mx, 50%) var(--my, 50%), color-mix(in srgb, var(--color-accent) 10%, transparent), transparent 70%); }
+.operator-option:hover::before { opacity: 1; }
+.operator-option:hover { transform: translateY(-2px); }
+.operator-option.is-active { box-shadow: 0 22px 44px -26px var(--glow), inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 20%, transparent); }
+.operator-radio { transition: border-color 200ms ease, box-shadow 400ms ease; }
+.operator-radio::after { transition: transform var(--dur-snappy) var(--spring-snappy); }
+.operator-option.is-active .operator-radio { box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 14%, transparent), 0 0 16px -2px var(--glow); }
+.operator-option.is-active .operator-after { transition: opacity 360ms ease 120ms, max-height 360ms var(--ease-out-expo); }
+
+/* --------------------------------------------------------------------------
+   Setup + empty states
+   -------------------------------------------------------------------------- */
+.setup-steps > li { animation: rise-in-sm 620ms var(--ease-out-expo) backwards; }
+.setup-steps > li:nth-child(1) { animation-delay: 240ms; }
+.setup-steps > li:nth-child(2) { animation-delay: 320ms; }
+.setup-steps > li:nth-child(3) { animation-delay: 400ms; }
+.setup-panel.attn { animation: attn-shake 640ms var(--ease-out-quint); }
+@keyframes attn-shake { 0%, 100% { transform: translateX(0); } 18% { transform: translateX(-5px); } 40% { transform: translateX(4px); } 62% { transform: translateX(-2px); } 82% { transform: translateX(1px); } }
+.empty-mark { position: relative; }
+.empty-mark::after { content: ""; position: absolute; inset: -1px; border-radius: 50%; border: 1px solid var(--color-faint); animation: node-ripple 3.4s var(--ease-out-quint) infinite; }
+
+/* --------------------------------------------------------------------------
+   Live run surfaces (agent loop, approvals, plans)
+   -------------------------------------------------------------------------- */
+.live-dot { position: relative; }
+.live-dot.is-live::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: dot-ping 1.9s var(--ease-out-quint) infinite; }
+.plan-approval, .tool-approval { --attn: #f0a43b; animation: approval-in var(--dur-soft) var(--spring-soft) backwards, attn-breathe 2800ms ease-in-out 900ms infinite; }
+.plan-approval { --attn: #6aa8ff; }
+@keyframes approval-in { from { opacity: 0; transform: translate3d(0, 18px, 0) scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes attn-breathe { 0%, 100% { box-shadow: 0 18px 45px rgba(0, 0, 0, .12), 0 0 0 0 color-mix(in srgb, var(--attn) 0%, transparent); } 50% { box-shadow: 0 18px 45px rgba(0, 0, 0, .12), 0 0 0 6px color-mix(in srgb, var(--attn) 13%, transparent); } }
+.approval-shield { animation: pop-in var(--dur-bouncy) var(--spring-bouncy) 160ms backwards; box-shadow: 0 0 22px -2px color-mix(in srgb, var(--attn, #f0a43b) 70%, transparent); }
+.approval-allow, .approval-deny { transition: transform 260ms var(--spring-snappy), filter 160ms ease, border-color 160ms ease, color 160ms ease; }
+.approval-allow:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
+.approval-allow:active:not(:disabled), .approval-deny:active:not(:disabled) { transform: scale(.96); }
+.agent-plan-item { animation: row-in 560ms var(--ease-out-expo) backwards; }
+.agent-plan-item:nth-child(2) { animation-delay: 60ms; }
+.agent-plan-item:nth-child(3) { animation-delay: 120ms; }
+.agent-plan-item:nth-child(n+4) { animation-delay: 180ms; }
+.agent-plan-item.is-in_progress .agent-plan-mark { animation: soft-pulse 1.4s ease-in-out infinite; }
+.agent-plan-item.is-done .agent-plan-mark { animation: pop-in var(--dur-bouncy) var(--spring-bouncy) backwards; }
+.agent-plan-title { transition: color 400ms ease; }
+.agent-done-note { animation: approval-in var(--dur-soft) var(--spring-soft) 120ms backwards; box-shadow: 0 0 40px -18px color-mix(in srgb, #50c878 60%, transparent); }
+.agent-done-note > span { animation: pop-in var(--dur-bouncy) var(--spring-bouncy) 360ms backwards; }
+.agent-gate-failures { animation: nudge 600ms var(--ease-out-quint) both; }
+.live-model-text { animation: fade-in 600ms ease backwards; }
+
+/* Budget meters: bars grow in, glide on update, and glint while healthy */
+.run-meter { animation: rise-in-sm 560ms var(--ease-out-expo) backwards; transition: border-color 240ms ease, transform 360ms var(--ease-out-expo), background 240ms ease; }
+.run-meter:nth-child(2) { animation-delay: 60ms; }
+.run-meter:nth-child(3) { animation-delay: 120ms; }
+.run-meter:nth-child(4) { animation-delay: 180ms; }
+.run-meter:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--color-text) 20%, var(--color-line)); }
+.run-meter-track > i { position: relative; overflow: hidden; transition: width 1000ms var(--ease-out-expo), background-color 400ms ease; animation: meter-grow 1200ms var(--ease-out-expo) 220ms backwards; }
+.run-meter.is-ok .run-meter-track > i::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgb(255 255 255 / .4), transparent); transform: translateX(-100%); animation: meter-glint 3600ms ease-in-out 1600ms infinite; }
+@keyframes meter-grow { from { width: 0; } }
+@keyframes meter-glint { 0% { transform: translateX(-100%); } 45%, 100% { transform: translateX(100%); } }
+
+/* --------------------------------------------------------------------------
+   Reduce: calm, complete, instant. Delays are zeroed as well as durations so
+   fill-mode backwards can never leave an element waiting invisible.
+   -------------------------------------------------------------------------- */
+.reduced-fx *, .reduced-fx *::before, .reduced-fx *::after { animation-delay: 0s !important; transition-delay: 0s !important; }
+.reduced-fx .amb-halo, .reduced-fx .amb-bloom { display: none; }
+.reduced-fx .amb-cone { animation: none; }
+.reduced-fx [data-glow]::before, .reduced-fx [data-glow]::after { display: none; }
+.reduced-fx .task-field::after, .reduced-fx .followup-field::after, .reduced-fx .operator-option::after, .reduced-fx .operator-option::before { display: none; }
+.reduced-fx .task-field.is-busy::before, .reduced-fx .followup-field.is-busy::before { animation: none; opacity: .6; }
+.reduced-fx .rail-stage[data-st="active"] .rail-node::after, .reduced-fx .rail-stage[data-st="complete"] .rail-node::after,
+.reduced-fx .operator-chip-dot::after, .reduced-fx .backend-badge > span::after, .reduced-fx .empty-mark::after, .reduced-fx .live-dot.is-live::after, .reduced-fx .blocked-dot::after { display: none; }
+.reduced-fx .rail-stage[data-st="active"] .rail-label { animation: none; -webkit-text-fill-color: currentColor; background: none; }
+.reduced-fx .rail-link[data-st="active"] i { animation: none; transform: scaleX(1); width: auto; right: 0; background: color-mix(in srgb, var(--color-accent) 60%, transparent); }
+.reduced-fx .fx-sheen { -webkit-text-fill-color: currentColor; background: none; animation: none; }
+.reduced-fx .attn-still, .reduced-fx .plan-approval, .reduced-fx .tool-approval { animation: none; }
+.reduced-fx .run-button[data-busy]::before { animation: none; display: none; }
+.reduced-fx .run-meter.is-ok .run-meter-track > i::after { display: none; }
+.reduced-fx .run-button[data-busy]::after { animation: none; border-color: currentColor; opacity: .55; }
+@media (prefers-reduced-motion: reduce) {
+  .motion-system *, .motion-system *::before, .motion-system *::after { animation-delay: 0s !important; transition-delay: 0s !important; }
+}

@@ -1,0 +1,163 @@
+[
+  {
+    "name": "tab pill placed and transitions armed",
+    "pass": true,
+    "detail": {
+      "ind": true,
+      "live": true
+    }
+  },
+  {
+    "name": "tab pill travels to the new tab",
+    "pass": true,
+    "detail": {
+      "first": 2,
+      "last": 232,
+      "target": 232
+    }
+  },
+  {
+    "name": "tab pill springs (overshoots, then settles)",
+    "pass": true,
+    "detail": {
+      "peak": 244.9,
+      "last": 232,
+      "distinct": 37
+    }
+  },
+  {
+    "name": "headline words arrive in sequence",
+    "pass": true,
+    "detail": [
+      0.56,
+      0.23,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "name": "headline ends fully visible",
+    "pass": true,
+    "detail": [
+      1,
+      1,
+      1,
+      1,
+      1
+    ]
+  },
+  {
+    "name": "headline keeps its accessible text",
+    "pass": true,
+    "detail": "Tell REX what to do."
+  },
+  {
+    "name": "reduce: shell resolved to reduced-fx",
+    "pass": true
+  },
+  {
+    "name": "reduce: nothing hidden 120ms after load",
+    "pass": true,
+    "detail": 0
+  },
+  {
+    "name": "reduce: ambient halo and breathing removed",
+    "pass": true,
+    "detail": {
+      "shellReduced": true,
+      "hidden": 0,
+      "halo": "none",
+      "cone": "none",
+      "delayed": 0
+    }
+  },
+  {
+    "name": "reduce: no element carries an animation delay",
+    "pass": true,
+    "detail": 0
+  },
+  {
+    "name": "reduce: first-run gate honours the preference",
+    "pass": true,
+    "detail": {
+      "reduced": true,
+      "hidden": 0
+    }
+  },
+  {
+    "name": "system: OS reduce calms the layer too",
+    "pass": true,
+    "detail": {
+      "reduced": true,
+      "hidden": 0
+    }
+  },
+  {
+    "name": "run button :active transform survives its entrance animation",
+    "pass": true,
+    "detail": "matrix(0.97, 0, 0, 0.97, 0, 1)"
+  },
+  {
+    "name": "pointer light tracks the cursor",
+    "pass": true,
+    "detail": {
+      "a": [
+        "200.0px",
+        "80.0px"
+      ],
+      "b": [
+        "600.0px",
+        "120.0px"
+      ]
+    }
+  },
+  {
+    "name": "build/plan pill slides to Plan",
+    "pass": true,
+    "detail": {
+      "before": 2,
+      "after": 57
+    }
+  },
+  {
+    "name": "working: exactly one active stage, ripple running, backdrop reads \"working\"",
+    "pass": true,
+    "detail": {
+      "shell": "working",
+      "active": 1,
+      "link": [
+        "active",
+        "pending"
+      ],
+      "ripple": "node-ripple"
+    }
+  },
+  {
+    "name": "working: no link filled ahead of the active stage",
+    "pass": true,
+    "detail": [
+      "active",
+      "pending"
+    ]
+  },
+  {
+    "name": "done: all stages complete, backdrop reads \"done\", bloom played",
+    "pass": true,
+    "detail": {
+      "shell": "done",
+      "complete": 3,
+      "bloom": "amb-bloom"
+    }
+  },
+  {
+    "name": "gate: arrow keys still move the selection (with focus in the group)",
+    "pass": true,
+    "detail": "An agent"
+  },
+  {
+    "name": "no uncaught page errors while switching every view",
+    "pass": true,
+    "detail": []
+  }
+]

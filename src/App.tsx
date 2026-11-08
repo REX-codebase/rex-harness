@@ -53,6 +53,7 @@ import {
 } from "./data/installedAgentRun";
 import { loadInstalledAgentOptions } from "./components/ModelStatus";
 import { OperatorModeChip, OperatorModeGate } from "./components/OperatorModeGate";
+import { Ambient, runPhase } from "./components/Fx";
 import { loadOperatorMode, saveOperatorMode, type OperatorMode } from "./data/operatorMode";
 import { SetupChecklist } from "./components/SetupChecklist";
 import type { InstalledAgentId } from "./data/backend";
@@ -665,14 +666,26 @@ export default function App() {
 
   if (operatorMode === null) {
     return (
-      <div className="harness-shell min-h-full">
+      <div className={`harness-shell min-h-full motion-${motion} ${reduced ? "reduced-fx" : ""}`} data-motion={motion} data-run="idle">
+        <Ambient reduced={reduced} />
         <OperatorModeGate onChoose={chooseOperatorMode} />
       </div>
     );
   }
 
+  // One word for what the run is doing, whichever engine drives it; the
+  // backdrop tints and breathes to match. Presentation only.
+  const phase = runPhase({
+    agentStatus: liveRun?.status,
+    installedStatus: installedRun?.status,
+    ultraActive: !!ultraRun,
+    ultraTerminalKind: ultraRun?.terminal?.kind,
+    mockState: state,
+  });
+
   return (
-    <div className={`harness-shell min-h-full motion-${motion} ${ultra ? "ultra-on" : ""} ${fast ? "fast-on" : ""} ${fastPhase !== "idle" ? `fast-${fastPhase}` : ""} ${reduced ? "reduced-fx" : ""}`} data-motion={motion} data-ultra={ultra ? "on" : "off"}>
+    <div className={`harness-shell min-h-full motion-${motion} ${ultra ? "ultra-on" : ""} ${fast ? "fast-on" : ""} ${fastPhase !== "idle" ? `fast-${fastPhase}` : ""} ${reduced ? "reduced-fx" : ""}`} data-motion={motion} data-ultra={ultra ? "on" : "off"} data-run={phase}>
+      <Ambient reduced={reduced} />
       <div className="ultra-transition" key={ultraPulse} aria-hidden="true"><span /><span /><span /><span /></div>
       {fastPhase !== "idle" && (
         <div className="fast-transition" key={fastPulse} aria-hidden="true">
@@ -685,7 +698,7 @@ export default function App() {
       <div className="ultra-atmosphere" aria-hidden="true"><span className="ultra-horizon" /><span className="ultra-scan" /></div>
       <TopBar view={view} onView={setView} ultra={ultra} onUltra={() => { setUltra((v) => !v); setUltraPulse((v) => v + 1); }} fast={fast} onFast={toggleFast} />
       <div className="ultra-status" role="status" aria-live="polite"><span>ULTRA</span><b>{ultra ? "Verification tier engaged" : "Verification tier offline"}</b><small>{ultra ? "Contract, adversary and clean-room judge active" : "No extra capabilities are active"}</small></div>
-      <div className="mx-auto w-full max-w-[820px] px-5 pt-3 sm:px-8">
+      <div className="status-wrap mx-auto w-full max-w-[820px] px-5 pt-3 sm:px-8">
         <div className="status-row">
           <OperatorModeChip mode={operatorMode} onSwitch={chooseOperatorMode} />
           <BackendBadge live={liveCapable} />

@@ -70,6 +70,7 @@ export function OperatorModeGate({ onChoose }: { onChoose: (mode: OperatorMode) 
               onClick={() => setPicked(mode)}
               onDoubleClick={() => onChoose(mode)}
               className={`operator-option ${active ? "is-active" : ""}`}
+              data-glow
             >
               <span className="operator-radio" aria-hidden="true" />
               <span className="min-w-0">

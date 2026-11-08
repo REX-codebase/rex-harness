@@ -1,7 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState, type CSSProperties } from "react";
 import { ModelStatus } from "./ModelStatus";
 import { EXAMPLE_TASKS, type RunState } from "../data/mock";
 import type { ExecutionPath } from "../data/executionPath";
+import { useSlideIndicator } from "./Fx";
+
+// The headline arrives word by word; REX itself catches a single sheen.
+const HEADLINE = ["Tell", "REX", "what", "to", "do."];
 
 // Alt+P flips Build/Plan from inside the task field. Pure so it can be
 // tested without a DOM: returns the next plan-mode value, or null when the
@@ -18,6 +22,8 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
   const canRun = task.trim().length > 0 && !busy;
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const optionsRef = useRef<HTMLDivElement>(null);
+  const modeRef = useRef<HTMLDivElement>(null);
+  useSlideIndicator(modeRef, planMode, ".is-on");
   const [optionsOpen, setOptionsOpen] = useState(false);
   const extrasOn = (setSummarizeHistory && summarizeHistory ? 1 : 0) + (fableGate ? 1 : 0);
 
@@ -41,11 +47,18 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
     <section aria-label="New task">
       <div className="mb-5 sm:mb-6">
         <p className="eyebrow">New task</p>
-        <h1 className="mt-2 text-[30px] font-medium leading-[1.12] tracking-[-0.04em] text-text sm:text-[38px]">Tell REX what to do.</h1>
+        <h1 className="mt-2 text-[30px] font-medium leading-[1.12] tracking-[-0.04em] text-text sm:text-[38px]">
+          {HEADLINE.map((word, i) => (
+            <Fragment key={i}>
+              {i > 0 && " "}
+              <span className={word === "REX" ? "fx-sheen" : "fx-word"} style={{ "--w": i } as CSSProperties}>{word}</span>
+            </Fragment>
+          ))}
+        </h1>
         <p className="mt-3 max-w-[54ch] text-sm leading-relaxed text-muted">One clear request. REX will work through it, verify the result, and leave a receipt.</p>
       </div>
 
-      <div className={`task-field ${planMode ? "is-plan" : ""}`}>
+      <div className={`task-field ${planMode ? "is-plan" : ""} ${busy ? "is-busy" : ""}`} data-glow>
         <textarea
           id="task-input"
           ref={areaRef}
@@ -71,7 +84,7 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
             <ModelStatus />
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <div className="mode-seg" role="radiogroup" aria-label="Run mode" title="Alt+P switches mode">
+            <div ref={modeRef} className="mode-seg" role="radiogroup" aria-label="Run mode" title="Alt+P switches mode">
               <button type="button" role="radio" aria-checked={!planMode} disabled={busy} onClick={() => setPlanMode(false)} className={!planMode ? "is-on" : ""}>Build</button>
               <button type="button" role="radio" aria-checked={planMode} disabled={busy} onClick={() => setPlanMode(true)} className={planMode ? "is-on" : ""}>Plan</button>
             </div>
@@ -96,7 +109,7 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
                 </div>
               )}
             </div>
-            <button type="button" onClick={onRun} disabled={!canRun} title={!task.trim() ? "Describe a task first" : busy ? "A run is in progress" : `${planMode ? "Draft the plan" : "Start the run"} (Ctrl+Enter)`} className="run-button" aria-label={busy ? "Run in progress" : planMode ? "Plan task" : "Run task"}>
+            <button type="button" onClick={onRun} disabled={!canRun} title={!task.trim() ? "Describe a task first" : busy ? "A run is in progress" : `${planMode ? "Draft the plan" : "Start the run"} (Ctrl+Enter)`} className="run-button" data-busy={busy ? "" : undefined} aria-label={busy ? "Run in progress" : planMode ? "Plan task" : "Run task"}>
               <span>{busy ? "Running" : planMode ? "Plan" : "Run"}</span>
               <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9m-3.5-3.5L12.5 8 9 11.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
             </button>
