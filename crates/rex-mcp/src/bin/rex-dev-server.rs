@@ -24,7 +24,10 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
 enum Store {
-    Memory(MemorySecretStore),
+    /// One shared in-memory store: every service built by `make_store` below
+    /// holds a handle to the same map, so a key saved through the UI is the
+    /// key the agent run reads. (Each used to get its own empty store.)
+    Memory(Arc<MemorySecretStore>),
     File(FileSecretStore),
 }
 
@@ -106,11 +109,12 @@ fn main() {
         Some(dir) => std::path::PathBuf::from(dir).join("runs"),
         None => std::env::temp_dir().join("rex-dev-runs"),
     };
+    let shared_memory = Arc::new(MemorySecretStore::new());
     let make_store = |dir: &Option<String>| match dir {
         Some(dir) => {
             Store::File(FileSecretStore::new(dir.into()).expect("could not open dev secret store"))
         }
-        None => Store::Memory(MemorySecretStore::new()),
+        None => Store::Memory(Arc::clone(&shared_memory)),
     };
     let live = Arc::new(LiveRunService::new(
         ProviderService::new(make_store(&store_dir), UreqTransport::new()),
@@ -616,6 +620,11 @@ fn route(
                 .get("summarize_history")
                 .and_then(|p| p.as_bool())
                 .unwrap_or(false);
+            // Lean prompt profile; only an explicit `true` turns it on.
+            let lean = parsed
+                .get("lean")
+                .and_then(|p| p.as_bool())
+                .unwrap_or(false);
             // The operator identity is the caller's declaration, recorded
             // for audit; custody decisions never trust the string.
             let operator = match parsed.get("operator").and_then(|o| o.as_str()) {
@@ -663,6 +672,7 @@ fn route(
                         plan_mode,
                     );
                     req.summarize_history = summarize_history;
+                    req.lean = lean;
                     match custody_runs.begin_managed_task(req) {
                         Ok(run) => json_response(
                             200,

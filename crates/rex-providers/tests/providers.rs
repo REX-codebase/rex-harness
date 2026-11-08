@@ -638,3 +638,136 @@ fn hosted_rate_limits_stay_truthful() {
     });
     assert_eq!(result.unwrap_err(), ProviderError::RateLimited);
 }
+
+// ---- base URL and key sharing across service instances -----------------
+//
+// The desktop app and the dev sidecar build several provider services (UI,
+// run service, agent). They share one credential store, but each used to keep
+// the Connect dialog's base URL only in its own memory, so a custom endpoint
+// saved in the UI was invisible to the agent ("no base URL configured").
+
+fn shared_pair() -> (
+    ProviderService<std::sync::Arc<MemorySecretStore>, ScriptedTransport>,
+    ProviderService<std::sync::Arc<MemorySecretStore>, ScriptedTransport>,
+) {
+    let store = std::sync::Arc::new(MemorySecretStore::new());
+    (
+        ProviderService::new(store.clone(), ScriptedTransport::new(vec![])),
+        ProviderService::new(store, ScriptedTransport::new(vec![])),
+    )
+}
+
+#[test]
+fn a_custom_endpoint_saved_by_one_service_is_visible_to_another() {
+    let (ui, agent) = shared_pair();
+    assert!(
+        agent.base_url("custom").is_err(),
+        "a custom provider has no default endpoint"
+    );
+    ui.set_key("custom", "k", Some("https://api.example.test/v1/"))
+        .unwrap();
+    assert_eq!(
+        agent.base_url("custom").unwrap(),
+        "https://api.example.test/v1",
+        "the agent's service must resolve the endpoint the UI saved (trailing slash trimmed)"
+    );
+    assert_eq!(agent.get_key("custom").unwrap().as_deref(), Some("k"));
+}
+
+#[test]
+fn a_non_default_local_server_url_reaches_the_other_service() {
+    let (ui, agent) = shared_pair();
+    assert_eq!(
+        agent.base_url("local").unwrap(),
+        "http://127.0.0.1:11434/v1"
+    );
+    ui.set_key("local", "placeholder", Some("http://127.0.0.1:1234/v1"))
+        .unwrap();
+    assert_eq!(agent.base_url("local").unwrap(), "http://127.0.0.1:1234/v1");
+}
+
+#[test]
+fn an_empty_base_url_restores_the_provider_default() {
+    let (ui, agent) = shared_pair();
+    ui.set_key("local", "k", Some("http://127.0.0.1:9/v1"))
+        .unwrap();
+    ui.set_key("local", "k", Some("  ")).unwrap();
+    assert_eq!(
+        agent.base_url("local").unwrap(),
+        "http://127.0.0.1:11434/v1"
+    );
+}
+
+#[test]
+fn omitting_the_base_url_keeps_the_saved_one() {
+    let (ui, agent) = shared_pair();
+    ui.set_key("custom", "k1", Some("https://a.example.test/v1"))
+        .unwrap();
+    ui.set_key("custom", "k2", None).unwrap();
+    assert_eq!(
+        agent.base_url("custom").unwrap(),
+        "https://a.example.test/v1"
+    );
+}
+
+#[test]
+fn disconnecting_forgets_the_custom_endpoint_everywhere() {
+    let (ui, agent) = shared_pair();
+    ui.set_key("custom", "k", Some("https://api.example.test/v1"))
+        .unwrap();
+    ui.clear_key("custom").unwrap();
+    assert!(agent.base_url("custom").is_err());
+    assert_eq!(agent.get_key("custom").unwrap(), None);
+    assert!(
+        !ui.summaries()
+            .iter()
+            .any(|s| s.id == "custom" && s.base_url.is_some()),
+        "the summary must not advertise a forgotten endpoint"
+    );
+}
+
+#[test]
+fn the_endpoint_slot_never_looks_like_a_connected_provider() {
+    let (ui, _agent) = shared_pair();
+    ui.set_key("custom", "k", Some("https://api.example.test/v1"))
+        .unwrap();
+    let ids: Vec<_> = ui
+        .summaries()
+        .into_iter()
+        .filter(|s| s.has_key)
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(ids, vec!["custom".to_string()]);
+}
+
+#[test]
+fn services_over_separate_handles_to_one_key_file_agree_too() {
+    // The desktop app: each service opens its own FileSecretStore on the same
+    // directory. The file is re-read on every call, so they stay in step.
+    let tmp = tempfile::tempdir().unwrap();
+    let a = ProviderService::new(
+        FileSecretStore::new(tmp.path().to_path_buf()).unwrap(),
+        ScriptedTransport::new(vec![]),
+    );
+    let b = ProviderService::new(
+        FileSecretStore::new(tmp.path().to_path_buf()).unwrap(),
+        ScriptedTransport::new(vec![]),
+    );
+    a.set_key("custom", "k", Some("https://api.example.test/v1"))
+        .unwrap();
+    assert_eq!(b.base_url("custom").unwrap(), "https://api.example.test/v1");
+    a.clear_key("custom").unwrap();
+    assert!(b.base_url("custom").is_err());
+}
+
+#[test]
+fn services_with_unshared_memory_stores_stay_independent() {
+    // Documents why the sidecar must hand every service the same Arc: two
+    // separate in-memory stores genuinely cannot see each other.
+    let a = ProviderService::new(MemorySecretStore::new(), ScriptedTransport::new(vec![]));
+    let b = ProviderService::new(MemorySecretStore::new(), ScriptedTransport::new(vec![]));
+    a.set_key("custom", "k", Some("https://x.example.test/v1"))
+        .unwrap();
+    assert!(b.base_url("custom").is_err());
+    assert_eq!(b.get_key("custom").unwrap(), None);
+}

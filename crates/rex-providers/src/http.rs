@@ -17,6 +17,11 @@ pub trait Transport: Send + Sync {
     }
 }
 
+/// How long one model call may take. A hosted free endpoint can queue a large
+/// request for tens of seconds; the old blanket 20s limit failed healthy
+/// calls (a live run saw 19.3s). Catalog and search GETs keep the short limit.
+pub const GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Production transport over ureq/rustls with a hard global timeout.
 pub struct UreqTransport {
     agent: ureq::Agent,
@@ -49,7 +54,12 @@ impl Transport for UreqTransport {
         headers: &[(String, String)],
         body: &str,
     ) -> Result<(u16, String), ProviderError> {
-        let mut request = self.agent.post(url);
+        let mut request = self
+            .agent
+            .post(url)
+            .config()
+            .timeout_global(Some(GENERATION_TIMEOUT))
+            .build();
         for (name, value) in headers {
             request = request.header(name, value);
         }

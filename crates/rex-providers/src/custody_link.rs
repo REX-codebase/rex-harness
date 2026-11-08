@@ -53,6 +53,9 @@ pub struct ManagedTaskRequest {
     /// Opt-in model summary of tool results that drop out of working
     /// memory. Off unless the caller asks; each summary spends tokens.
     pub summarize_history: bool,
+    /// Lean prompt profile for free and small-context models (see
+    /// `autonomous::RunOptions::lean`). Off unless the caller asks.
+    pub lean: bool,
 }
 
 /// Flat view the shell returns when a custodied run starts or is polled:
@@ -126,6 +129,7 @@ pub fn ui_managed_request(
         },
         plan_mode,
         summarize_history: false,
+        lean: false,
     }
 }
 
@@ -257,6 +261,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> CustodyRunService<S, T> {
                 crate::autonomous::RunOptions {
                     plan_mode: req.plan_mode,
                     summarize_history: req.summarize_history,
+                    lean: req.lean,
                 },
                 SessionMeta::default(),
             )
@@ -564,6 +569,7 @@ mod tests {
             contract,
             plan_mode: false,
             summarize_history: false,
+            lean: false,
         }
     }
 
