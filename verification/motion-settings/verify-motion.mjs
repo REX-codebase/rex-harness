@@ -4,6 +4,13 @@ const out = 'verification/motion-settings';
 const URL_BASE = 'http://127.0.0.1:4173';
 const checks = {};
 const browser = await chromium.launch({ headless: true });
+// The first-run operator gate (rex-operator-mode) now precedes the task surface,
+// so every page this script opens starts with the mode already chosen.
+browser.newPage = async (opts) => {
+  const context = await browser.newContext(opts);
+  await context.addInitScript(() => { try { if (!localStorage.getItem('rex-operator-mode')) localStorage.setItem('rex-operator-mode', 'human'); } catch { /* storage unavailable */ } });
+  return context.newPage();
+};
 
 const shell = (page) => page.locator('.harness-shell');
 const classes = (page) => shell(page).getAttribute('class');
