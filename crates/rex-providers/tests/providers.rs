@@ -538,6 +538,39 @@ fn the_release_switch_cannot_be_thrown_before_the_release() {
 }
 
 #[test]
+fn every_crate_in_the_repository_carries_the_open_source_licence() {
+    // REX is dual licensed. A crate added without the field, or with an old
+    // proprietary one, would leave the repository half-licensed, and the
+    // ChatGPT-plan route is only open to open-source apps.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for name in ["LICENSE-MIT", "LICENSE-APACHE"] {
+        let text = std::fs::read_to_string(root.join(name)).expect(name);
+        assert!(text.len() > 1000, "{name} looks empty");
+    }
+    assert!(std::fs::read_to_string(root.join("LICENSE-MIT"))
+        .unwrap()
+        .contains("Permission is hereby granted, free of charge"));
+    assert!(std::fs::read_to_string(root.join("LICENSE-APACHE"))
+        .unwrap()
+        .contains("Apache License"));
+    let mut manifests: Vec<_> = std::fs::read_dir(root.join("crates"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("Cargo.toml"))
+        .collect();
+    manifests.push(root.join("src-tauri/Cargo.toml"));
+    for manifest in manifests {
+        let text = std::fs::read_to_string(&manifest).expect("a crate manifest");
+        assert!(
+            text.lines()
+                .any(|l| l.trim() == r#"license = "MIT OR Apache-2.0""#),
+            "{} does not declare MIT OR Apache-2.0",
+            manifest.display()
+        );
+    }
+}
+
+#[test]
 fn the_chatgpt_plan_route_is_closed_until_release() {
     // Before the release nothing may start a sign-in, hand out a token, or
     // accept a pasted one; the provider shows as unconnected.

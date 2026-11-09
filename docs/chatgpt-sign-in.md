@@ -28,11 +28,16 @@ Policy and sources: [`subscription-policy.md`](subscription-policy.md).
 
 ## The day REX is open-sourced (checklist)
 
-1. Add the LICENSE file and change every crate's `license = "Proprietary"`.
-2. Set `OPEN_SOURCE_RELEASE` to `true` in `crates/rex-providers/src/policy.rs`.
-   `the_release_switch_cannot_be_thrown_before_the_release` fails until step 1 is
-   done; `subscription_oauth_is_offered_only_on_openais_documented_route` fails
-   until the policy rows agree with the flag.
+1. ~~Add the LICENSE file and change every crate's `license = "Proprietary"`.~~
+   Done (2026-11-09): `MIT OR Apache-2.0`, `LICENSE-MIT` and `LICENSE-APACHE` at
+   the repository root, every manifest updated.
+2. **Make the repository public**, then set `OPEN_SOURCE_RELEASE` to `true` in
+   `crates/rex-providers/src/policy.rs`. The licence is not the same thing as
+   being open source to OpenAI's reviewers: do not flip the switch while the
+   repository is private. `the_release_switch_cannot_be_thrown_before_the_release`
+   checks the licence files and manifests; `subscription_oauth_is_offered_only_on_openais_documented_route`
+   fails until the policy rows agree with the flag. (`rex-mcp`, the sibling
+   repository, still declares its crates `Proprietary`; it was left out on purpose.)
 3. Re-read the sources in `subscription-policy.md` (OpenAI changes this surface;
    the docs call it a preview) and update `OPENAI_SIWC_VERIFIED_ON`.
 4. Replace the text-only button in `src/components/ChatGptPlan.tsx` with OpenAI's

@@ -3,7 +3,7 @@ name = "rex-installed-agents"
 version = "0.1.0"
 edition = "2021"
 description = "Safe adapters for officially scriptable local coding agents"
-license = "Proprietary"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 serde = { workspace = true }
