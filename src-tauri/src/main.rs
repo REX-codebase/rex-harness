@@ -726,6 +726,7 @@ fn now_ms_u128() -> u128 {
 /// plan-only model turn and parks in `awaiting_plan` until the UI approves
 /// it through `custody_decide_plan`. No tool executes before approval.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // one parameter per run option the UI sends
 fn custody_begin(
     custody_runs: State<'_, Arc<CustodyRuns>>,
     task: String,
