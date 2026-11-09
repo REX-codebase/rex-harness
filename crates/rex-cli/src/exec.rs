@@ -136,6 +136,8 @@ pub struct ExecOptions {
 pub struct ExecError {
     pub code: i32,
     pub message: String,
+    /// Help that was asked for (`--help`): printed to stdout, exit 0.
+    pub is_help: bool,
 }
 
 impl ExecError {
@@ -143,12 +145,22 @@ impl ExecError {
         Self {
             code: 2,
             message: msg.into(),
+            is_help: false,
+        }
+    }
+    /// Requested help is not an error: shown on stdout, exits 0.
+    pub(crate) fn help(msg: impl Into<String>) -> Self {
+        Self {
+            code: 0,
+            message: msg.into(),
+            is_help: true,
         }
     }
     pub(crate) fn internal(msg: impl Into<String>) -> Self {
         Self {
             code: 1,
             message: msg.into(),
+            is_help: false,
         }
     }
 }
@@ -1136,7 +1148,7 @@ pub fn run_resume(args: &[String]) -> Result<i32, ExecError> {
             "--json" => json = true,
             "--dry-run" => dry_run = true,
             "--detach" => detach = true,
-            "--help" | "-h" => return Err(ExecError::usage(usage())),
+            "--help" | "-h" => return Err(ExecError::help(usage())),
             other if other.starts_with('-') => {
                 return Err(ExecError::usage(format!("unknown flag '{other}'")));
             }

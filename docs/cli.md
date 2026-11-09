@@ -56,7 +56,7 @@ original. Nothing outside the copy is touched unless you promote the result.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The run completed. |
+| `0` | The run completed. `rex --help` (or `-h`, or `--help` after a command) also exits `0` and prints its usage on stdout. |
 | `1` | Internal error (a bug or an unreadable state folder). |
 | `2` | Usage or configuration problem, or an approval is needed and `--yes` was not given. |
 | `3` | The run ended without completing (budget reached, cancelled, blocked, failed gates, provider error). |

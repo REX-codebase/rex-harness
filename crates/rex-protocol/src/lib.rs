@@ -156,6 +156,10 @@ pub enum ErrorCode {
     GateFailed,
     NoResult,
     Internal,
+    /// The tool was allowed and ran, but the work failed: a command exited
+    /// non-zero or timed out, a file was missing, an I/O error. Distinct from
+    /// `scope_denied`, which means policy refused the call.
+    ToolFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

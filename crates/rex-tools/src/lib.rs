@@ -112,6 +112,20 @@ pub fn clip_middle(text: &str, max: usize) -> (String, bool) {
 const MAX_WRITE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SEARCH_RESULTS: usize = 200;
 const MAX_OUTPUT_BYTES: usize = 512 * 1024;
+
+/// Address-space cap (`RLIMIT_AS`) for a spawned command. It counts reserved
+/// virtual memory, not memory in use, so a linker or compiler needs far more
+/// than it touches: at 1 GiB, linking crashed in 5 of 5 clean builds and in 3
+/// of 4 `cargo test` runs; at 4 GiB every one passed. Enforced on Unix only.
+pub const COMMAND_ADDRESS_SPACE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// CPU seconds (`RLIMIT_CPU`) and open files (`RLIMIT_NOFILE`) a spawned
+/// command gets on Unix. Public with the other limits so the prompt tells the
+/// model the numbers the runtime actually enforces.
+pub const COMMAND_CPU_SECONDS: u64 = 120;
+pub const COMMAND_OPEN_FILES: u64 = 256;
+/// Output kept from one command; the rest is cut and flagged `output_truncated`.
+pub const COMMAND_OUTPUT_BYTES: usize = MAX_OUTPUT_BYTES;
 /// Longest a model-requested command may run; larger requests are cut to it.
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
 const MAX_PENDING: usize = 256;
@@ -1809,6 +1823,13 @@ impl ToolRuntime {
         command
             .env("HOME", &*self.root)
             .env("REX_WORKSPACE", &*self.root);
+        // HOME is the workspace, so a Rust toolchain would look for rustup's
+        // toolchains and cargo's cache under the project (finding none, then
+        // creating stray .cargo/.rustup folders there). Point both at the real
+        // ones instead.
+        for (name, dir) in toolchain_homes(|k| std::env::var_os(k)) {
+            command.env(name, dir);
+        }
         #[cfg(unix)]
         unsafe {
             use std::os::unix::process::CommandExt;
@@ -1825,16 +1846,16 @@ impl ToolRuntime {
                     }
                 }
                 let cpu = libc::rlimit {
-                    rlim_cur: 120,
-                    rlim_max: 120,
+                    rlim_cur: COMMAND_CPU_SECONDS as libc::rlim_t,
+                    rlim_max: COMMAND_CPU_SECONDS as libc::rlim_t,
                 };
                 let mem = libc::rlimit {
-                    rlim_cur: 1024 * 1024 * 1024,
-                    rlim_max: 1024 * 1024 * 1024,
+                    rlim_cur: COMMAND_ADDRESS_SPACE_BYTES as libc::rlim_t,
+                    rlim_max: COMMAND_ADDRESS_SPACE_BYTES as libc::rlim_t,
                 };
                 let files = libc::rlimit {
-                    rlim_cur: 256,
-                    rlim_max: 256,
+                    rlim_cur: COMMAND_OPEN_FILES as libc::rlim_t,
+                    rlim_max: COMMAND_OPEN_FILES as libc::rlim_t,
                 };
                 if libc::setrlimit(libc::RLIMIT_CPU, &cpu) != 0
                     || libc::setrlimit(libc::RLIMIT_AS, &mem) != 0
@@ -2516,6 +2537,32 @@ fn folder_not_file(rel: &str) -> ToolError {
 
 const NOT_ON_PATH: &str = "is not installed or not on PATH";
 
+/// Where cargo's cache and rustup's toolchains really live, for a child whose
+/// HOME is the workspace: an explicit `CARGO_HOME`/`RUSTUP_HOME` wins, else the
+/// default folder under the real home when it exists. `get` reads the
+/// environment (a parameter so tests need not touch the process environment).
+fn toolchain_homes(
+    get: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<(&'static str, std::ffi::OsString)> {
+    let home = get("HOME")
+        .filter(|h| !h.is_empty())
+        .or_else(|| get("USERPROFILE").filter(|h| !h.is_empty()))
+        .map(PathBuf::from);
+    let mut out = Vec::new();
+    for (name, default_dir) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {
+        if let Some(explicit) = get(name).filter(|v| !v.is_empty()) {
+            out.push((name, explicit));
+        } else if let Some(dir) = home
+            .as_ref()
+            .map(|h| h.join(default_dir))
+            .filter(|d| d.is_dir())
+        {
+            out.push((name, dir.into_os_string()));
+        }
+    }
+    out
+}
+
 /// True when some folder on PATH holds a file named `program`.
 fn on_path(program: &str) -> bool {
     std::env::var_os("PATH")
@@ -3087,6 +3134,34 @@ mod tests {
             rt.resolve_approval(&p.call_id, true).unwrap();
         }
         rt.execute(&p.call_id)
+    }
+
+    #[test]
+    fn toolchain_homes_use_explicit_vars_then_the_real_home_defaults() {
+        let home = temp();
+        fs::create_dir_all(home.join(".cargo")).unwrap();
+        // no .rustup under this home: only an existing default is passed on
+        let env = |vars: Vec<(&'static str, std::ffi::OsString)>| {
+            move |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
+        };
+        let got = toolchain_homes(env(vec![("HOME", home.clone().into_os_string())]));
+        assert_eq!(
+            got,
+            vec![("CARGO_HOME", home.join(".cargo").into_os_string())]
+        );
+        let got = toolchain_homes(env(vec![
+            ("HOME", home.clone().into_os_string()),
+            ("RUSTUP_HOME", "/opt/rustup".into()),
+            ("CARGO_HOME", "/opt/cargo".into()),
+        ]));
+        assert_eq!(
+            got,
+            vec![
+                ("CARGO_HOME", "/opt/cargo".into()),
+                ("RUSTUP_HOME", "/opt/rustup".into())
+            ]
+        );
+        assert!(toolchain_homes(env(vec![])).is_empty());
     }
 
     #[test]

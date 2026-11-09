@@ -488,7 +488,7 @@ pub fn run_ps(args: &[String]) -> Result<i32, ExecError> {
                 })?;
             }
             "--help" | "-h" => {
-                return Err(ExecError::usage(
+                return Err(ExecError::help(
                     "usage: rex ps [--all] [--json] [--prune] [--limit N]",
                 ))
             }
