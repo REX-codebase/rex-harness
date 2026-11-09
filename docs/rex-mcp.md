@@ -74,6 +74,9 @@ Add to the MCP servers config (`~/.antigravity/mcp_config.json`):
 2. For the open action: `rex_read` / `rex_edit` / `rex_search` /
    `rex_run` / `rex_test`, each with `task_id` + `lease_epoch`.
    `rex_next` heartbeats the lease and returns the open action.
+   `rex_test` runs a recipe (`cargo-test`, `npm-test`) and records the result
+   as evidence: a failing run comes back as `passed: false` with the end of its
+   output in `summary`, not as an error.
 3. `rex_submit` the action with narrative and evidence. REX verifies and
    issues the next action, or completes the task through custody gates.
 4. `rex_status`, `rex_events`, `rex_result` inspect; `rex_cancel` ends.
@@ -101,8 +104,10 @@ a host cannot force REX to accept a claim. Either side stops cleanly.
 - MCP protocol version: `2025-11-25`; a mismatched `initialize` is
   rejected with `version_mismatch`.
 - Error codes are stable snake_case (`task_not_found`, `stale_lease`,
-  `scope_denied`, `approval_required`, `budget_exceeded`, `gate_failed`,
-  `no_result`, ...). Domain failures travel in JSON-RPC error `data.code`
+  `scope_denied`, `tool_failed`, `approval_required`, `budget_exceeded`,
+  `gate_failed`, `no_result`, ...). `scope_denied` means policy refused the
+  call; `tool_failed` means it was allowed and ran but failed (a command
+  exited non-zero or timed out, a file was missing, an I/O error). Domain failures travel in JSON-RPC error `data.code`
   so MCP transport never erases them.
 - Idempotency: repeating `rex_execute` with the same `request_id` and
   payload resumes; same key with a different payload is

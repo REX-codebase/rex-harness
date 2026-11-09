@@ -130,7 +130,7 @@ fn parse_name_and_json(args: &[String], cmd: &str) -> Result<(String, bool), Exe
         match a.as_str() {
             "--json" => json = true,
             "--help" | "-h" => {
-                return Err(ExecError::usage(format!("usage: rex {cmd} NAME [--json]")));
+                return Err(ExecError::help(format!("usage: rex {cmd} NAME [--json]")));
             }
             other if other.starts_with('-') => {
                 return Err(ExecError::usage(format!(

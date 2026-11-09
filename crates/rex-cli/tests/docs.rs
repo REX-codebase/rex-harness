@@ -155,3 +155,19 @@ fn the_cli_reference_covers_every_command_the_binary_lists() {
         "docs/cli.md never mentions: {missing:?}"
     );
 }
+
+#[test]
+fn help_prints_the_usage_on_stdout_and_exits_zero() {
+    for args in [&["--help"][..], &["-h"], &["exec", "--help"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_rex"))
+            .args(args)
+            .output()
+            .expect("run rex --help");
+        assert!(out.status.success(), "{args:?} exited {:?}", out.status);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("usage:"));
+        assert!(out.stderr.is_empty(), "{args:?} wrote to stderr");
+    }
+    // no command at all is still a usage error
+    let out = Command::new(env!("CARGO_BIN_EXE_rex")).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

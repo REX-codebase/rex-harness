@@ -191,7 +191,7 @@ fn parse_exec(args: &[String]) -> Result<ExecOptions, ExecError> {
             "--skill" => {
                 opts.skills.push(take_value("--skill", &mut i)?);
             }
-            "--help" | "-h" => return Err(ExecError::usage(usage())),
+            "--help" | "-h" => return Err(ExecError::help(usage())),
             other if other.starts_with('-') => {
                 return Err(ExecError::usage(format!("unknown flag '{other}'")));
             }
@@ -273,7 +273,7 @@ fn parse_tournament(args: &[String]) -> Result<TournamentOptions, ExecError> {
             }
             "--json" => opts.json = true,
             "--yes" => opts.yes = true,
-            "--help" | "-h" => return Err(ExecError::usage(usage())),
+            "--help" | "-h" => return Err(ExecError::help(usage())),
             other if other.starts_with('-') => {
                 return Err(ExecError::usage(format!("unknown flag '{other}'")));
             }
@@ -345,7 +345,7 @@ fn parse_redteam(args: &[String]) -> Result<RedteamOptions, ExecError> {
             "--json" => opts.json = true,
             "--yes" => opts.yes = true,
             "--dry-run" => opts.dry_run = true,
-            "--help" | "-h" => return Err(ExecError::usage(usage())),
+            "--help" | "-h" => return Err(ExecError::help(usage())),
             other if other.starts_with('-') => {
                 return Err(ExecError::usage(format!("unknown flag '{other}'")));
             }
@@ -363,7 +363,8 @@ fn parse_redteam(args: &[String]) -> Result<RedteamOptions, ExecError> {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        None | Some("--help") | Some("-h") => Err(ExecError::usage(usage())),
+        None => Err(ExecError::usage(usage())),
+        Some("--help") | Some("-h") => Err(ExecError::help(usage())),
         Some("--version") | Some("-V") => {
             println!("rex {VERSION}");
             return ExitCode::from(0);
@@ -396,6 +397,10 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(code) => ExitCode::from(code as u8),
+        Err(e) if e.is_help => {
+            println!("{}", e.message.trim_end());
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("rex: error: {}", e.message);
             ExitCode::from(e.code as u8)
@@ -416,7 +421,7 @@ fn run_policy(args: &[String]) -> Result<i32, ExecError> {
                         .ok_or_else(|| ExecError::usage("--workspace expects a value"))?,
                 );
             }
-            "--help" | "-h" => return Err(ExecError::usage(usage())),
+            "--help" | "-h" => return Err(ExecError::help(usage())),
             other => {
                 return Err(ExecError::usage(format!("unknown argument '{other}'")));
             }
@@ -438,7 +443,7 @@ fn run_replay_args(args: &[String]) -> Result<i32, ExecError> {
     for a in args {
         match a.as_str() {
             "--json" => json = true,
-            "--help" | "-h" => return Err(ExecError::usage(usage())),
+            "--help" | "-h" => return Err(ExecError::help(usage())),
             other if other.starts_with('-') => {
                 return Err(ExecError::usage(format!("unknown flag '{other}'")))
             }
@@ -467,7 +472,7 @@ fn run_checkin(args: &[String]) -> Result<i32, ExecError> {
                         .ok_or_else(|| ExecError::usage("--file expects a value"))?,
                 );
             }
-            "--help" | "-h" => return Err(ExecError::usage(usage())),
+            "--help" | "-h" => return Err(ExecError::help(usage())),
             other => return Err(ExecError::usage(format!("unknown argument '{other}'"))),
         }
         i += 1;
@@ -493,7 +498,7 @@ fn run_skill(args: &[String]) -> Result<i32, ExecError> {
             for a in &rest {
                 match a.as_str() {
                     "--force" => force = true,
-                    "--help" | "-h" => return Err(ExecError::usage(usage())),
+                    "--help" | "-h" => return Err(ExecError::help(usage())),
                     other if other.starts_with('-') => {
                         return Err(ExecError::usage(format!("unknown flag '{other}'")))
                     }
@@ -651,7 +656,7 @@ fn run_serve_args(args: &[String]) -> Result<i32, ExecError> {
                     .parse::<u16>()
                     .map_err(|_| ExecError::usage("--port expects a port number"))?;
             }
-            "--help" | "-h" => return Err(ExecError::usage(usage())),
+            "--help" | "-h" => return Err(ExecError::help(usage())),
             other => return Err(ExecError::usage(format!("unknown argument '{other}'"))),
         }
         i += 1;
@@ -691,7 +696,7 @@ fn run_mcp(args: &[String]) -> Result<i32, ExecError> {
                     return Err(ExecError::usage("--args must be a JSON object"));
                 }
             }
-            "--help" | "-h" => return Err(ExecError::usage(usage_msg)),
+            "--help" | "-h" => return Err(ExecError::help(usage_msg)),
             "--json" => json_out = true,
             other if other.starts_with('-') => {
                 return Err(ExecError::usage(format!("unknown flag '{other}'")));

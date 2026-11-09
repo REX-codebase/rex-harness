@@ -27,8 +27,10 @@ The model never receives a raw filesystem or process handle.
   clients, privilege tools, destructive file/process commands, and command
   chaining are hard-denied even after approval.
 - Commands require approval, use a workspace cwd, receive a cleared environment
-  with only PATH/HOME/REX_WORKSPACE, have a 120-second ceiling, 512 KiB output
-  ceiling, Unix CPU/address-space/file-descriptor limits, and process-group
+  with only PATH/HOME/REX_WORKSPACE (plus the real CARGO_HOME and RUSTUP_HOME, so
+  cargo finds the installed toolchain and does not create `.cargo`/`.rustup` in
+  the project), have a 120-second ceiling, 512 KiB output ceiling, Unix
+  CPU/address-space (4 GiB)/file-descriptor limits, and process-group
   termination on timeout.
 - Common API keys, bearer tokens, GitHub tokens, and secret assignments are
   redacted before output or errors return to the model.

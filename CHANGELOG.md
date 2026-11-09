@@ -23,6 +23,30 @@ change behaviour).
   CONTRIBUTING and SECURITY.
 
 ### Fixed
+- **Commands crashed while linking.** A command run through the tool runtime was
+  capped at 1 GiB of address space; linking crashed in 5 of 5 clean builds and in
+  3 of 4 `cargo test` runs. The cap is now 4 GiB, with which every run passed.
+- **Failing tests gave no evidence.** `rex_test` turned a recipe that exited
+  non-zero (or timed out, or could not start) into an error, so `passed: false`
+  could never come back and nothing was recorded. It now returns
+  `passed: false`, records the evidence, and puts the cause and the end of the
+  output in `summary`.
+- **Every tool error was `scope_denied`.** A command that ran and failed, a
+  missing file or an I/O error now report the new `tool_failed` code; policy
+  refusals stay `scope_denied`. Hosts that treated every error as a policy denial
+  should read `error.data.code`.
+- **cargo could not find rustup's toolchain.** Commands run with `HOME` set to the
+  project folder, so rustup found no default toolchain and `.cargo`/`.rustup`
+  folders were created in the project. `CARGO_HOME` and `RUSTUP_HOME` now point at
+  the real ones (an explicit value wins, else `~/.cargo` and `~/.rustup`).
+  `HOME` is still the project folder.
+- **`rex_proof_verify` said `false` for a completed task** unless `rex_proof` had
+  been called first, because verification compares against a saved bundle and
+  nothing saved one. The bundle is now saved when the task finishes. Tasks that
+  finished before this fix need one `rex_proof` call before they verify.
+- **`rex --help` exited with an error.** It printed to stderr and exited `2`; it
+  now prints the usage on stdout and exits `0` (also `-h`, and `--help` after a
+  command). `rex` with no command is still a usage error.
 - **Where REX stores its data on Windows.** The desktop app used the temp folder
   whenever `HOME` was unset (always, on Windows), and the CLI used the current
   directory, so a saved key or sign-in could land in `%TEMP%` or in a different

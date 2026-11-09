@@ -27,7 +27,9 @@ Defined in [local-tools.md](local-tools.md) and enforced in `crates/rex-tools`:
   clients, privilege tools, destructive file and process commands, and command
   chaining are denied even after approval.
 - Commands run in the workspace with a cleared environment (only `PATH`, `HOME`
-  and `REX_WORKSPACE`), a 120-second ceiling, a 512 KiB output ceiling, and
+  and `REX_WORKSPACE`, plus the real `CARGO_HOME` and `RUSTUP_HOME` so a Rust
+  toolchain still finds its install), a 120-second CPU ceiling, a 4 GiB
+  address-space cap, a 512 KiB output ceiling, and
   termination of the process group on timeout. Common API keys, bearer tokens
   and secret assignments are redacted from output before the model sees it.
 - Agents work on a **disposable copy** of your workspace. Changes are promoted

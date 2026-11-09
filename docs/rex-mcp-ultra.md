@@ -95,7 +95,8 @@ recomputed response hashes and the canonical hashes of the daemon's
 adversary/verifier/visual records), the promotion receipt and state, the
 event stream folded into an append-only hash chain, and a `bundle_hash`
 over all of it, MACed with a daemon-held key. The bundle is persisted to
-`<REX_STATE_DIR>/proofs/<task_id>.json` and served read-only by the
+`<REX_STATE_DIR>/proofs/<task_id>.json` (written automatically when the task
+reaches a terminal state, and again whenever `rex_proof` is called) and served read-only by the
 dev-server at `GET /api/rex/tasks/<task_id>/proof`.
 `rex_proof_verify` independently re-checks a persisted bundle: the MAC
 against the daemon-held key, content-hash consistency of every persisted

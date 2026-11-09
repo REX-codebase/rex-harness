@@ -9,6 +9,7 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use rex_custody::capability::{hex_sha256, hmac_sha256_hex, random_hex};
+use rex_custody::tools::CustodyToolError;
 use rex_custody::{
     AgentProtocol, CapabilitySet, CapabilityToken, CompletionClaim, CompletionContract,
     Consumption, CustodiedToolRuntime, CustodyAcceptance, CustodyBudgets, CustodyError,
@@ -17,7 +18,7 @@ use rex_custody::{
 };
 use rex_protocol::packets::{OperationStatus, PacketIdentity};
 use rex_protocol::*;
-use rex_tools::{ToolRequest, ToolResult, ToolRuntime};
+use rex_tools::{ErrorKind, ToolError, ToolRequest, ToolResult, ToolRuntime};
 use rex_ultra::artifacts::{ArtifactError, ArtifactStore};
 use rex_ultra::external_kernel::{CandidateResponse, EvidenceKind, HostKernelStatus, KernelState};
 use rex_ultra::host_bridge::{
@@ -556,18 +557,27 @@ impl HarnessDaemon {
                 ))
             }
         };
-        let run = self.run(RunRequest {
-            task_id: req.task_id.clone(),
-            capability: req.capability.clone(),
-            lease_epoch: req.lease_epoch,
-            argv,
-            // run_command cuts every request to its cap, so ask for the cap
-            // itself rather than a 10-minute limit the recipe never gets.
-            timeout_ms: Some(rex_tools::MAX_TIMEOUT_MS),
-        })?;
-        let passed = run.exit_code == Some(0);
+        // A recipe that exits non-zero, times out or cannot start is a failed
+        // test, not an error: record it as evidence with its output. Only a
+        // call that never ran (policy, budget) is an error.
+        let mut t = self.live(&req.task_id, req.lease_epoch, &req.capability)?;
+        let out = self.call_tool_raw(
+            &mut t,
+            ToolRequest::RunCommand {
+                argv,
+                cwd: Some(".".into()),
+                // run_command cuts every request to its cap, so ask for the cap
+                // itself rather than a 10-minute limit the recipe never gets.
+                timeout_ms: Some(rex_tools::MAX_TIMEOUT_MS),
+            },
+        )?;
+        let passed = out.ok && out.receipt.exit_code == Some(0);
+        let detail = out
+            .error
+            .as_ref()
+            .map(|e| e.detail.clone())
+            .unwrap_or_default();
         let evidence_id = format!("evidence-{}", random_id());
-        let mut t = self.load(&req.task_id)?;
         t.registered_evidence.insert(evidence_id.clone());
         t.evidence
             .insert(req.recipe.clone(), format!("{}:{}", evidence_id, passed));
@@ -575,7 +585,8 @@ impl HarnessDaemon {
             &mut t,
             "test_finished",
             json!({"recipe":req.recipe,
-            "passed":passed,"evidence_id":evidence_id}),
+            "passed":passed,"evidence_id":evidence_id,
+            "exit_code":out.receipt.exit_code}),
         )?;
         self.persist(&t)?;
         Ok(TestResponse {
@@ -584,7 +595,7 @@ impl HarnessDaemon {
             summary: if passed {
                 "passed".into()
             } else {
-                format!("failed: {}", run.stderr)
+                format!("failed: {}", bounded_summary(&detail, TEST_SUMMARY_CHARS))
             },
             evidence_id,
         })
@@ -1823,7 +1834,11 @@ impl HarnessDaemon {
         Some(skill_plan_view(plan))
     }
 
-    fn call_tool(
+    /// Run one tool call and return what happened, including a call that ran
+    /// and failed (`ok == false`). Only a call that never ran (budget, policy,
+    /// approval) is an `Err`. The failed call is still counted, journaled and
+    /// persisted, so callers that want its output as evidence can keep it.
+    fn call_tool_raw(
         &self,
         t: &mut DurableTask,
         request: ToolRequest,
@@ -1839,7 +1854,7 @@ impl HarnessDaemon {
         let prepared = self
             .tools
             .prepare(&t.token, request, now)
-            .map_err(|e| map_tool_err(&t.task_id, e.to_string()))?;
+            .map_err(|e| map_prepare_err(&t.task_id, e))?;
         if prepared.approval_required {
             if !self.policy.approve_task_mutations {
                 return Err(perr(
@@ -1850,7 +1865,7 @@ impl HarnessDaemon {
             }
             self.tools
                 .resolve_approval(&prepared.call_id, true)
-                .map_err(|e| map_tool_err(&t.task_id, e.to_string()))?;
+                .map_err(|e| map_prepare_err(&t.task_id, e))?;
         }
         let out = self.tools.execute(&t.token, &prepared.call_id, now_ms());
         t.used_tool_calls += 1;
@@ -1874,14 +1889,20 @@ impl HarnessDaemon {
             "ok":out.ok,"receipt":out.receipt}),
         )?;
         self.persist(t)?;
+        Ok(out)
+    }
+
+    fn call_tool(
+        &self,
+        t: &mut DurableTask,
+        request: ToolRequest,
+    ) -> Result<ToolResult, ProtocolError> {
+        let out = self.call_tool_raw(t, request)?;
         if !out.ok {
-            return Err(map_tool_err(
-                &t.task_id,
-                out.error
-                    .as_ref()
-                    .map(|e| e.detail.clone())
-                    .unwrap_or_else(|| "tool failed".into()),
-            ));
+            return Err(match &out.error {
+                Some(e) => map_tool_err(&t.task_id, e, e.detail.clone()),
+                None => perr(ErrorCode::ToolFailed, "tool failed", &t.task_id),
+            });
         }
         Ok(out)
     }
@@ -2100,7 +2121,26 @@ impl HarnessDaemon {
     fn persist(&self, t: &DurableTask) -> Result<(), ProtocolError> {
         let dir = self.task_dir(&t.task_id);
         fs::create_dir_all(&dir).map_err(internal)?;
-        atomic_json(&dir.join("task.json"), t)
+        atomic_json(&dir.join("task.json"), t)?;
+        if t.state.is_terminal() {
+            self.pin_terminal_proof(&t.task_id);
+        }
+        Ok(())
+    }
+
+    /// Persist the proof bundle the first time a task is seen terminal, so a
+    /// finished task can be verified without anyone having asked for a bundle
+    /// first (verification needs a persisted one to compare against). Every
+    /// terminal transition appends its event before persisting, so the pinned
+    /// bundle covers the whole log. Best-effort: a task that cannot assemble
+    /// one still finishes, and `rex_proof` can be called later.
+    fn pin_terminal_proof(&self, task_id: &str) {
+        let pinned = self.root.join("proofs").join(format!("{task_id}.json"));
+        if !pinned.exists() {
+            let _ = self.proof_bundle(TaskRefRequest {
+                task_id: task_id.to_string(),
+            });
+        }
     }
     fn load(&self, id: &str) -> Result<DurableTask, ProtocolError> {
         if !safe_id(id) {
@@ -2563,8 +2603,28 @@ fn custody_err(e: CustodyError) -> ProtocolError {
     };
     ProtocolError::new(code, e.to_string())
 }
-fn map_tool_err(id: &str, e: String) -> ProtocolError {
-    perr(ErrorCode::ScopeDenied, e, id)
+/// A tool refusal is `scope_denied` (policy said no); a tool that was allowed
+/// and then failed (command exit, timeout, missing file, I/O) is `tool_failed`,
+/// so a host can tell "not permitted" from "ran and went wrong".
+fn map_prepare_err(id: &str, e: CustodyToolError) -> ProtocolError {
+    match &e {
+        CustodyToolError::Tool(inner) => map_tool_err(id, inner, e.to_string()),
+        CustodyToolError::Custody(_) => perr(ErrorCode::ScopeDenied, e.to_string(), id),
+    }
+}
+fn map_tool_err(id: &str, e: &ToolError, message: String) -> ProtocolError {
+    let code = match e.kind {
+        ErrorKind::ProcessFailed
+        | ErrorKind::Timeout
+        | ErrorKind::OutputLimit
+        | ErrorKind::Io
+        | ErrorKind::NotFound
+        | ErrorKind::AlreadyExists
+        | ErrorKind::TooLarge
+        | ErrorKind::Conflict => ErrorCode::ToolFailed,
+        _ => ErrorCode::ScopeDenied,
+    };
+    perr(code, message, id)
 }
 fn parse_search(s: &str) -> Vec<SearchHit> {
     s.lines()
@@ -2581,6 +2641,23 @@ fn parse_search(s: &str) -> Vec<SearchHit> {
         })
         .collect()
 }
+/// How much of a failed recipe's output the test response carries; the full
+/// output is in the task's journal and the run receipt.
+const TEST_SUMMARY_CHARS: usize = 8000;
+
+/// Keep a failure's first line (the cause, e.g. the exit code) and the end of
+/// its output, where a test runner prints what failed.
+fn bounded_summary(detail: &str, max: usize) -> String {
+    if detail.chars().count() <= max {
+        return detail.to_string();
+    }
+    let (head, rest) = detail.split_once('\n').unwrap_or((detail, ""));
+    let keep = max.saturating_sub(head.chars().count() + 8);
+    let skip = rest.chars().count().saturating_sub(keep);
+    let tail: String = rest.chars().skip(skip).collect();
+    format!("{head}\n...\n{tail}")
+}
+
 fn split_output(s: &str) -> (String, String) {
     if let Some((a, b)) = s.split_once("stderr:\n") {
         (
@@ -3536,6 +3613,97 @@ mod tests {
         assert!(report.deterministic);
         assert!(report.response_hashes_verified);
         assert!(report.verdict);
+    }
+
+    #[test]
+    fn a_failing_recipe_is_a_failed_test_with_its_output_not_scope_denied() {
+        let d = tempdir().unwrap();
+        let w = d.path().join("ws");
+        fs::create_dir_all(w.join("src")).unwrap();
+        fs::write(
+            w.join("Cargo.toml"),
+            "[package]\nname = \"failing\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            w.join("src").join("lib.rs"),
+            "#[test]\nfn broken() { assert_eq!(1 + 1, 3, \"arithmetic evidence\"); }\n",
+        )
+        .unwrap();
+        let mut policy = DaemonPolicy::conservative(&w);
+        policy.approve_task_mutations = true;
+        let daemon = HarnessDaemon::open(d.path().join("state"), policy).unwrap();
+        let ex = daemon.execute(req("r-failtest")).unwrap();
+        let resp = daemon
+            .test(TestRequest {
+                task_id: ex.task_id.clone(),
+                capability: cap_of(&ex),
+                lease_epoch: ex.lease.epoch,
+                recipe: "cargo-test".into(),
+            })
+            .expect("a failing recipe is a result, not an error");
+        assert!(!resp.passed);
+        assert!(
+            resp.summary.contains("arithmetic evidence"),
+            "the failure output is the evidence: {}",
+            resp.summary
+        );
+        let t = daemon.load(&ex.task_id).unwrap();
+        assert!(t.registered_evidence.contains(&resp.evidence_id));
+        assert_eq!(
+            t.evidence.get("cargo-test"),
+            Some(&format!("{}:false", resp.evidence_id))
+        );
+    }
+
+    #[test]
+    fn tool_failures_and_policy_refusals_have_different_codes() {
+        let failed = |kind| ToolError {
+            kind,
+            detail: "x".into(),
+        };
+        for kind in [
+            ErrorKind::ProcessFailed,
+            ErrorKind::Timeout,
+            ErrorKind::NotFound,
+            ErrorKind::Io,
+        ] {
+            let e = map_tool_err("t", &failed(kind), "x".into());
+            assert_eq!(e.code, ErrorCode::ToolFailed);
+        }
+        for kind in [
+            ErrorKind::OutsideWorkspace,
+            ErrorKind::PolicyDenied,
+            ErrorKind::SymlinkRefused,
+        ] {
+            let e = map_tool_err("t", &failed(kind), "x".into());
+            assert_eq!(e.code, ErrorCode::ScopeDenied);
+        }
+    }
+
+    #[test]
+    fn a_long_failure_keeps_its_cause_and_its_tail() {
+        let detail = format!(
+            "command exited with code 101; output:\n{}END",
+            "x".repeat(500)
+        );
+        let short = bounded_summary(&detail, 100);
+        assert!(short.starts_with("command exited with code 101; output:"));
+        assert!(short.ends_with("END"));
+        assert!(short.chars().count() < 140);
+        assert_eq!(bounded_summary("short", 100), "short");
+    }
+
+    #[test]
+    fn a_completed_task_verifies_without_asking_for_a_bundle_first() {
+        // Completion itself pins the proof: verifying a finished task must not
+        // depend on someone having called rex_proof beforehand.
+        let (_d, daemon, task_id, _w) = promoted_ultra_task("r-proofauto");
+        let report = daemon
+            .verify_proof_bundle(TaskRefRequest { task_id })
+            .unwrap();
+        assert!(report.persisted_present, "{report:?}");
+        assert!(report.verdict, "{report:?}");
     }
 
     #[test]
