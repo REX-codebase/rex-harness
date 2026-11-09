@@ -532,7 +532,7 @@ function PreviewPicker({ open, setOpen, flow, launch, setFlow, provider, setProv
             ) : (
               <div className="api-preview">
                 <label><span>Provider</span><select value={provider} onChange={(event) => setProvider(event.target.value)}>{PROVIDER_PRESETS.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-                <label><span>API key</span><input value="Stored in desktop keychain" disabled /></label>
+                <label><span>API key</span><input value="Stored on this computer by the app" disabled /></label>
               </div>
             )}
             <button type="button" className="dialog-primary" disabled>Continue when runtime is connected</button>

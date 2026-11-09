@@ -109,6 +109,7 @@ pub(crate) fn run_login(args: &[String]) -> Result<i32, ExecError> {
     let who = done.email.as_deref().unwrap_or("your ChatGPT account");
     if done.plan_usage {
         eprintln!("Signed in as {who}. Using your ChatGPT plan: use `--provider openai-chatgpt`.");
+        eprintln!("{}", storage_note());
         Ok(0)
     } else {
         eprintln!(
@@ -170,6 +171,9 @@ pub(crate) fn run_auth(args: &[String]) -> Result<i32, ExecError> {
                 );
             }
             eprintln!("{}", describe(&status));
+            if status.signed_in {
+                eprintln!("{}", storage_note());
+            }
             Ok(0)
         }
         // not signed in is a state; "not available yet" is too, not a failure
@@ -185,6 +189,14 @@ pub(crate) fn run_auth(args: &[String]) -> Result<i32, ExecError> {
         }
         Err(other) => Err(failure(other)),
     }
+}
+
+/// Where the sign-in lives. It is only ever on this computer.
+fn storage_note() -> String {
+    format!(
+        "The sign-in is saved on this computer only ({}); nothing is stored on a server.",
+        state_dir().join("secrets.json").display()
+    )
 }
 
 fn describe(status: &ChatGptStatus) -> String {

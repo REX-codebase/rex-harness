@@ -53,14 +53,11 @@ fn search_index() -> LocalIndex {
     LocalIndex::open(config_dir().join("search-index.json"))
 }
 
+/// Where the desktop app keeps its local data: credentials, the ChatGPT
+/// sign-in, run history, checkpoints. See `rex_providers::paths` for the rules
+/// (on Windows this is `%LOCALAPPDATA%\rex-harness`, not the temp folder).
 fn config_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("rex-harness");
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".config").join("rex-harness");
-    }
-    std::env::temp_dir().join("rex-harness")
+    rex_providers::paths::data_dir(rex_providers::paths::Flavor::Desktop)
 }
 
 #[tauri::command]

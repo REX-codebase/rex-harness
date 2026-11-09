@@ -159,16 +159,9 @@ impl From<String> for ExecError {
     }
 }
 
+/// Where the CLI keeps its local data (see `rex_providers::paths`).
 pub(crate) fn state_dir() -> PathBuf {
-    std::env::var_os("REX_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".rex")
-                .join("harness")
-        })
+    rex_providers::paths::data_dir(rex_providers::paths::Flavor::Cli)
 }
 
 /// Copy a directory tree into `dst`, skipping version-control metadata and

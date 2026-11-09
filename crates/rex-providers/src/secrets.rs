@@ -1,4 +1,6 @@
 use crate::error::ProviderError;
+use crate::protect::{platform_protector, Protector, KNOWN_PREFIXES};
+use base64::Engine as _;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -85,15 +87,42 @@ impl SecretStore for MemorySecretStore {
 
 /// File-backed store: one JSON map at `<dir>/secrets.json`, permissions
 /// 0600, directory 0700. Keys never enter logs, and the file lives outside
-/// the frontend bundle and the repo. This is a v1 store; an OS-keychain
-/// backend can replace it behind the same trait.
+/// the frontend bundle and the repo. On Windows, where a file mode protects
+/// nothing, each value is also encrypted with DPAPI for the signed-in account
+/// (see [`crate::protect`]); on macOS and Linux the 0600 file is the
+/// protection. The store is local to the machine: nothing here talks to a
+/// server.
 pub struct FileSecretStore {
     path: PathBuf,
     inner: Mutex<()>,
+    /// Seals each value before it is written; `None` where the platform's
+    /// file permissions are the protection.
+    protector: Option<Box<dyn Protector>>,
 }
 
 impl FileSecretStore {
+    /// Open (creating if needed) the store in `dir`, protected the way this
+    /// platform protects it. Values saved in plaintext by an earlier version
+    /// are sealed the first time a protected store opens them.
     pub fn new(dir: PathBuf) -> Result<Self, ProviderError> {
+        Self::with_protector(dir, platform_protector())
+    }
+
+    /// Like [`new`](Self::new) with an explicit protector (or none): a
+    /// different protection scheme, or a test.
+    pub fn with_protector(
+        dir: PathBuf,
+        protector: Option<Box<dyn Protector>>,
+    ) -> Result<Self, ProviderError> {
+        let store = Self::open_dir(dir, protector)?;
+        store.seal_plaintext_values()?;
+        Ok(store)
+    }
+
+    fn open_dir(
+        dir: PathBuf,
+        protector: Option<Box<dyn Protector>>,
+    ) -> Result<Self, ProviderError> {
         fs::create_dir_all(&dir).map_err(|e| ProviderError::Store(e.to_string()))?;
         #[cfg(unix)]
         {
@@ -104,7 +133,68 @@ impl FileSecretStore {
         Ok(Self {
             path: dir.join("secrets.json"),
             inner: Mutex::new(()),
+            protector,
         })
+    }
+
+    /// The form a value takes in the file.
+    fn seal(&self, plain: &str) -> Result<String, ProviderError> {
+        match &self.protector {
+            Some(p) => {
+                let sealed = p.seal(plain.as_bytes())?;
+                Ok(format!(
+                    "{}{}",
+                    p.prefix(),
+                    base64::engine::general_purpose::STANDARD.encode(sealed)
+                ))
+            }
+            None => Ok(plain.to_string()),
+        }
+    }
+
+    /// The credential a stored value stands for.
+    fn open(&self, stored: &str) -> Result<String, ProviderError> {
+        let sealed_by = |prefix: &str| stored.strip_prefix(prefix);
+        if let Some(p) = &self.protector {
+            if let Some(body) = sealed_by(p.prefix()) {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(body)
+                    .map_err(|_| {
+                        ProviderError::Store("a saved credential is damaged".to_string())
+                    })?;
+                let plain = p.open(&bytes)?;
+                return String::from_utf8(plain)
+                    .map_err(|_| ProviderError::Store("a saved credential is damaged".into()));
+            }
+        } else if KNOWN_PREFIXES.iter().any(|k| stored.starts_with(k)) {
+            return Err(ProviderError::Store(
+                "this credential is encrypted for a Windows account and cannot be read here; connect again".into(),
+            ));
+        }
+        Ok(stored.to_string())
+    }
+
+    /// Seal any value an older version left in plaintext.
+    fn seal_plaintext_values(&self) -> Result<(), ProviderError> {
+        let Some(p) = &self.protector else {
+            return Ok(());
+        };
+        let _guard = self
+            .inner
+            .lock()
+            .map_err(|e| ProviderError::Store(e.to_string()))?;
+        let mut map = self.read_map()?;
+        let mut changed = false;
+        for value in map.values_mut() {
+            if !value.starts_with(p.prefix()) {
+                *value = self.seal(value)?;
+                changed = true;
+            }
+        }
+        if changed {
+            self.write_map(&map)?;
+        }
+        Ok(())
     }
 
     fn read_map(&self) -> Result<HashMap<String, String>, ProviderError> {
@@ -163,7 +253,10 @@ impl SecretStore for FileSecretStore {
             .inner
             .lock()
             .map_err(|e| ProviderError::Store(e.to_string()))?;
-        Ok(self.read_map()?.get(provider).cloned())
+        match self.read_map()?.get(provider) {
+            Some(stored) => self.open(stored).map(Some),
+            None => Ok(None),
+        }
     }
     fn set_key(&self, provider: &str, key: &str) -> Result<(), ProviderError> {
         let _guard = self
@@ -171,7 +264,7 @@ impl SecretStore for FileSecretStore {
             .lock()
             .map_err(|e| ProviderError::Store(e.to_string()))?;
         let mut map = self.read_map()?;
-        map.insert(provider.to_string(), key.to_string());
+        map.insert(provider.to_string(), self.seal(key)?);
         self.write_map(&map)
     }
     fn clear_key(&self, provider: &str) -> Result<(), ProviderError> {
@@ -247,6 +340,7 @@ mod tests {
         let fresh = FileSecretStore {
             path: dir.join("secrets.json"),
             inner: Mutex::new(()),
+            protector: None,
         };
         let mut map = HashMap::new();
         map.insert("a".to_string(), "k1".to_string());
@@ -271,5 +365,162 @@ mod tests {
         assert!(failed);
         assert_eq!(store.get_key("a").unwrap().as_deref(), Some("k1"));
         assert_eq!(store.get_key("b").unwrap(), None);
+    }
+
+    // ---- protected values (DPAPI on Windows; a stand-in here) -----------------
+
+    use crate::protect::TestProtector;
+
+    fn protected(dir: &std::path::Path) -> FileSecretStore {
+        FileSecretStore::with_protector(dir.to_path_buf(), Some(Box::new(TestProtector))).unwrap()
+    }
+
+    fn file_text(dir: &std::path::Path) -> String {
+        fs::read_to_string(dir.join("secrets.json")).unwrap()
+    }
+
+    #[test]
+    fn a_protected_store_never_writes_a_value_in_the_clear_and_reads_it_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = protected(tmp.path());
+        store.set_key("gemini", "AIza-secret-value").unwrap();
+        store
+            .set_key("openai-chatgpt#oauth", "{\"refresh\":\"rt-secret\"}")
+            .unwrap();
+        let on_disk = file_text(tmp.path());
+        for secret in ["AIza-secret-value", "rt-secret"] {
+            assert!(!on_disk.contains(secret), "{secret} is in the file");
+        }
+        assert!(on_disk.contains("dpapi1:"));
+        assert_eq!(
+            store.get_key("gemini").unwrap().as_deref(),
+            Some("AIza-secret-value")
+        );
+        assert_eq!(
+            store.get_key("openai-chatgpt#oauth").unwrap().as_deref(),
+            Some("{\"refresh\":\"rt-secret\"}")
+        );
+        assert!(store.has_key("gemini") && !store.has_key("xai"));
+        store.clear_key("gemini").unwrap();
+        assert_eq!(store.get_key("gemini").unwrap(), None);
+        // values saved by one handle are read by a fresh one (another process)
+        assert_eq!(
+            protected(tmp.path())
+                .get_key("openai-chatgpt#oauth")
+                .unwrap()
+                .as_deref(),
+            Some("{\"refresh\":\"rt-secret\"}")
+        );
+    }
+
+    #[test]
+    fn plaintext_left_by_an_older_version_is_read_then_sealed_when_the_store_opens() {
+        let tmp = tempfile::tempdir().unwrap();
+        // what v0.1.0 wrote on Windows: plaintext values
+        fs::write(
+            tmp.path().join("secrets.json"),
+            r#"{"gemini":"AIza-old-plain","xai#base_url":"https://example.test/v1"}"#,
+        )
+        .unwrap();
+        // without a protector it is still plain and still works
+        let plain = FileSecretStore::with_protector(tmp.path().to_path_buf(), None).unwrap();
+        assert_eq!(
+            plain.get_key("gemini").unwrap().as_deref(),
+            Some("AIza-old-plain")
+        );
+        assert!(file_text(tmp.path()).contains("AIza-old-plain"));
+        drop(plain);
+        // opening it with a protector seals every value, losing none
+        let store = protected(tmp.path());
+        let on_disk = file_text(tmp.path());
+        assert!(!on_disk.contains("AIza-old-plain") && !on_disk.contains("example.test"));
+        assert_eq!(
+            store.get_key("gemini").unwrap().as_deref(),
+            Some("AIza-old-plain")
+        );
+        assert_eq!(
+            store.get_key("xai#base_url").unwrap().as_deref(),
+            Some("https://example.test/v1")
+        );
+        // and opening it again changes nothing
+        let before = file_text(tmp.path());
+        let _again = protected(tmp.path());
+        assert_eq!(file_text(tmp.path()), before);
+    }
+
+    #[test]
+    fn a_sealed_file_carried_to_a_system_that_cannot_open_it_explains_and_leaks_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        protected(tmp.path())
+            .set_key("gemini", "AIza-secret-value")
+            .unwrap();
+        let elsewhere = FileSecretStore::with_protector(tmp.path().to_path_buf(), None).unwrap();
+        let err = elsewhere.get_key("gemini").unwrap_err().to_string();
+        assert!(err.contains("encrypted"), "{err}");
+        assert!(!err.contains("AIza-secret-value"));
+        assert!(
+            !elsewhere.has_key("gemini"),
+            "an unreadable credential is not a usable one"
+        );
+        // and it is not handed out as if it were the key
+        assert!(!matches!(elsewhere.get_key("gemini"), Ok(Some(_))));
+    }
+
+    #[test]
+    fn a_damaged_sealed_value_is_an_error_not_a_panic_or_a_wrong_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = protected(tmp.path());
+        store.set_key("gemini", "AIza-secret-value").unwrap();
+        for broken in ["dpapi1:!!!not base64!!!", "dpapi1:", "dpapi1:AAAA"] {
+            fs::write(
+                tmp.path().join("secrets.json"),
+                format!(r#"{{"gemini":"{broken}"}}"#),
+            )
+            .unwrap();
+            let result = store.get_key("gemini");
+            assert!(
+                !matches!(&result, Ok(Some(v)) if v.contains("AIza")),
+                "{broken}: {result:?}"
+            );
+            assert!(!store.has_key("gemini") || result.is_ok());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_protected_file_is_still_private_to_the_user() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = protected(tmp.path());
+        store.set_key("a", "k1").unwrap();
+        assert_eq!(mode(&tmp.path().join("secrets.json")), 0o600);
+    }
+
+    #[test]
+    fn the_platform_protector_is_dpapi_on_windows_and_none_elsewhere() {
+        let p = crate::protect::platform_protector();
+        if cfg!(windows) {
+            assert_eq!(p.expect("DPAPI on Windows").prefix(), "dpapi1:");
+        } else {
+            assert!(p.is_none(), "the 0600 file is the protection off Windows");
+        }
+    }
+
+    /// On Windows this exercises real DPAPI through the store.
+    #[test]
+    fn the_default_store_round_trips_on_every_platform() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::new(tmp.path().to_path_buf()).unwrap();
+        store.set_key("gemini", "AIza-secret-value").unwrap();
+        assert_eq!(
+            FileSecretStore::new(tmp.path().to_path_buf())
+                .unwrap()
+                .get_key("gemini")
+                .unwrap()
+                .as_deref(),
+            Some("AIza-secret-value")
+        );
+        if cfg!(windows) {
+            assert!(!file_text(tmp.path()).contains("AIza-secret-value"));
+        }
     }
 }

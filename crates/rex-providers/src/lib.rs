@@ -22,7 +22,9 @@ mod history;
 pub mod http;
 mod memory;
 mod output_store;
+pub mod paths;
 pub mod policy;
+pub mod protect;
 mod provider_failure;
 pub mod providers;
 mod responses;
@@ -60,6 +62,7 @@ pub use policy::{
     access_policies, AccessKind, AccessPolicy, PolicyStatus, OPENAI_SIWC_VERIFIED_ON,
     OPEN_SOURCE_RELEASE, VERIFIED_ON,
 };
+pub use protect::{platform_protector, Protector};
 pub use providers::{find_spec, registry, ModelDiscovery, ProviderProtocol, ProviderSpec};
 pub use responses::USAGE_SETTINGS_URL as CHATGPT_USAGE_URL;
 pub use search::{SearchProvider, SearchProviderSummary, SearchRouter};
