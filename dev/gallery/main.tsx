@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "../../src/index.css";
+import "../../src/motion-ui.css";
 import "../../src/preview-runtime.css";
 import { AgentRunView } from "../../src/components/AgentRunView";
 import type { AgentSnapshot } from "../../src/data/agentTypes";

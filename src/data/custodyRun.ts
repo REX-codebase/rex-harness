@@ -2,6 +2,7 @@
 // grant-clamped budgets and gated completion. Snapshots and views only;
 // the capability token never crosses this layer.
 import { backendKind } from "./backend";
+import { defaultLean } from "./providers";
 import type { AgentSnapshot } from "./agentTypes";
 
 export interface CustodiedRunView {
@@ -35,7 +36,7 @@ async function call<T>(cmd: string, path: string, args?: Record<string, unknown>
   throw new Error("no backend");
 }
 
-function selectedModel(): { provider: string; model?: string } {
+export function selectedModel(): { provider: string; model?: string } {
   let provider = "gemini";
   let model: string | undefined;
   try {
@@ -49,8 +50,11 @@ function selectedModel(): { provider: string; model?: string } {
 // `summarizeHistory` opts in to a model-written summary of tool results
 // that drop out of working memory. Off by default: each summary is an
 // extra model call on the user's key.
-export const custodyBegin = (task: string, planMode = false, summarizeHistory = false) => {
+// `lean` left undefined follows the provider: on for the free-tier presets,
+// whose token budgets are small, off elsewhere. An explicit choice wins.
+export const custodyBegin = (task: string, planMode = false, summarizeHistory = false, lean?: boolean) => {
   const { provider, model } = selectedModel();
+  const leanProfile = lean ?? defaultLean(provider);
   // Tauri reads camelCase args, the sidecar snake_case; each transport
   // ignores the other's spelling.
   return call<CustodiedRunView>("custody_begin", "/api/agent/custody/runs", {
@@ -61,6 +65,7 @@ export const custodyBegin = (task: string, planMode = false, summarizeHistory = 
     plan_mode: planMode,
     summarizeHistory,
     summarize_history: summarizeHistory,
+    lean: leanProfile,
   });
 };
 

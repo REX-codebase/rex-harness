@@ -218,6 +218,24 @@ pub fn access_policies(provider: &str) -> Vec<AccessPolicy> {
                 &["https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/"],
             ),
         ],
+        // Free tiers exist, but they are the account holder's own allowance for
+        // development and evaluation. These entries say so and make no
+        // verification claim: the provider's current terms are what govern.
+        "nvidia" => vec![api_key(
+            "NVIDIA NIM API key",
+            "A key from your own build.nvidia.com account. The free tier is rate limited and meant for development and evaluation, not for serving other people; check NVIDIA's current terms before relying on it for anything else.",
+            &[],
+        )],
+        "groq" => vec![api_key(
+            "Groq API key",
+            "A key from your own Groq account. The free tier has small per-minute token limits, which REX works around by waiting out rate limits; building an app on Groq is one thing, reselling access to it is another, so read Groq's current terms before sharing a key.",
+            &[],
+        )],
+        "openrouter" => vec![api_key(
+            "OpenRouter API key",
+            "A key from your own OpenRouter account. Models whose id ends in :free have tight daily request limits; failed requests count against them.",
+            &[],
+        )],
         "local" => vec![api_key("Local server", "Your own server on your own machine; a key only if the server asks for one.", &[])],
         "custom" => vec![api_key(
             "Custom endpoint",

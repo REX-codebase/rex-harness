@@ -98,6 +98,30 @@ pub fn registry() -> Vec<ProviderSpec> {
             default_base_url: Some("https://open.bigmodel.cn/api/paas/v4"),
             discovery: ModelDiscovery::OpenAiModels,
         },
+        // Hosted OpenAI-compatible services with a free tier. They are ordinary
+        // API-key providers; the free tier is the user's own account and is
+        // meant for development and evaluation (see policy.rs).
+        ProviderSpec {
+            id: "nvidia",
+            name: "NVIDIA NIM",
+            protocol: ProviderProtocol::OpenAiCompatible,
+            default_base_url: Some("https://integrate.api.nvidia.com/v1"),
+            discovery: ModelDiscovery::OpenAiModels,
+        },
+        ProviderSpec {
+            id: "groq",
+            name: "Groq",
+            protocol: ProviderProtocol::OpenAiCompatible,
+            default_base_url: Some("https://api.groq.com/openai/v1"),
+            discovery: ModelDiscovery::OpenAiModels,
+        },
+        ProviderSpec {
+            id: "openrouter",
+            name: "OpenRouter",
+            protocol: ProviderProtocol::OpenAiCompatible,
+            default_base_url: Some("https://openrouter.ai/api/v1"),
+            discovery: ModelDiscovery::OpenAiModels,
+        },
         ProviderSpec {
             id: "local",
             name: "Local server",

@@ -30,7 +30,9 @@
 //! truthful terminal reasons.
 
 use crate::http::Transport;
-use crate::provider_failure::structured_http_failure;
+use crate::provider_failure::{
+    describe_wait, plan_rate_limit_wait, structured_http_failure, RateWait,
+};
 use crate::providers::{find_spec, ProviderProtocol};
 use crate::search::{SearchProvider, SearchRouter};
 use crate::secrets::SecretStore;
@@ -361,6 +363,10 @@ struct TaskBrief {
     /// legacy brief, because each summary spends tokens.
     #[serde(default)]
     summarize_history: bool,
+    /// Lean prompt profile (see `RunOptions::lean`). Persisted so a resumed
+    /// run keeps the same prompt identity and tool scope. Legacy briefs: off.
+    #[serde(default)]
+    lean: bool,
     /// Human-given session label (`rex exec --name`). Purely cosmetic: it
     /// never changes what the run may do. Legacy briefs carry none.
     #[serde(default)]
@@ -434,6 +440,11 @@ struct Checkpoint {
     same_call_repeats: u32,
     consec_stall: u32,
     turns_since_progress: u32,
+    /// The one-shot final check (see `restrict_to_final_check`) has been
+    /// offered for the current stall. Cleared when real progress resumes, so
+    /// each stall gets exactly one chance and never a loop of them.
+    #[serde(default)]
+    final_check_offered: bool,
     total_denials: u32,
     any_mutating_success: bool,
     model: String,
@@ -793,6 +804,10 @@ pub struct RunOptions {
     /// Fold tool results that drop out of working memory into a
     /// model-written summary. Each summary is one extra model call.
     pub summarize_history: bool,
+    /// Lean prompt for free and small-context models: an 11-tool core, no
+    /// skills catalog, compact state. Roughly halves each request; gives up
+    /// web search/fetch, skills, memory and sub-agent exploration.
+    pub lean: bool,
 }
 
 pub struct AutonomousRunService<S: SecretStore + 'static, T: Transport + 'static> {
@@ -975,6 +990,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
         let RunOptions {
             plan_mode,
             summarize_history,
+            lean,
         } = opts;
         let task = task.trim();
         if task.is_empty() {
@@ -1037,7 +1053,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
         };
         fs::create_dir_all(state_dir.join("evidence")).map_err(|e| e.to_string())?;
         fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
-        let (scoped_tools, allowed_tools) = scoped_tools_for(role);
+        let (scoped_tools, allowed_tools) = lean_scope(scoped_tools_for(role), lean);
         let (system_prompt, prompt_version, prompt_hash) = assemble_run_prompt(role, &scoped_tools);
         let brief = TaskBrief {
             id: id.clone(),
@@ -1051,6 +1067,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
             allowed_tools,
             plan_mode,
             summarize_history,
+            lean,
             name: session.name,
             continued_from: session.continued_from,
         };
@@ -1974,17 +1991,35 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
             );
             return;
         }
+        let mut final_check = false;
         if cp.turns_since_progress >= MAX_NO_PROGRESS_TURNS && cp.step > 0 {
-            finish(
-                &ctx,
-                &mut ledger,
-                TerminalReason::NoProgress {
-                    turns: cp.turns_since_progress,
+            if cp.final_check_offered {
+                finish(
+                    &ctx,
+                    &mut ledger,
+                    TerminalReason::NoProgress {
+                        turns: cp.turns_since_progress,
+                    },
+                    started,
+                    &cp,
+                );
+                return;
+            }
+            // A model that has done the work but never says so looks exactly
+            // like a stalled one. Before failing the run, give it one turn in
+            // which the only moves are "claim completion" (the gates still
+            // verify the claim against the workspace) or "ask one question".
+            cp.final_check_offered = true;
+            final_check = true;
+            RunHandle::push_event(
+                &ctx.handle.shared,
+                AgentEvent::Info {
+                    message: format!(
+                        "no progress for {} turns; offering one final check: declare completion or ask a question",
+                        cp.turns_since_progress
+                    ),
                 },
-                started,
-                &cp,
             );
-            return;
         }
 
         // ---- opt-in summary of history dropped from working memory -------
@@ -2014,7 +2049,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
             )),
             None => Vec::new(),
         };
-        let state_msg = build_state_message(
+        let mut state_msg = build_state_message(
             &ctx.brief,
             &cp,
             budgets,
@@ -2023,13 +2058,17 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
             user_rules.as_ref(),
             &skills,
             &notes,
+            ctx.brief.lean,
         );
+        if final_check {
+            state_msg.push_str(&final_check_directive(cp.turns_since_progress));
+        }
         // Images read_file queued last turn ride on this turn only.
         let reads = tools.take_images();
         let show = !images_rejected;
         let (wire_images, evidence_images) = WireImage::from_reads(&reads, show);
         let build = |images: &[WireImage]| {
-            build_request(
+            let body = build_request(
                 protocol,
                 &model,
                 &ctx.system_prompt,
@@ -2037,7 +2076,20 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
                 cp.last_pair.as_ref(),
                 &ctx.mcp_tools,
                 images,
-            )
+            );
+            // Declare only the tools this run may actually call. The prompt
+            // already lists just those, and the harness refuses the rest, so
+            // sending their schemas was pure cost (the lean profile and
+            // role-scoped runs such as the adversary both rely on this).
+            let body = match &ctx.brief.allowed_tools {
+                Some(allowed) => retain_tools(protocol, &body, |n| allowed.iter().any(|a| a == n)),
+                None => body,
+            };
+            if final_check {
+                restrict_to_final_check(protocol, &body)
+            } else {
+                body
+            }
         };
         let mut request_body = build(&wire_images);
         let mut evidence_body = if show && !reads.is_empty() {
@@ -2091,7 +2143,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
                 finish(
                     &ctx,
                     &mut ledger,
-                    TerminalReason::ProviderError { detail },
+                    provider_failure_reason(&ctx.handle, detail),
                     started,
                     &cp,
                 );
@@ -2158,6 +2210,22 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
         }
 
         // ---- execute the turn's calls ------------------------------------
+        let turn_calls = if final_check {
+            let (kept, refused) = keep_final_check_calls(decoded.calls);
+            if refused > 0 {
+                RunHandle::push_event(
+                    &ctx.handle.shared,
+                    AgentEvent::Info {
+                        message: format!(
+                            "refused {refused} tool call(s) during the final check; only update_plan, complete_task or ask_user are allowed"
+                        ),
+                    },
+                );
+            }
+            kept
+        } else {
+            decoded.calls
+        };
         let out = execute_turn(
             &ctx,
             &tools,
@@ -2168,7 +2236,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
                 key: &key,
                 model: &model,
             },
-            decoded.calls,
+            turn_calls,
             decoded.thought_signature,
             &mut cp,
             started,
@@ -2218,6 +2286,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
         }
         if out.progress {
             cp.turns_since_progress = 0;
+            cp.final_check_offered = false;
         } else {
             cp.turns_since_progress += 1;
         }
@@ -2257,6 +2326,7 @@ fn build_state_message(
     user_rules: Option<&rex_prompt::project::ProjectInstructions>,
     skills: &[rex_prompt::skills::SkillInfo],
     notes: &[String],
+    lean: bool,
 ) -> String {
     let digest: Vec<&DigestEntry> = cp.digest.iter().rev().take(DIGEST_WINDOW).collect();
     let digest: Vec<&DigestEntry> = digest.into_iter().rev().collect();
@@ -2301,7 +2371,9 @@ fn build_state_message(
                 "items": notes,
             })
         },
-        "skills": if skills.is_empty() {
+        "skills": if skills.is_empty() || lean {
+            // The lean profile has no load_skill tool, so a catalog would
+            // only spend tokens on things the model cannot open.
             Value::Null
         } else {
             json!({
@@ -2325,7 +2397,12 @@ fn build_state_message(
             ""
         },
     });
-    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".into())
+    let text = if lean {
+        serde_json::to_string(&payload)
+    } else {
+        serde_json::to_string_pretty(&payload)
+    };
+    text.unwrap_or_else(|_| "{}".into())
 }
 
 /// The loop's actual tool offering, mirrored into the prompt's tool
@@ -2781,6 +2858,161 @@ fn lowercase_schema(mut value: Value) -> Value {
     value
 }
 
+/// The only moves open during the final check. `update_plan` is included so
+/// a model can close its finished plan items and claim completion in the same
+/// turn: the gates refuse a claim while plan items are unfinished, so without
+/// it a stalled run that kept a plan could never recover.
+const FINAL_CHECK_TOOLS: [&str; 3] = ["update_plan", "complete_task", "ask_user"];
+
+fn final_check_directive(turns: u32) -> String {
+    format!(
+        "\n\nFINAL CHECK. You have made no progress for {turns} turns. That usually means the work is already done and only the completion claim is missing. If the task is finished, call update_plan to mark every finished item done and call complete_task in the same turn, with a short summary of the evidence you observed; the harness verifies the claim against the workspace, so only claim what you actually saw. If you are blocked or something is unclear, call ask_user with one specific question. No other tool is available this turn."
+    )
+}
+
+/// Offer only `update_plan`, `complete_task` and `ask_user` for one turn. The request is
+/// rewritten after it is built, so the normal builder, prompt identity and
+/// evidence files stay untouched. Gemini and Anthropic are told they must
+/// call a tool; for OpenAI-compatible hosts the narrowed list stays on
+/// `tool_choice: auto`, because "required" is not accepted by every hosted
+/// model and a 400 here would waste the one chance.
+fn restrict_to_final_check(protocol: ProviderProtocol, body: &str) -> String {
+    let narrowed = retain_tools(protocol, body, |n| FINAL_CHECK_TOOLS.contains(&n));
+    let Ok(mut request) = serde_json::from_str::<Value>(&narrowed) else {
+        return body.to_string();
+    };
+    match protocol {
+        ProviderProtocol::Gemini => {
+            request["toolConfig"] = json!({"functionCallingConfig":{
+                "mode":"ANY","allowedFunctionNames": FINAL_CHECK_TOOLS}});
+        }
+        ProviderProtocol::Anthropic => {
+            request["tool_choice"] = json!({"type":"any"});
+        }
+        // Left on `auto`: not every hosted model accepts "required".
+        ProviderProtocol::OpenAiCompatible => {}
+    }
+    request.to_string()
+}
+
+/// Keep only the tool declarations whose name passes `keep`, for any of the
+/// three wire formats. Everything else in the request is left untouched, and
+/// unparseable input is returned as is.
+fn retain_tools(protocol: ProviderProtocol, body: &str, keep: impl Fn(&str) -> bool) -> String {
+    let Ok(mut request) = serde_json::from_str::<Value>(body) else {
+        return body.to_string();
+    };
+    match protocol {
+        ProviderProtocol::Gemini => {
+            if let Some(decls) = request
+                .pointer_mut("/tools/0/functionDeclarations")
+                .and_then(Value::as_array_mut)
+            {
+                decls.retain(|d| d["name"].as_str().is_some_and(&keep));
+            }
+        }
+        ProviderProtocol::Anthropic => {
+            if let Some(tools) = request.get_mut("tools").and_then(Value::as_array_mut) {
+                tools.retain(|t| t["name"].as_str().is_some_and(&keep));
+            }
+        }
+        ProviderProtocol::OpenAiCompatible => {
+            if let Some(tools) = request.get_mut("tools").and_then(Value::as_array_mut) {
+                tools.retain(|t| {
+                    t.pointer("/function/name")
+                        .and_then(Value::as_str)
+                        .is_some_and(&keep)
+                });
+            }
+        }
+    }
+    request.to_string()
+}
+
+/// The lean profile's tool core: enough to plan, read, change, search, run,
+/// page long output, ask, and claim completion.
+const LEAN_TOOLS: [&str; 11] = [
+    "update_plan",
+    "read_file",
+    "create_file",
+    "edit_file",
+    "apply_patch",
+    "search_files",
+    "glob_files",
+    "run_command",
+    "read_output",
+    "complete_task",
+    "ask_user",
+];
+
+/// Narrow a run's tool scope to the lean core. The result feeds the system
+/// prompt's tool contract AND the enforced allowlist, so the model is never
+/// told about, or allowed, a tool the lean profile dropped. A role that is
+/// already narrower than the core stays as narrow as it was.
+fn lean_scope(
+    (mut specs, allowed): (Vec<ToolSpec>, Option<Vec<String>>),
+    lean: bool,
+) -> (Vec<ToolSpec>, Option<Vec<String>>) {
+    if !lean {
+        return (specs, allowed);
+    }
+    specs.retain(|s| LEAN_TOOLS.contains(&s.name.as_str()));
+    let names = specs.iter().map(|s| s.name.clone()).collect();
+    (specs, Some(names))
+}
+
+/// Keep only the calls the final check allows. A weak model may ignore the
+/// narrowed tool list, so the harness enforces it too. Returns the kept
+/// calls and how many were refused.
+fn keep_final_check_calls(
+    calls: Vec<(AgentCall, Option<Value>)>,
+) -> (Vec<(AgentCall, Option<Value>)>, usize) {
+    let total = calls.len();
+    let kept: Vec<_> = calls
+        .into_iter()
+        .filter(|(c, _)| {
+            matches!(
+                c,
+                AgentCall::CompleteTask { .. }
+                    | AgentCall::AskUser { .. }
+                    | AgentCall::UpdatePlan { .. }
+            )
+        })
+        .collect();
+    let refused = total - kept.len();
+    (kept, refused)
+}
+
+/// A failed model call ends the run as a provider error, unless the person
+/// pressed Cancel: then it is a cancellation, not a failure. (Waits can now
+/// last a long time, so Cancel landing mid-call is the common case.)
+fn provider_failure_reason(handle: &RunHandle, detail: String) -> TerminalReason {
+    if detail == "cancelled" || handle.cancel.load(Ordering::SeqCst) {
+        TerminalReason::Cancelled
+    } else {
+        TerminalReason::ProviderError { detail }
+    }
+}
+
+/// Sleep in short slices so Cancel is honoured within a fraction of a second
+/// even in the middle of a long rate-limit wait. False means cancelled. Test
+/// builds shrink the wait so the suite does not sit through real minutes.
+fn sleep_cancellable(handle: &RunHandle, secs: f64) -> bool {
+    #[cfg(test)]
+    let secs = secs * 0.01;
+    let deadline = Instant::now() + Duration::from_secs_f64(secs.max(0.0));
+    loop {
+        if handle.cancel.load(Ordering::SeqCst) {
+            return false;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(200)));
+    }
+}
+
 fn generate_with_retry<T: Transport>(
     transport: &T,
     protocol: ProviderProtocol,
@@ -2818,13 +3050,43 @@ fn generate_with_retry<T: Transport>(
         ),
     };
     let mut attempt = 0u32;
+    // Rate limits are a different animal from outages: the provider usually
+    // says exactly when the window reopens, so we wait that long (visibly and
+    // cancellably) instead of burning the three quick retries in two seconds.
+    let mut rate_waits = 0u32;
+    let mut rate_waited = 0.0f64;
     loop {
-        attempt += 1;
         if handle.cancel.load(Ordering::SeqCst) {
             return Err("cancelled".into());
         }
         let result = transport.post(&url, &headers, body);
-        let retryable = matches!(&result, Ok((429, _)) | Ok((500..=599, _)) | Err(_));
+        if let Ok((429, text)) = &result {
+            match plan_rate_limit_wait(text, rate_waits, rate_waited) {
+                RateWait::Wait(secs) => {
+                    rate_waits += 1;
+                    rate_waited += secs;
+                    RunHandle::push_event(
+                        &handle.shared,
+                        AgentEvent::Retry {
+                            attempt: rate_waits,
+                            reason: describe_wait(secs),
+                        },
+                    );
+                    if !sleep_cancellable(handle, secs) {
+                        return Err("cancelled".into());
+                    }
+                    continue;
+                }
+                RateWait::GiveUp => {
+                    return Err(format!(
+                        "provider HTTP 429: {}",
+                        structured_http_failure(429, text)
+                    ));
+                }
+            }
+        }
+        attempt += 1;
+        let retryable = matches!(&result, Ok((500..=599, _)) | Err(_));
         match result {
             Ok((status, text)) if status / 100 == 2 => return Ok(text),
             Ok((status, text)) => {
@@ -5285,7 +5547,7 @@ fn plan_gate<S: SecretStore + 'static, T: Transport + 'static>(
             &ctx.handle,
         ) {
             Ok(r) => r,
-            Err(detail) => return PlanGate::Failed(TerminalReason::ProviderError { detail }),
+            Err(detail) => return PlanGate::Failed(provider_failure_reason(&ctx.handle, detail)),
         };
         let _ = fs::write(
             ctx.state_dir
@@ -5789,6 +6051,8 @@ mod tests {
         max_in_flight: std::sync::atomic::AtomicUsize,
         /// Act like a text-only model: 400 on any request carrying an image.
         reject_images: std::sync::atomic::AtomicBool,
+        /// Body returned with the scripted failures (default: a bare message).
+        fail_body: Mutex<Option<String>>,
     }
 
     impl Script {
@@ -5801,6 +6065,7 @@ mod tests {
                 in_flight: Default::default(),
                 max_in_flight: Default::default(),
                 reject_images: Default::default(),
+                fail_body: Default::default(),
             }
         }
         fn failing(turns: Vec<String>, count: u32, status: u16) -> Self {
@@ -5812,7 +6077,16 @@ mod tests {
                 in_flight: Default::default(),
                 max_in_flight: Default::default(),
                 reject_images: Default::default(),
+                fail_body: Default::default(),
             }
+        }
+        /// `count` rate-limit answers in the shape Groq really returns.
+        fn rate_limited(turns: Vec<String>, count: u32, try_again_in: &str) -> Self {
+            let me = Self::failing(turns, count, 429);
+            *me.fail_body.lock().unwrap() = Some(format!(
+                r#"{{"error":{{"message":"Rate limit reached for model `m` in organization `org_x` on tokens per minute (TPM): Limit 8000, Used 6062, Requested 6439. Please try again in {try_again_in}. Need more tokens? Upgrade.","type":"tokens","code":"rate_limit_exceeded"}}}}"#
+            ));
+            me
         }
         fn seen(&self) -> Vec<String> {
             self.posts.lock().unwrap().clone()
@@ -5851,7 +6125,11 @@ mod tests {
                 let mut fail = self.fail_posts.lock().unwrap();
                 if fail.0 > 0 {
                     fail.0 -= 1;
-                    return Ok((fail.1, r#"{"error":{"message":"scripted failure"}}"#.into()));
+                    let body =
+                        self.fail_body.lock().unwrap().clone().unwrap_or_else(|| {
+                            r#"{"error":{"message":"scripted failure"}}"#.into()
+                        });
+                    return Ok((fail.1, body));
                 }
             }
             let next = self.turns.lock().unwrap().pop_front();
@@ -6072,6 +6350,7 @@ mod tests {
             allowed_tools: None,
             plan_mode: false,
             summarize_history: false,
+            lean: false,
             name: None,
             continued_from: None,
         };
@@ -6183,6 +6462,395 @@ mod tests {
             done.terminal_reason,
             Some(TerminalReason::NoProgress { .. })
         ));
+    }
+
+    fn stalled_turns(extra: Vec<String>) -> Vec<String> {
+        // The shape a real weak model produced: it does the work, then
+        // re-reads the file forever without ever declaring completion.
+        let mut turns = vec![call_turn(vec![
+            plan_call(vec![("1", "make a file", "in_progress")]),
+            create_call("a.txt", "alpha"),
+        ])];
+        for _ in 0..MAX_NO_PROGRESS_TURNS {
+            turns.push(call_turn(vec![read_call("a.txt")]));
+        }
+        turns.extend(extra);
+        turns
+    }
+
+    fn begin_lean(svc: &Arc<Svc>, lean: bool, task: &str) -> AgentSnapshot {
+        svc.begin_in_workspace_with_options(
+            task,
+            "gemini",
+            None,
+            Some(budgets()),
+            None,
+            Role::Worker,
+            RunOptions {
+                lean,
+                ..RunOptions::default()
+            },
+            SessionMeta::default(),
+        )
+        .unwrap()
+    }
+
+    fn declared_tools(body: &str) -> Vec<String> {
+        let v: Value = serde_json::from_str(body).unwrap();
+        v["tools"][0]["functionDeclarations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_lean_profile_declares_only_its_core_and_sends_a_smaller_request() {
+        let run = |lean: bool| -> String {
+            let tmp = tempfile::tempdir().unwrap();
+            let svc = Arc::new(service(tmp.path(), Script::new(vec![text_turn("hello")])));
+            let snap = begin_lean(&svc, lean, "tiny task");
+            wait_terminal(&svc, &snap.id, 20_000);
+            svc.service().transport().seen()[0].clone()
+        };
+        let (full, lean) = (run(false), run(true));
+        let mut lean_tools = declared_tools(&lean);
+        lean_tools.sort();
+        let mut want: Vec<String> = LEAN_TOOLS.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(
+            lean_tools, want,
+            "wire declarations must be exactly the lean core"
+        );
+        assert!(
+            declared_tools(&full).len() > LEAN_TOOLS.len(),
+            "the default stays the full offering"
+        );
+        // The prompt's tool contract must agree with the wire (the model is
+        // never told about a tool it does not have).
+        for dropped in [
+            "explore",
+            "web_fetch",
+            "load_skill",
+            "past_runs",
+            "remember",
+        ] {
+            assert!(
+                !lean.contains(&format!("\"name\":\"{dropped}\"")),
+                "{dropped} still declared"
+            );
+            assert!(
+                !lean.contains(&format!("`{dropped}`")),
+                "{dropped} still in the prompt contract"
+            );
+        }
+        assert!(
+            lean.len() * 100 < full.len() * 80,
+            "lean must cut at least 20%: lean {} vs full {}",
+            lean.len(),
+            full.len()
+        );
+    }
+
+    #[test]
+    fn a_lean_run_refuses_a_tool_it_dropped_even_if_the_model_calls_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let turns = vec![
+            call_turn(vec![
+                json!({"functionCall":{"name":"web_fetch","args":{"url":"https://example.test"}}}),
+            ]),
+            text_turn("ok"),
+        ];
+        let svc = Arc::new(service(tmp.path(), Script::new(turns)));
+        let snap = begin_lean(&svc, true, "try a dropped tool");
+        wait_terminal(&svc, &snap.id, 20_000);
+        // The refusal travels back to the model as the tool's response, so
+        // it shows up in the NEXT request; the fetch itself never ran.
+        let posts = svc.service().transport().seen();
+        assert!(posts.len() >= 2);
+        assert!(
+            posts[1].contains("tool web_fetch is not enabled for this run's role"),
+            "the harness, not just the prompt, must enforce the lean scope"
+        );
+        assert!(
+            !posts[1].contains("example.test\\\"\\n"),
+            "no fetched content may appear"
+        );
+    }
+
+    #[test]
+    fn lean_state_is_compact_and_carries_no_skills_catalog() {
+        // The first request's state message, for a workspace holding one skill.
+        let state_for = |lean: bool| -> String {
+            let root = tempfile::tempdir().unwrap();
+            let ws = root.path().join("runs").join("ws");
+            let skill = ws.join(".agents/skills/demo");
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(
+                skill.join("SKILL.md"),
+                "---\nname: demo-skill\ndescription: A demo skill that should cost no tokens in lean mode\n---\nbody\n",
+            )
+            .unwrap();
+            let svc = Arc::new(service(root.path(), Script::new(vec![text_turn("x")])));
+            let snap = svc
+                .begin_in_workspace_with_options(
+                    "t",
+                    "gemini",
+                    None,
+                    Some(budgets()),
+                    Some(ws),
+                    Role::Worker,
+                    RunOptions {
+                        lean,
+                        ..RunOptions::default()
+                    },
+                    SessionMeta::default(),
+                )
+                .unwrap();
+            wait_terminal(&svc, &snap.id, 20_000);
+            let body: Value = serde_json::from_str(&svc.service().transport().seen()[0]).unwrap();
+            body["contents"][0]["parts"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let (full, lean) = (state_for(false), state_for(true));
+        assert!(
+            full.contains("demo-skill"),
+            "the default run advertises the skill"
+        );
+        assert!(
+            full.contains("\n  "),
+            "the default state keeps its readable layout"
+        );
+        assert!(
+            !lean.contains("demo-skill"),
+            "lean must not spend tokens on a catalog it cannot open"
+        );
+        assert!(!lean.contains("\n  "), "lean state must be compact");
+        let parsed: Value = serde_json::from_str(&lean).unwrap();
+        assert!(parsed["skills"].is_null());
+        assert!(lean.len() < full.len());
+    }
+
+    #[test]
+    fn lean_scope_narrows_but_never_widens() {
+        let all = offered_tool_specs();
+        let (specs, allowed) = lean_scope((all.clone(), None), true);
+        assert_eq!(specs.len(), LEAN_TOOLS.len());
+        assert_eq!(allowed.unwrap().len(), LEAN_TOOLS.len());
+        // Off: untouched.
+        let (specs, allowed) = lean_scope((all.clone(), None), false);
+        assert_eq!(specs.len(), all.len());
+        assert!(allowed.is_none());
+        // A role already narrower than the core stays narrower.
+        let narrow: Vec<ToolSpec> = all.into_iter().filter(|s| s.name == "read_file").collect();
+        let (specs, allowed) = lean_scope((narrow, Some(vec!["read_file".into()])), true);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(allowed.unwrap(), vec!["read_file".to_string()]);
+    }
+
+    #[test]
+    fn every_lean_tool_is_really_offered() {
+        let offered: Vec<String> = offered_tool_specs().into_iter().map(|s| s.name).collect();
+        for t in LEAN_TOOLS {
+            assert!(
+                offered.contains(&t.to_string()),
+                "LEAN_TOOLS names a tool that does not exist: {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stalled_run_gets_one_final_check_and_can_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let turns = stalled_turns(vec![call_turn(vec![
+            plan_call(vec![("1", "make a file", "done")]),
+            complete_call("a.txt was created with the text alpha and read back"),
+        ])]);
+        let svc = Arc::new(service(tmp.path(), Script::new(turns)));
+        let snap = svc
+            .begin("work then idle", "gemini", Some(budgets()))
+            .unwrap();
+        auto_approve(svc.clone(), snap.id.clone());
+        let done = wait_terminal(&svc, &snap.id, 20_000);
+        assert!(
+            matches!(done.terminal_reason, Some(TerminalReason::Completed)),
+            "the final check should have let the run claim completion, got {:?}",
+            done.terminal_reason
+        );
+        assert!(done.events.iter().any(|e| matches!(e,
+            AgentEvent::Info { message } if message.contains("final check"))));
+        // The claim still went through the gates; it was not waved through.
+        assert!(done
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::GateResult { passed: true, .. })));
+    }
+
+    #[test]
+    fn the_final_check_request_offers_only_the_allowed_tools() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = Arc::new(service(
+            tmp.path(),
+            Script::new(stalled_turns(vec![call_turn(vec![
+                plan_call(vec![("1", "make a file", "done")]),
+                complete_call("done"),
+            ])])),
+        ));
+        let snap = svc
+            .begin("work then idle", "gemini", Some(budgets()))
+            .unwrap();
+        auto_approve(svc.clone(), snap.id.clone());
+        wait_terminal(&svc, &snap.id, 20_000);
+        let posts = svc.service().transport().seen();
+        let names = |body: &str| -> Vec<String> {
+            let v: Value = serde_json::from_str(body).unwrap();
+            v["tools"][0]["functionDeclarations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let normal = names(&posts[1]);
+        assert!(normal.len() > 5 && normal.contains(&"read_file".to_string()));
+        let last: Value = serde_json::from_str(posts.last().unwrap()).unwrap();
+        let mut allowed = names(posts.last().unwrap());
+        allowed.sort();
+        assert_eq!(allowed, vec!["ask_user", "complete_task", "update_plan"]);
+        assert_eq!(last["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
+        assert!(
+            last["contents"][0]["parts"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("FINAL CHECK"),
+            "the directive must reach the model"
+        );
+        // Earlier turns carried no directive.
+        assert!(!posts[1].contains("FINAL CHECK"));
+    }
+
+    #[test]
+    fn the_final_check_is_offered_once_and_then_the_run_stops() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The model ignores the final check and keeps reading.
+        let turns = stalled_turns(vec![
+            call_turn(vec![read_call("a.txt")]),
+            call_turn(vec![read_call("a.txt")]),
+            call_turn(vec![read_call("a.txt")]),
+        ]);
+        let svc = Arc::new(service(tmp.path(), Script::new(turns)));
+        let snap = svc
+            .begin("work then idle", "gemini", Some(budgets()))
+            .unwrap();
+        auto_approve(svc.clone(), snap.id.clone());
+        let done = wait_terminal(&svc, &snap.id, 20_000);
+        assert!(matches!(
+            done.terminal_reason,
+            Some(TerminalReason::NoProgress { .. })
+        ));
+        let offered = done
+            .events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Info { message } if message.starts_with("no progress for")))
+            .count();
+        assert_eq!(offered, 1, "exactly one chance per stall");
+        // The ignored read was refused by the harness, not executed.
+        assert!(done.events.iter().any(|e| matches!(e,
+            AgentEvent::Info { message } if message.contains("refused 1 tool call"))));
+        // 1 build turn + 6 stalled turns + exactly 1 final-check turn.
+        assert_eq!(svc.service().transport().seen().len(), 1 + 6 + 1);
+    }
+
+    #[test]
+    fn a_completion_claim_in_the_final_check_is_still_verified_by_the_gates() {
+        // The final check must not become a way to wave a run through. Here
+        // the model claims completion but its plan still has an open item:
+        // the gates must refuse, and the run must not end as completed.
+        let tmp = tempfile::tempdir().unwrap();
+        let turns = stalled_turns(vec![call_turn(vec![complete_call("everything is done")])]);
+        let svc = Arc::new(service(tmp.path(), Script::new(turns)));
+        let snap = svc
+            .begin("claim with open plan", "gemini", Some(budgets()))
+            .unwrap();
+        auto_approve(svc.clone(), snap.id.clone());
+        let done = wait_terminal(&svc, &snap.id, 20_000);
+        let verdicts: Vec<(bool, Vec<String>)> = done
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::GateResult {
+                    passed, failures, ..
+                } => Some((*passed, failures.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            verdicts.len(),
+            1,
+            "the claim must reach the gates exactly once"
+        );
+        assert!(!verdicts[0].0, "an open plan item must fail the gates");
+        assert!(
+            verdicts[0].1.iter().any(|f| f.contains("unfinished")),
+            "{:?}",
+            verdicts[0].1
+        );
+        assert!(
+            !matches!(done.terminal_reason, Some(TerminalReason::Completed)),
+            "a run may only complete through passing gates, got {:?}",
+            done.terminal_reason
+        );
+    }
+
+    #[test]
+    fn final_check_rewrites_every_protocol_without_touching_the_rest() {
+        let tool = |n: &str| json!({"name": n});
+        let gemini = json!({"contents":[1],"systemInstruction":{"x":1},
+            "tools":[{"functionDeclarations":[tool("read_file"),tool("update_plan"),tool("complete_task"),tool("ask_user"),tool("run_command")]}],
+            "toolConfig":{"functionCallingConfig":{"mode":"AUTO"}}}).to_string();
+        let out: Value =
+            serde_json::from_str(&restrict_to_final_check(ProviderProtocol::Gemini, &gemini))
+                .unwrap();
+        let names: Vec<_> = out["tools"][0]["functionDeclarations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["update_plan", "complete_task", "ask_user"]);
+        assert_eq!(out["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
+        assert_eq!(out["contents"], json!([1]));
+        assert_eq!(out["systemInstruction"], json!({"x":1}));
+
+        let anthropic =
+            json!({"model":"m","tools":[tool("read_file"),tool("complete_task")]}).to_string();
+        let out: Value = serde_json::from_str(&restrict_to_final_check(
+            ProviderProtocol::Anthropic,
+            &anthropic,
+        ))
+        .unwrap();
+        assert_eq!(out["tools"], json!([{"name":"complete_task"}]));
+        assert_eq!(out["tool_choice"], json!({"type":"any"}));
+
+        let oai = |n: &str| json!({"type":"function","function":{"name":n}});
+        let openai = json!({"model":"m","tool_choice":"auto","tools":[oai("read_file"),oai("ask_user"),oai("complete_task")]}).to_string();
+        let out: Value = serde_json::from_str(&restrict_to_final_check(
+            ProviderProtocol::OpenAiCompatible,
+            &openai,
+        ))
+        .unwrap();
+        assert_eq!(out["tools"], json!([oai("ask_user"), oai("complete_task")]));
+        assert_eq!(
+            out["tool_choice"], "auto",
+            "left alone: not every host accepts required"
+        );
+        assert_eq!(
+            restrict_to_final_check(ProviderProtocol::Gemini, "not json"),
+            "not json"
+        );
     }
 
     #[test]
@@ -6879,6 +7547,108 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(e, AgentEvent::Retry { attempt: 2, .. })));
+    }
+
+    #[test]
+    fn a_rate_limit_is_waited_out_using_the_providers_own_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = Arc::new(service(
+            tmp.path(),
+            Script::rate_limited(
+                vec![
+                    text_turn("recovered"),
+                    text_turn("s1"),
+                    text_turn("s2"),
+                    text_turn("s3"),
+                ],
+                2,
+                "33.7575s",
+            ),
+        ));
+        let snap = svc
+            .begin("rate limited", "gemini", Some(budgets()))
+            .unwrap();
+        let done = wait_terminal(&svc, &snap.id, 20_000);
+        // The 429s did not kill the run: it recovered, then ended on its own
+        // terms (text-only turns), exactly like a flaky provider would.
+        assert!(
+            matches!(done.terminal_reason, Some(TerminalReason::ModelStalled)),
+            "got {:?}",
+            done.terminal_reason
+        );
+        let reasons: Vec<String> = done
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Retry { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasons.len(), 2, "one visible wait per 429: {reasons:?}");
+        for r in &reasons {
+            assert_eq!(
+                r,
+                "rate limited by the provider; waiting 35s before retrying"
+            );
+            assert!(
+                !r.contains("8000") && !r.contains("org_x"),
+                "no provider text: {r}"
+            );
+        }
+        // 2 rate-limited answers, then the three text-only turns it takes to stall.
+        assert_eq!(svc.service().transport().seen().len(), 2 + 3);
+    }
+
+    #[test]
+    fn a_daily_quota_fails_fast_and_keeps_only_the_number() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = Arc::new(service(
+            tmp.path(),
+            Script::rate_limited(vec![], 99, "3h2m"),
+        ));
+        let snap = svc.begin("quota", "gemini", Some(budgets())).unwrap();
+        let done = wait_terminal(&svc, &snap.id, 20_000);
+        match done.terminal_reason {
+            Some(TerminalReason::ProviderError { detail }) => {
+                assert!(detail.contains("429"), "{detail}");
+                assert!(detail.contains("\"retry_after_secs\":10920"), "{detail}");
+                assert!(
+                    !detail.contains("org_x") && !detail.contains("Upgrade"),
+                    "{detail}"
+                );
+            }
+            other => panic!("expected provider error, got {other:?}"),
+        }
+        assert_eq!(
+            svc.service().transport().seen().len(),
+            1,
+            "a three-hour limit must not be hammered"
+        );
+    }
+
+    #[test]
+    fn cancel_cuts_a_rate_limit_wait_short() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 90s hint -> ~0.9s in test builds; cancel lands well inside it.
+        let svc = Arc::new(service(
+            tmp.path(),
+            Script::rate_limited(vec![text_turn("never reached")], 99, "90s"),
+        ));
+        let snap = svc.begin("cancel me", "gemini", Some(budgets())).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let began = Instant::now();
+        svc.cancel(&snap.id).unwrap();
+        let done = wait_terminal(&svc, &snap.id, 5_000);
+        assert!(
+            matches!(done.terminal_reason, Some(TerminalReason::Cancelled)),
+            "got {:?}",
+            done.terminal_reason
+        );
+        assert!(
+            began.elapsed() < Duration::from_millis(700),
+            "{:?}",
+            began.elapsed()
+        );
     }
 
     #[test]
@@ -7632,6 +8402,7 @@ mod tests {
             allowed_tools: None,
             plan_mode: false,
             summarize_history: false,
+            lean: false,
             name: None,
             continued_from: None,
         };
@@ -7645,6 +8416,7 @@ mod tests {
             None,
             &[],
             &[],
+            false,
         );
         let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
         assert_eq!(v["project_instructions"]["source"], "AGENTS.md");
@@ -7666,6 +8438,7 @@ mod tests {
             None,
             &[],
             &[],
+            false,
         );
         let v: serde_json::Value = serde_json::from_str(&none).unwrap();
         assert!(v["project_instructions"].is_null());
@@ -7690,6 +8463,7 @@ mod tests {
             user.as_ref(),
             &[],
             &[],
+            false,
         );
         let v: serde_json::Value = serde_json::from_str(&both).unwrap();
         assert_eq!(v["project_instructions"]["source"], "AGENTS.md");
