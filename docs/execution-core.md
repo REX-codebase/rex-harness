@@ -72,6 +72,12 @@ OpenAI-compatible server: a key and custom base URL set through the API, a
 Groq-shaped 429, a 22-second response, a stall, then the final check ending
 `completed` through passing gates. No relay and no `--store-file` is needed.
 
+CI runs it (job `usage-flow`), the motion-layer checks and the
+motion-preference contract script (job `ui-verification`), and the existing
+Rust and frontend jobs. The Rust job also builds and lints the desktop crate,
+which the sandbox this was written in could not (it lacked the GTK development
+packages), and runs the whole workspace suite.
+
 ## Using a free key
 
 Connect through the model menu: pick NVIDIA NIM, Groq or OpenRouter, paste your
@@ -96,9 +102,8 @@ own key. Facts that matter, all measured unless marked:
   different provider and model; the UI does not expose that yet.
 - Per-turn prompt caching, a cheaper summariser model, and routing planning
   turns to a smaller model than execution turns are designs only.
-- The desktop crate's command signature gained a `lean` argument, but it could
-  not be compiled in the environment this was written in (GTK development
-  packages missing); it mirrors `summarize_history` exactly.
-- The existing test suite stalls intermittently in browser-dependent tests
-  (3 of 14 runs on unmodified code) and leaks headless Chromium processes
-  (37 left behind per run). Both predate this work.
+- In the development sandbox (running as root, not CI) the existing suite
+  stalled intermittently in browser-dependent tests (3 of 14 runs on unmodified
+  code), leaked headless Chromium processes (37 left behind per run) and had
+  two tests that fail there but pass in CI. All of that predates this work; the
+  suite passed on its first CI run.
