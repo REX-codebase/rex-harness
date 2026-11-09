@@ -484,7 +484,7 @@ fn subscription_oauth_is_offered_only_on_openais_documented_route() {
                     spec.id,
                     policy.label
                 );
-                // Open only once REX is released as open source, and exactly then.
+                // Open while REX is released as open source, and exactly then.
                 let expected = if OPEN_SOURCE_RELEASE {
                     PolicyStatus::Supported
                 } else {
@@ -580,7 +580,7 @@ fn the_chatgpt_plan_route_is_closed_until_release() {
     let svc = service_with(ScriptedTransport::new(vec![]));
     assert!(matches!(
         svc.chatgpt_begin_sign_in(false),
-        Err(ProviderError::Credential(m)) if m.contains("not available yet")
+        Err(ProviderError::Credential(m)) if m.contains("not available")
     ));
     assert!(matches!(
         svc.get_key("openai-chatgpt"),

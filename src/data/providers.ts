@@ -110,8 +110,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     // Your ChatGPT plan, through OpenAI's Sign in with ChatGPT for open-source,
     // locally hosted apps. The credential is only ever the one the sign-in
-    // issued (never pasted), and the route stays closed until REX is released
-    // as open source. The backend decides; `accessStatusFor` reads its verdict
+    // issued (never pasted), and the route is open while REX is released as
+    // open source. The backend decides; `accessStatusFor` reads its verdict
     // and this static line is only the fallback.
     id: "openai-chatgpt",
     name: "OpenAI (ChatGPT plan)",
@@ -123,9 +123,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     access: [
       {
         kind: "subscription-oauth",
-        status: "open-source-only",
+        status: "supported",
         label: "Continue with ChatGPT",
-        detail: "OpenAI offers this to open-source, locally hosted apps: REX registers itself at your first sign-in and you approve spending your plan. It opens when REX is released as open source.",
+        detail: "OpenAI offers this to open-source, locally hosted apps, and REX is both: it registers itself at your first sign-in and you approve spending your plan.",
       },
     ],
   },

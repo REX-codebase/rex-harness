@@ -1,22 +1,107 @@
 name: Release
 
-# Cut a release by pushing a tag like v0.1.0. The tag MUST match the
-# `version` field in src-tauri/tauri.conf.json (and package.json /
-# src-tauri/Cargo.toml) or the bundle version will be wrong.
+# Two ways to cut a release:
+#
+#  * push a tag like v0.1.0 (builds every platform, leaves the release as a draft), or
+#  * run this workflow by hand (Actions > Release > Run workflow) with the tag to
+#    create. By default that builds and PUBLISHES the Windows installer only.
+#
+# The tag MUST be `v` + the `version` in src-tauri/tauri.conf.json (which must
+# match package.json and src-tauri/Cargo.toml); the first job checks it.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.1.0 (created on this commit if it does not exist)"
+        required: true
+        default: "v0.1.0"
+      all_platforms:
+        description: "Also build the macOS and Linux bundles"
+        type: boolean
+        default: false
+      draft:
+        description: "Leave the release as a draft instead of publishing it"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  # Written into the release by the Windows job; the other jobs only add files.
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
 
 jobs:
-  build:
+  windows:
+    name: Windows setup wizard (.exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the app version
+        shell: bash
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "$RELEASE_TAG" != "v$version" ]; then
+            echo "::error::tag '$RELEASE_TAG' does not match the app version 'v$version' in src-tauri/tauri.conf.json"
+            exit 1
+          fi
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # tauri-action runs the frontend build (beforeBuildCommand), compiles the
+      # app, builds the NSIS setup wizard (artwork, licence page and options
+      # are in src-tauri/tauri.conf.json and src-tauri/installer/), and
+      # attaches it to the GitHub Release. No signing certificate exists yet,
+      # so the installer is unsigned and SmartScreen will warn on first run.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: "REX Harness ${{ env.RELEASE_TAG }}"
+          releaseBody: |
+            **Windows:** download the `x64-setup.exe` below and run it. It is a normal setup wizard (licence, install location, Start menu, launch at the end).
+
+            The installer is **not code-signed yet**, so Windows SmartScreen may say "Windows protected your PC": click **More info**, then **Run anyway**. Check the download against the `.sha256` file on this page if you want to be sure it is intact.
+
+            REX Harness is open source under MIT OR Apache-2.0. "Continue with ChatGPT" lets you use your ChatGPT plan instead of an API key. See INSTALL.md for macOS and Linux.
+          releaseDraft: ${{ github.event_name == 'push' || inputs.draft }}
+          prerelease: false
+          args: --bundles nsis
+
+      # A checksum next to the installer, so a download can be verified.
+      - name: Publish SHA-256 of the installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $dir = "src-tauri/target/release/bundle/nsis"
+          $exe = Get-ChildItem -Path $dir -Filter *-setup.exe | Select-Object -First 1
+          if (-not $exe) { throw "no setup .exe under $dir" }
+          $hash = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash.ToLower()
+          $sum = Join-Path $env:RUNNER_TEMP "$($exe.Name).sha256"
+          "$hash  $($exe.Name)" | Set-Content -Path $sum -Encoding ascii
+          Get-Content $sum
+          gh release upload "$env:RELEASE_TAG" $sum --clobber --repo "$env:GITHUB_REPOSITORY"
+
+  other-platforms:
     name: Build (${{ matrix.os }})
+    needs: windows
+    if: github.event_name == 'push' || inputs.all_platforms
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            bundles: nsis msi
           - os: macos-14
             bundles: dmg
           - os: ubuntu-22.04
@@ -39,19 +124,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # tauri-action runs the frontend build via beforeBuildCommand, builds
-      # the app, bundles the per-OS installers, and attaches everything to
-      # a draft GitHub Release. No signing keys are configured, so:
-      #  - macOS dmg is UNSIGNED (Gatekeeper will warn; right-click > Open)
-      #  - Windows installers are unsigned (SmartScreen will warn)
-      #  - no updater artifacts (.sig / latest.json) are produced
+      # No signing keys are configured, so the macOS dmg is UNSIGNED
+      # (Gatekeeper will warn; right-click > Open) and no updater artifacts
+      # (.sig / latest.json) are produced.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_id) }}
-          releaseName: "REX Harness ${{ github.ref_type == 'tag' && github.ref_name || github.run_id }}"
-          releaseBody: "Unsigned preview build. See INSTALL.md for install notes (macOS Gatekeeper workaround included)."
-          releaseDraft: true
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: "REX Harness ${{ env.RELEASE_TAG }}"
+          releaseDraft: ${{ github.event_name == 'push' || inputs.draft }}
           prerelease: false
           args: --bundles ${{ matrix.bundles }}

@@ -246,10 +246,9 @@ opening user message is removed.
 
 **Not verified:**
 
-* **The Responses (ChatGPT plan) shape has never met the live route**, which is
-  closed until REX is open-sourced (`docs/chatgpt-sign-in.md`). Its request and
-  stream handling follow OpenAI's preview documentation and are tested against a
-  scripted endpoint only.
+* **The Responses (ChatGPT plan) shape has never met the live route**
+  (`docs/chatgpt-sign-in.md`). Its request and stream handling follow OpenAI's
+  preview documentation and are tested against a scripted endpoint only.
 
 * **No live provider was called.** This was built in a sandbox with no provider
   keys. The Anthropic `cache_control` placement, Gemini replaying earlier turns

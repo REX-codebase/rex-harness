@@ -164,8 +164,8 @@ fn provider_catalog(service: State<'_, Arc<Service>>, provider: String) -> Optio
 
 /// Start "Continue with ChatGPT": open the system browser on the one-shot
 /// loopback launch link and wait for the sign-in in the background. Refused
-/// with a reason until REX is released as open source. The ticket and every
-/// later state carry no credential.
+/// with a reason if the route is closed (`OPEN_SOURCE_RELEASE`). The ticket
+/// and every later state carry no credential.
 #[tauri::command]
 fn chatgpt_sign_in_start(
     service: State<'_, Arc<Service>>,

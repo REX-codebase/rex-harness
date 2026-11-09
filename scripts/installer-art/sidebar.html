@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+@font-face{font-family:"Orbitron";font-weight:900;src:url("../../node_modules/@fontsource/orbitron/files/orbitron-latin-900-normal.woff2") format("woff2")}
+@font-face{font-family:"Inter";font-weight:500;src:url("../../node_modules/@fontsource/inter/files/inter-latin-500-normal.woff2") format("woff2")}
+@font-face{font-family:"Inter";font-weight:600;src:url("../../node_modules/@fontsource/inter/files/inter-latin-600-normal.woff2") format("woff2")}
+*{box-sizing:border-box;margin:0}
+html,body{width:164px;height:314px;overflow:hidden;background:#0a090d}
+.art{position:relative;width:164px;height:314px;overflow:hidden;font-family:"Inter",sans-serif;color:#f0edf3;
+  background:
+    radial-gradient(120px 150px at 105% -5%,rgba(169,154,247,.46),transparent 70%),
+    radial-gradient(130px 130px at -20% 108%,rgba(122,98,230,.34),transparent 70%),
+    linear-gradient(170deg,#14111c 0%,#0a090d 55%,#0d0a14 100%)}
+/* faint scan grid, like the app's canvas */
+.art::before{content:"";position:absolute;inset:0;background:
+    repeating-linear-gradient(0deg,rgba(255,255,255,.028) 0 1px,transparent 1px 14px),
+    repeating-linear-gradient(90deg,rgba(255,255,255,.02) 0 1px,transparent 1px 14px);
+  -webkit-mask-image:linear-gradient(180deg,#000 0%,transparent 75%);mask-image:linear-gradient(180deg,#000 0%,transparent 75%)}
+.rail{position:absolute;left:0;top:0;bottom:0;width:2px;background:linear-gradient(180deg,#a99af7,rgba(169,154,247,0) 85%)}
+.icon{position:absolute;left:20px;top:26px;width:60px;height:60px;border-radius:15px;
+  filter:drop-shadow(0 0 14px rgba(169,154,247,.55)) drop-shadow(0 6px 14px rgba(0,0,0,.5))}
+.mark{position:absolute;left:18px;top:104px;font-family:"Orbitron",sans-serif;font-weight:900;font-size:44px;line-height:1;letter-spacing:.045em;
+  transform:skewX(-14deg);transform-origin:0 100%;
+  background:linear-gradient(180deg,#f9f9fa 0 53%,#d9d8df 53% 100%);-webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 0 10px rgba(169,154,247,.5))}
+.sub{position:absolute;left:21px;top:158px;font-weight:600;font-size:8.5px;letter-spacing:.42em;color:#a99af7;text-transform:uppercase}
+.tag{position:absolute;left:21px;top:176px;width:128px;font-weight:500;font-size:9.5px;line-height:1.45;color:#aaa3b2}
+.feat{position:absolute;left:21px;bottom:38px;display:grid;gap:7px;font-weight:500;font-size:9px;letter-spacing:.02em;color:#d9d4e3}
+.feat div{display:flex;align-items:center;gap:7px}
+.feat i{width:5px;height:5px;border-radius:50%;background:#75d5a7;box-shadow:0 0 6px rgba(117,213,167,.8)}
+.ver{position:absolute;left:21px;bottom:16px;font-weight:500;font-size:8px;letter-spacing:.14em;color:#777180;text-transform:uppercase}
+</style>
+<div class="art">
+  <div class="rail"></div>
+  <img class="icon" src="../../src-tauri/icons/icon.png" alt="">
+  <div class="mark">REX</div>
+  <div class="sub">Harness</div>
+  <p class="tag">Agent runs you can check: planned, gated, and signed.</p>
+  <div class="feat"><div><i></i>Plan approval</div><div><i></i>Custody gates</div><div><i></i>Signed receipts</div></div>
+  <div class="ver">Setup &middot; v__VERSION__</div>
+</div>

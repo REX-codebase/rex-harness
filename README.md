@@ -158,7 +158,7 @@ evidence/       grounding receipts from the build session
 The first real backend slice lives in `crates/rex-providers` (workspace root `Cargo.toml`):
 
 - **Provider core** - registry for Gemini, Anthropic, OpenAI, xAI, DeepSeek, Kimi, Kimi for Coding, Qwen, GLM, local, and custom endpoints; live model-catalog fetch with pagination; normalization into one model shape; truthful error taxonomy (not-configured, auth, rate-limit, network, unsupported, empty catalog, invalid response).
-- **Access policy** - `crates/rex-providers/src/policy.rs` decides which account types REX may connect, grounded in each provider's official documentation (verified 2026-09-19). Consumer subscriptions are offered only where the provider explicitly permits third-party harness use (today: Kimi for Coding); Claude Pro/Max sign-in is forbidden by Anthropic, and X Premium/SuperGrok, Google AI, GLM Coding Plan, Alibaba Coding Plan, and GitHub Copilot subscriptions are refused with sourced reasons. ChatGPT is the one with a documented official route for open-source apps (Sign in with ChatGPT, REX's own dynamically registered client); it is built and switched off until REX is released as open source - see `docs/chatgpt-sign-in.md`. Full matrix: `docs/subscription-policy.md`.
+- **Access policy** - `crates/rex-providers/src/policy.rs` decides which account types REX may connect, grounded in each provider's official documentation (verified 2026-09-19). Consumer subscriptions are offered only where the provider explicitly permits third-party harness use (today: Kimi for Coding); Claude Pro/Max sign-in is forbidden by Anthropic, and X Premium/SuperGrok, Google AI, GLM Coding Plan, Alibaba Coding Plan, and GitHub Copilot subscriptions are refused with sourced reasons. ChatGPT is the one with a documented official route for open-source apps (Sign in with ChatGPT, REX's own dynamically registered client); REX is open source, so "Continue with ChatGPT" is on - see `docs/chatgpt-sign-in.md`. Full matrix: `docs/subscription-policy.md`.
 - **Credentials** - keys enter through the backend only, land in a permission-locked store (0600), and are never returned to the frontend, logged, or serialized.
 - **Desktop app** - `src-tauri` exposes the core through Tauri commands (`provider_summaries`, `provider_set_key`, `provider_clear_key`, `provider_refresh`, `provider_catalog`).
 - **Dev sidecar** - `cargo run -p rex-mcp --bin rex-dev-server` bridges the same core to the vite dev frontend on 127.0.0.1:8787. `--replay gemini=crates/rex-providers/fixtures/gemini-list-models-live.json` seeds the recorded live Gemini catalog, labeled as recorded in the UI.
@@ -214,5 +214,6 @@ Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this project by you, as defined in the Apache-2.0 license, shall
 be dual licensed as above, without any additional terms or conditions.
 
-Using a ChatGPT plan through "Continue with ChatGPT" is a separate switch from the
-licence: it turns on when the repository is public. See `docs/chatgpt-sign-in.md`.
+Using a ChatGPT plan through "Continue with ChatGPT" depends on REX being open
+source (OpenAI offers it to open-source, locally hosted apps). See
+`docs/chatgpt-sign-in.md`.

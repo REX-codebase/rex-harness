@@ -2,21 +2,21 @@
 
 REX can spend the user's ChatGPT plan instead of an API key, through OpenAI's
 **Sign in with ChatGPT** for open-source, locally hosted apps. This page is how
-it works, what it refuses to do, and what to do on the day REX is open-sourced.
+it works, what it refuses to do, and what is left to verify.
 
-> **Status: built, switched off.** The route is closed until
-> `policy::OPEN_SOURCE_RELEASE` is `true`, which happens when REX is released
-> under an open-source licence. Everything below is exercised by tests against a
-> fake identity provider; it has not been run against OpenAI's live service.
-> See [Not verified live](#not-verified-live).
+> **Status: on.** REX is open source (`MIT OR Apache-2.0`, public since
+> 2026-11-09), so `policy::OPEN_SOURCE_RELEASE` is `true`. Everything below is
+> exercised by tests against a fake identity provider; **it has not been run
+> against OpenAI's live service.** See [Not verified live](#not-verified-live).
 
-## Why it is switched off
+## The switch
 
 OpenAI documents ChatGPT plan usage for "open-source and locally hosted apps"
-and sends paid or remotely hosted apps to an interest form. REX is going to be
-open source but is not yet, so it does not qualify yet. The decision lives in one
-constant, `OPEN_SOURCE_RELEASE` in `crates/rex-providers/src/policy.rs`. While it
-is `false`:
+and sends paid or remotely hosted apps to an interest form. REX is open source
+and runs locally, so it qualifies. The decision lives in one constant,
+`OPEN_SOURCE_RELEASE` in `crates/rex-providers/src/policy.rs`. Set it to `false`
+if REX ever stops qualifying (a relicence, the repository going private, or
+OpenAI changing its terms). While it is `false`:
 
 - `rex login chatgpt`, the desktop "Continue with ChatGPT" button and the sidecar
   all refuse, with the reason;
@@ -24,31 +24,25 @@ is `false`:
 - the provider shows as "After open-source release" and is never "connected";
 - a stored sign-in cannot be used for a request. (Signing out still works.)
 
+The frontend reads the backend's verdict, so a closed route shows as closed
+without a frontend release. A test refuses a `true` while any crate declares `license = "Proprietary"` or
+the repository has no LICENSE file.
+
 Policy and sources: [`subscription-policy.md`](subscription-policy.md).
 
-## The day REX is open-sourced (checklist)
+## Still to do
 
-1. ~~Add the LICENSE file and change every crate's `license = "Proprietary"`.~~
-   Done (2026-11-09): `MIT OR Apache-2.0`, `LICENSE-MIT` and `LICENSE-APACHE` at
-   the repository root, every manifest updated.
-2. **Make the repository public**, then set `OPEN_SOURCE_RELEASE` to `true` in
-   `crates/rex-providers/src/policy.rs`. The licence is not the same thing as
-   being open source to OpenAI's reviewers: do not flip the switch while the
-   repository is private. `the_release_switch_cannot_be_thrown_before_the_release`
-   checks the licence files and manifests; `subscription_oauth_is_offered_only_on_openais_documented_route`
-   fails until the policy rows agree with the flag. (`rex-mcp`, the sibling
-   repository, still declares its crates `Proprietary`; it was left out on purpose.)
-3. Re-read the sources in `subscription-policy.md` (OpenAI changes this surface;
-   the docs call it a preview) and update `OPENAI_SIWC_VERIFIED_ON`.
-4. Replace the text-only button in `src/components/ChatGptPlan.tsx` with OpenAI's
+1. Re-read the sources in `subscription-policy.md` now and then (OpenAI changes
+   this surface; the docs call it a preview) and update `OPENAI_SIWC_VERIFIED_ON`.
+2. Replace the text-only button in `src/components/ChatGptPlan.tsx` with OpenAI's
    approved "Continue with ChatGPT" button and logo
    (<https://developers.openai.com/siwc/website>).
-5. Run the live checks in [Not verified live](#not-verified-live) with a real
-   ChatGPT account, and fix what they find before announcing the feature.
+3. Run the live checks in [Not verified live](#not-verified-live) with a real
+   ChatGPT account, and fix what they find.
 
-The frontend asks the backend for the verdict, so the UI opens on its own once
-the backend does; only the bundled fallback text in `src/data/providers.ts` says
-"opens with the release".
+Done: the licence (`LICENSE-MIT`, `LICENSE-APACHE`, every manifest), the public
+repository, and the switch. `rex-mcp`, the sibling repository, still declares its
+crates `Proprietary`; it was left out on purpose.
 
 ## How it works
 

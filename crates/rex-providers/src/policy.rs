@@ -19,20 +19,21 @@ pub const VERIFIED_ON: &str = "2026-09-19";
 /// rows were re-verified that day; no other row's date moves with it.
 pub const OPENAI_SIWC_VERIFIED_ON: &str = "2026-11-09";
 
-/// **The release switch for using a ChatGPT plan.**
+/// **The switch for using a ChatGPT plan.**
 ///
 /// OpenAI offers ChatGPT plan usage through Sign in with ChatGPT to
 /// open-source, locally hosted clients, and to selected partners and private
 /// clients on request: "ChatGPT plan usage is available to all open-source
-/// partners and selected private clients." REX is going to be open source but
-/// is not released yet, so this is `false` and the route is closed everywhere:
-/// sign-in, token use and runs all refuse.
+/// partners and selected private clients." REX is open source (MIT OR
+/// Apache-2.0, public since 2026-11-09), so this is `true` and the route is
+/// open.
 ///
-/// Flip it to `true` in the commit that publishes REX under an open-source
-/// licence. A test refuses a `true` here while any crate still declares
-/// `license = "Proprietary"` or the repository has no LICENSE file, so the
-/// switch cannot be thrown before the release it stands for.
-pub const OPEN_SOURCE_RELEASE: bool = false;
+/// Set it to `false` to close the route everywhere (sign-in, token use and
+/// runs all refuse) if REX ever stops qualifying: a relicence, the repository
+/// going private, or OpenAI changing its terms. A test refuses a `true` while
+/// any crate declares `license = "Proprietary"` or the repository has no
+/// LICENSE file.
+pub const OPEN_SOURCE_RELEASE: bool = true;
 
 /// Whether a ChatGPT-plan sign-in may start or its token be used. Unit tests
 /// inside this crate run with the route open so the flow can be exercised;
@@ -45,7 +46,7 @@ fn gate(open: bool) -> Result<(), String> {
     if open {
         Ok(())
     } else {
-        Err("Using a ChatGPT plan is not available yet. OpenAI offers it to open-source, locally hosted apps, and REX has not been released as open source. Use an OpenAI API key for now (docs/subscription-policy.md).".to_string())
+        Err("Using a ChatGPT plan is not available. OpenAI offers it to open-source, locally hosted apps, and this build is not released as open source. Use an OpenAI API key instead (docs/subscription-policy.md).".to_string())
     }
 }
 
@@ -153,8 +154,9 @@ const fn policy_on(
     }
 }
 
-/// OpenAI's ChatGPT-plan route: supported once REX is released as open
-/// source, and described as open-source-only until then.
+/// OpenAI's ChatGPT-plan route: supported while REX is released as open
+/// source (`OPEN_SOURCE_RELEASE`), and described as open-source-only if the
+/// switch is ever turned off.
 fn chatgpt_plan_policy() -> AccessPolicy {
     policy_on(
         OPENAI_SIWC_VERIFIED_ON,
@@ -165,7 +167,11 @@ fn chatgpt_plan_policy() -> AccessPolicy {
             PolicyStatus::OpenSourceOnly
         },
         "Continue with ChatGPT",
-        "OpenAI documents Sign in with ChatGPT for open-source, locally hosted apps: the app registers itself at first sign-in (no client secret, no copied client ID), the user consents to spending their ChatGPT plan, and requests go to the public Responses API. REX will qualify once it is released as open source; until then the route stays closed.",
+        if OPEN_SOURCE_RELEASE {
+            "OpenAI documents Sign in with ChatGPT for open-source, locally hosted apps: the app registers itself at first sign-in (no client secret, no copied client ID), the user consents to spending their ChatGPT plan, and requests go to the public Responses API. REX is open source and runs locally, so it qualifies."
+        } else {
+            "OpenAI documents Sign in with ChatGPT for open-source, locally hosted apps: the app registers itself at first sign-in (no client secret, no copied client ID), the user consents to spending their ChatGPT plan, and requests go to the public Responses API. REX qualifies only while it is released as open source; the route is closed."
+        },
         &[
             "https://developers.openai.com/siwc/quickstart",
             "https://developers.openai.com/siwc/token-sharing-open-source",

@@ -9,9 +9,9 @@
 //! usage is on, and the one-shot launch URL. Never a token, never the real
 //! authorization URL (it can carry an ID-token hint).
 //!
-//! The route is closed until REX is released as open source (see
-//! `rex_providers::OPEN_SOURCE_RELEASE`); every command that would start or
-//! use a sign-in says so instead of trying.
+//! The route depends on REX being released as open source (see
+//! `rex_providers::OPEN_SOURCE_RELEASE`); if that switch is ever turned off,
+//! every command that would start or use a sign-in says so instead of trying.
 
 use crate::exec::{state_dir, ExecError};
 use rex_providers::{

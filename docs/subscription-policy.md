@@ -31,7 +31,7 @@ REX never uses, and will never accept a contribution that adds:
 | --- | --- | --- |
 | Google Gemini | **Offered** - AI Studio key, free tier exists | **Not offered** - plans are for Google's own products |
 | Anthropic | **Offered** - Claude Console key | **Forbidden by Anthropic** - never offered |
-| OpenAI | **Offered** - Platform key | **Opens with the open-source release** - OpenAI documents Sign in with ChatGPT for open-source, locally hosted apps (`openai-chatgpt`); the route is closed until `OPEN_SOURCE_RELEASE` is flipped. The official Codex CLI stays available as an installed-agent route - see below |
+| OpenAI | **Offered** - Platform key | **Offered** - ChatGPT plan through OpenAI's documented Sign in with ChatGPT for open-source, locally hosted apps (`openai-chatgpt`); on while REX is open source (`OPEN_SOURCE_RELEASE`). The official Codex CLI stays available as an installed-agent route - see below |
 | xAI (Grok) | **Offered** - console.x.ai key | **Partner-gated** - xAI officially enables subscription OAuth in named harnesses; no public route lets an arbitrary new harness self-register |
 | Kimi (Moonshot) | **Offered** - platform key | **Offered** - Kimi for Coding, officially for third-party tools |
 | Zhipu GLM | **Offered** - Z.AI open platform key | **Not offered** - GLM Coding Plan is limited to Z.AI's tool list |
@@ -84,7 +84,7 @@ Console are the permitted route.
 ### OpenAI - two distinct routes
 
 **ChatGPT plan through Sign in with ChatGPT: documented for open-source apps;
-closed in REX until REX is released as open source.** Re-verified 2026-11-09.
+on in REX because REX is open source.** Re-verified 2026-11-09.
 OpenAI now publishes a contract for exactly this: "ChatGPT plan usage is an
 optional capability within Sign in with ChatGPT. In addition to identity scopes,
 your open-source app can request permission to use the user's ChatGPT plan for
@@ -105,14 +105,14 @@ harness's OAuth client (see "The rule" above). A route that works for Pi through
 a copied first-party client is still not a route REX takes.
 
 REX qualifies for the documented route only as an open-source, locally hosted
-app, so **the route is implemented and switched off**:
-`policy::OPEN_SOURCE_RELEASE` is `false`. While it is, REX cannot start a
-sign-in, hand out a token, or run a model on a ChatGPT plan (the CLI, the
-desktop app and the sidecar all refuse with the reason); the provider shows as
-"After open-source release". The flag is flipped in the commit that publishes
-REX under an open-source licence, and a test refuses a `true` while any crate
-still declares `license = "Proprietary"` or the repository has no LICENSE file.
-The checklist is in `docs/chatgpt-sign-in.md`.
+app. REX is released under `MIT OR Apache-2.0` and the repository has been public
+since 2026-11-09, so `policy::OPEN_SOURCE_RELEASE` is `true` and the route is on.
+It stays a switch on purpose: set it to `false` and REX cannot start a sign-in,
+hand out a token, or run a model on a ChatGPT plan (the CLI, the desktop app and
+the sidecar all refuse with the reason), which is what to do if REX ever stops
+qualifying (a relicence, the repository going private, or OpenAI changing its
+terms). A test refuses a `true` while any crate declares `license = "Proprietary"`
+or the repository has no LICENSE file. Details: `docs/chatgpt-sign-in.md`.
 
 **Official Codex CLI as an installed agent: retained.** OpenAI's own documentation
 covers driving the Codex CLI non-interactively from scripts, pipelines and other
@@ -243,8 +243,8 @@ installed-agent backend. Details and sources:
   consumer-subscription OAuth route other than OpenAI's documented one is ever
   marked offered, if the OpenAI route stops citing its Sign in with ChatGPT
   documentation or disagrees with `OPEN_SOURCE_RELEASE`, if that switch is
-  thrown while the repository is still proprietary, or if Anthropic's
-  prohibition regresses.
+  on while a crate is still proprietary or the LICENSE files are missing, or if
+  Anthropic's prohibition regresses.
 - The settings UI renders these verdicts next to each provider, including
   the reason a subscription is not connectable.
 
