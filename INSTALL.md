@@ -48,9 +48,15 @@ in `src-tauri/tauri.conf.json`.
 - **No auto-update yet.** The updater plugin is disabled in the build
   because there are no signing keys. To get a new version, download the new
   installer from Releases and install over the old one.
-- Your data (runs ledger, signing keys, config) lives outside the app
-  bundle (see `$REX_STATE_DIR` / `~/.config/rex-harness`) and survives
-  reinstalls.
+- Your data (saved keys, your ChatGPT sign-in, the runs ledger, signing key,
+  config) lives outside the app, in `%LOCALAPPDATA%\rex-harness` on Windows and
+  `~/.config/rex-harness` on macOS and Linux (or `$REX_STATE_DIR`), and survives
+  reinstalls and uninstalls. Everything stays on your computer. See
+  [docs/data-and-storage.md](docs/data-and-storage.md) for what is in it, how it is
+  protected, and how to erase it.
+- **Upgrading from v0.1.0 on Windows:** that version kept its data in
+  `%TEMP%\rex-harness`. Newer builds use `%LOCALAPPDATA%\rex-harness`; connect again
+  or copy `secrets.json` across.
 
 ## For maintainers: cutting a release
 

@@ -1,5 +1,9 @@
 # Where REX keeps your data
 
+> **Version note.** This page describes `main` and the release after v0.1.0.
+> v0.1.0 on Windows kept its data in the temp folder and stored credentials
+> unencrypted; see [Upgrading from an older build](#upgrading-from-an-older-build).
+
 **Everything REX remembers stays on your computer.** There is no REX account and
 no REX server: saved keys, your ChatGPT sign-in, run history, receipts and
 settings are files in one folder on this machine. This page says which folder,

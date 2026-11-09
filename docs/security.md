@@ -50,7 +50,9 @@ control; it is the single flag that lets a model act without you.
 
 See [data-and-storage.md](data-and-storage.md#how-the-credentials-are-protected)
 for where and how. In short: Windows DPAPI encryption for your account, or a
-`0600` file on macOS and Linux; never logged, never returned to the UI.
+`0600` file on macOS and Linux; never logged, never returned to the UI. (DPAPI
+encryption ships in the release after v0.1.0; v0.1.0 on Windows stored credentials
+unencrypted, in the temp folder.)
 
 ### The ChatGPT sign-in
 
