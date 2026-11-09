@@ -41,8 +41,8 @@ of**:
   xAI, DeepSeek, Kimi, Qwen, GLM, NVIDIA NIM, Groq or OpenRouter, point it at a
   local server, or **use your ChatGPT plan** with *Continue with ChatGPT*.
 - **Local first.** Keys, your ChatGPT sign-in, run history and receipts live in
-  one folder on your machine (encrypted for your account on Windows from the
-  release after 0.1.0). REX has no server and no telemetry.
+  one folder on your machine (encrypted for your account on Windows from
+  v0.1.1). REX has no server and no telemetry.
 
 ## Install
 
@@ -122,7 +122,7 @@ changes. Things worth knowing:
   published contract. [What remains to verify](docs/chatgpt-sign-in.md#not-verified-live).
 - The **Windows installer is unsigned** and has had little testing on real
   machines. **v0.1.0 on Windows** keeps its data in the temp folder and unencrypted;
-  that is fixed on `main` and ships in the next release ([changelog](CHANGELOG.md)).
+  that is fixed in v0.1.1 ([changelog](CHANGELOG.md)).
 - With no backend connected, the web UI is a **labelled preview on sample data**;
   it never pretends to run anything.
 

@@ -3357,7 +3357,7 @@ dependencies = [
 
 [[package]]
 name = "rex-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3372,7 +3372,7 @@ dependencies = [
 
 [[package]]
 name = "rex-custody"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rex-tools",
  "serde",
@@ -3383,7 +3383,7 @@ dependencies = [
 
 [[package]]
 name = "rex-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "png 0.18.1",
@@ -3399,7 +3399,7 @@ dependencies = [
 
 [[package]]
 name = "rex-fable"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3408,7 +3408,7 @@ dependencies = [
 
 [[package]]
 name = "rex-harness"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "portable-pty",
  "rex-custody",
@@ -3428,7 +3428,7 @@ dependencies = [
 
 [[package]]
 name = "rex-installed-agents"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3436,7 +3436,7 @@ dependencies = [
 
 [[package]]
 name = "rex-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rex-custody",
  "rex-daemon",
@@ -3450,7 +3450,7 @@ dependencies = [
 
 [[package]]
 name = "rex-mcp-ext"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3458,7 +3458,7 @@ dependencies = [
 
 [[package]]
 name = "rex-preview"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "libc",
@@ -3482,7 +3482,7 @@ dependencies = [
 
 [[package]]
 name = "rex-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3492,7 +3492,7 @@ dependencies = [
 
 [[package]]
 name = "rex-providers"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "regex",
@@ -3514,7 +3514,7 @@ dependencies = [
 
 [[package]]
 name = "rex-search"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3524,7 +3524,7 @@ dependencies = [
 
 [[package]]
 name = "rex-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "oxc_allocator",
@@ -3542,7 +3542,7 @@ dependencies = [
 
 [[package]]
 name = "rex-ultra"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "png 0.18.1",
@@ -3558,7 +3558,7 @@ dependencies = [
 
 [[package]]
 name = "rex-ultra-scripted-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rex-protocol",
  "serde",

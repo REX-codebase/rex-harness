@@ -7,29 +7,13 @@ change behaviour).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-11-09
+## [0.1.1] - 2026-11-09
 
-The first public release. REX Harness is open source under `MIT OR Apache-2.0`.
+The first installer published as `v0.1.0` (built from commit `c8798f1`) had the
+known issue listed under 0.1.0 below. This release fixes it, along with the
+items below.
 
 ### Added
-- **Open source.** `LICENSE-MIT` and `LICENSE-APACHE`; every crate and package
-  declares `MIT OR Apache-2.0`.
-- **Continue with ChatGPT.** Use a ChatGPT plan instead of an API key through
-  OpenAI's Sign in with ChatGPT for open-source apps: dynamic registration, PKCE,
-  a loopback callback, ID-token verification, rotating refresh with a lock, and
-  revocation on sign-out. Includes the OpenAI Responses wire format, the
-  `openai-chatgpt` provider, `rex login chatgpt`, `rex logout chatgpt`,
-  `rex auth status`, and the UI OpenAI's guidelines ask for. Not yet exercised
-  against OpenAI's live service; see [docs/chatgpt-sign-in.md](docs/chatgpt-sign-in.md).
-- **Windowed context** (opt-in, `--windowed-context`): a managed transcript with
-  stubbing of old tool results, rolling summaries, overflow recovery, and a
-  `recall` tool. The default stateless loop is unchanged.
-- **Windows setup wizard**: a branded NSIS installer (licence page, install scope,
-  Start menu folder), built and published by the release workflow. Unsigned.
-
-### Added since the first 0.1.0 installer
-The installer first published for `v0.1.0` was built from commit `c8798f1`;
-everything below is newer than it.
 - **Local, encrypted credential storage on Windows.** Saved API keys and the
   ChatGPT sign-in are encrypted with the Windows Data Protection API (DPAPI) for
   your account before they are written. Values saved in plaintext by an older
@@ -56,7 +40,7 @@ everything below is newer than it.
   prompt versions mid-run), and benchmark records from before count as a
   different prompt identity. See [docs/prompt-architecture.md](docs/prompt-architecture.md).
 
-### Fixed since the first 0.1.0 installer
+### Fixed
 - **Commands crashed while linking.** A command run through the tool runtime was
   capped at 1 GiB of address space; linking crashed in 5 of 5 clean builds and in
   3 of 4 `cargo test` runs. The cap is now 4 GiB, with which every run passed.
@@ -92,3 +76,28 @@ everything below is newer than it.
   that did nothing, because a sign-out keeps the saved registration.
 - The release workflow's checksum step looked in the wrong build folder.
 - The desktop UI no longer calls the credential store a "keychain".
+
+## [0.1.0] - 2026-11-09
+
+The first public release. REX Harness is open source under `MIT OR Apache-2.0`.
+
+### Added
+- **Open source.** `LICENSE-MIT` and `LICENSE-APACHE`; every crate and package
+  declares `MIT OR Apache-2.0`.
+- **Continue with ChatGPT.** Use a ChatGPT plan instead of an API key through
+  OpenAI's Sign in with ChatGPT for open-source apps: dynamic registration, PKCE,
+  a loopback callback, ID-token verification, rotating refresh with a lock, and
+  revocation on sign-out. Includes the OpenAI Responses wire format, the
+  `openai-chatgpt` provider, `rex login chatgpt`, `rex logout chatgpt`,
+  `rex auth status`, and the UI OpenAI's guidelines ask for. Not yet exercised
+  against OpenAI's live service; see [docs/chatgpt-sign-in.md](docs/chatgpt-sign-in.md).
+- **Windowed context** (opt-in, `--windowed-context`): a managed transcript with
+  stubbing of old tool results, rolling summaries, overflow recovery, and a
+  `recall` tool. The default stateless loop is unchanged.
+- **Windows setup wizard**: a branded NSIS installer (licence page, install scope,
+  Start menu folder), built and published by the release workflow. Unsigned.
+
+### Known issues
+- On Windows, this version keeps its data in `%TEMP%\rex-harness` (the app) and in
+  `.rex\harness` under the current directory (the CLI). Fixed in 0.1.1; see
+  *0.1.1 → Fixed*.

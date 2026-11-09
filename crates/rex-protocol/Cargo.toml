@@ -1,6 +1,6 @@
 [package]
 name = "rex-protocol"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Versioned protocol types for the REX MCP execution surface"
 license = "MIT OR Apache-2.0"

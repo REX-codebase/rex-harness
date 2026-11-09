@@ -2,7 +2,7 @@ name: Release
 
 # Two ways to cut a release:
 #
-#  * push a tag like v0.1.0 (builds every platform, leaves the release as a draft), or
+#  * push a tag like v0.1.1 (builds every platform, leaves the release as a draft), or
 #  * run this workflow by hand (Actions > Release > Run workflow) with the tag to
 #    create. By default that builds and PUBLISHES the Windows installer only.
 #
@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, e.g. v0.1.0 (created on this commit if it does not exist)"
+        description: "Release tag, e.g. v0.1.1 (created on this commit if it does not exist)"
         required: true
-        default: "v0.1.0"
+        default: "v0.1.1"
       all_platforms:
         description: "Also build the macOS and Linux bundles"
         type: boolean

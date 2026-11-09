@@ -304,7 +304,7 @@ fn probe_server(server_command: &str) -> Result<Vec<(String, String)>, String> {
             serde_json::json!({
                 "protocolVersion": "2025-11-25",
                 "capabilities": {},
-                "clientInfo": { "name": "rex-harness", "version": "0.1.0" },
+                "clientInfo": { "name": "rex-harness", "version": env!("CARGO_PKG_VERSION") },
             })
         )?;
         // 2. Send initialized notification (no response expected).
