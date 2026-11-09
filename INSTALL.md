@@ -2,7 +2,7 @@
 
 Download installers from the **Releases** page of
 [REX-codebase/rex-harness](https://github.com/REX-codebase/rex-harness).
-Releases are cut from tags like `v0.1.0` — the tag must match the `version`
+Releases are cut from tags like `v0.1.1` — the tag must match the `version`
 in `src-tauri/tauri.conf.json`.
 
 ## Windows
@@ -25,7 +25,7 @@ in `src-tauri/tauri.conf.json`.
 
 ## macOS (Apple Silicon, arm64)
 
-- Download `REX-Harness_0.1.0_aarch64.dmg`, open it, drag **REX Harness**
+- Download `REX-Harness_0.1.1_aarch64.dmg`, open it, drag **REX Harness**
   into **Applications**.
 - The app is **unsigned and not notarized**, so Gatekeeper will block the
   first launch ("Apple could not verify…"). Workaround: in Finder,
@@ -36,10 +36,10 @@ in `src-tauri/tauri.conf.json`.
 
 ## Linux
 
-- **AppImage**: download `REX Harness_0.1.0_amd64.AppImage`,
+- **AppImage**: download `REX Harness_0.1.1_amd64.AppImage`,
   `chmod +x` it, and run it. Works on most distros, no install needed.
-- **deb** (Debian/Ubuntu): download `REX Harness_0.1.0_amd64.deb` and
-  `sudo apt install ./"REX Harness_0.1.0_amd64.deb"` (pulls dependencies).
+- **deb** (Debian/Ubuntu): download `REX Harness_0.1.1_amd64.deb` and
+  `sudo apt install ./"REX Harness_0.1.1_amd64.deb"` (pulls dependencies).
 - System dependencies (already declared by the deb, needed for the AppImage
   on minimal systems): `libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1`.
 
@@ -61,11 +61,11 @@ in `src-tauri/tauri.conf.json`.
 ## For maintainers: cutting a release
 
 - **Windows installer only (publishes it):** Actions → *Release* → *Run workflow*,
-  tag `v` + the app version (for example `v0.1.0`; the first job refuses a tag that
+  tag `v` + the app version (for example `v0.1.1`; the first job refuses a tag that
   does not match `src-tauri/tauri.conf.json`). Tick *all_platforms* to also build
   macOS and Linux, or *draft* to review before publishing. The release gets the
   setup `.exe` and a `.sha256` next to it.
-- **Every platform, as a draft:** push the tag (`git tag v0.1.0 && git push origin v0.1.0`).
+- **Every platform, as a draft:** push the tag (`git tag v0.1.1 && git push origin v0.1.1`).
 - **The setup wizard** is configured in `src-tauri/tauri.conf.json`
   (`bundle.windows.nsis`) with its artwork and licence page in
   `src-tauri/installer/`. To change the artwork, edit `scripts/installer-art/*.html`

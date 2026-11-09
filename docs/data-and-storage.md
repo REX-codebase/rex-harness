@@ -1,6 +1,6 @@
 # Where REX keeps your data
 
-> **Version note.** This page describes `main` and the release after v0.1.0.
+> **Version note.** This page describes v0.1.1 and later.
 > v0.1.0 on Windows kept its data in the temp folder and stored credentials
 > unencrypted; see [Upgrading from an older build](#upgrading-from-an-older-build).
 

@@ -351,10 +351,7 @@ fn route(
         })
     };
     match (method, segments.as_slice()) {
-        ("GET", ["api", "status"]) => json_response(
-            200,
-            "{\"name\":\"rex-dev-server\",\"kind\":\"sidecar\",\"version\":\"0.1.0\"}",
-        ),
+        ("GET", ["api", "status"]) => json_response(200, &status_json()),
         ("GET", ["api", "providers"]) => {
             json_response(200, &serde_json::to_string(&service.summaries()).unwrap())
         }
@@ -1070,9 +1067,27 @@ fn undo_json(entries: serde_json::Value) -> serde_json::Value {
     })
 }
 
+/// The sidecar's identity, with the version of this build.
+fn status_json() -> String {
+    serde_json::json!({
+        "name": "rex-dev-server",
+        "kind": "sidecar",
+        "version": env!("CARGO_PKG_VERSION"),
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{read_proof_bundle, undo_json, undo_target, UndoTarget};
+    use super::{read_proof_bundle, status_json, undo_json, undo_target, UndoTarget};
+
+    #[test]
+    fn status_reports_this_builds_version() {
+        let v: serde_json::Value = serde_json::from_str(&status_json()).unwrap();
+        assert_eq!(v["name"], "rex-dev-server");
+        assert_eq!(v["kind"], "sidecar");
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+    }
 
     #[test]
     fn undo_target_reads_after_call_then_to() {
