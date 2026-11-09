@@ -109,7 +109,7 @@ impl std::fmt::Display for OAuthError {
             ClientMismatch => write!(f, "the sign-in came back for a different client; refusing it"),
             AccountMismatch => write!(
                 f,
-                "that is a different ChatGPT account from the one this registration belongs to; sign out first to switch accounts"
+                "that is a different ChatGPT account from the one saved on this computer; choose \"Use a different account\" (or run `rex login chatgpt --new-account`) to switch"
             ),
             IdToken(m) => write!(f, "{m}"),
             Discovery(m) => write!(f, "cannot reach OpenAI's sign-in configuration: {m}"),
@@ -223,9 +223,30 @@ impl SignIn {
 /// `force_consent` asks OpenAI to show the permission screen again. Use it
 /// only when the user explicitly chose to enable ChatGPT plan usage after
 /// declining it; never on an ordinary sign-in.
+#[cfg(test)]
 pub fn begin(store: &dyn SecretStore, force_consent: bool) -> Result<SignIn, OAuthError> {
+    begin_with(store, force_consent, false)
+}
+
+/// [`begin`], optionally for a **different ChatGPT account**.
+///
+/// An issued client is bound to the account that registered it, so a
+/// different account cannot reuse the saved one. With `new_account` the saved
+/// registration is ignored: the attempt registers afresh (as a first sign-in
+/// does) and, if it succeeds, replaces the saved record. The host id is kept:
+/// it names this computer, not the account. Callers refuse this while signed
+/// in, so a live session is never orphaned.
+pub fn begin_with(
+    store: &dyn SecretStore,
+    force_consent: bool,
+    new_account: bool,
+) -> Result<SignIn, OAuthError> {
     let host_id = store::host_id(store)?;
-    let saved = store::load(store)?;
+    let saved = if new_account {
+        None
+    } else {
+        store::load(store)?
+    };
     let listener = loopback::Listener::bind().map_err(|e| OAuthError::Io(e.to_string()))?;
     let redirect_uri = listener.redirect_uri();
     let (state, nonce, verifier) = (random_b64u(32)?, random_b64u(32)?, random_b64u(32)?);

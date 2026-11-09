@@ -1068,7 +1068,7 @@ fn the_service_signs_in_end_to_end() {
     let net = fake();
     let store = Arc::new(MemorySecretStore::new());
     let svc = service_over(&net, &store);
-    let signin = svc.chatgpt_begin_sign_in(false).unwrap();
+    let signin = svc.chatgpt_begin_sign_in(false, false).unwrap();
     contract_endpoint(&net, &signin, "sub-1", PLAN_ALL);
     let cancel = AtomicBool::new(false);
     let done = std::thread::scope(|sc| {
@@ -1142,7 +1142,7 @@ fn start_over(
     let (begin_svc, run_svc, net) = (svc.clone(), svc.clone(), net.clone());
     sessions
         .start(
-            move || begin_svc.chatgpt_begin_sign_in(false),
+            move || begin_svc.chatgpt_begin_sign_in(false, false),
             move |signin, cancel| {
                 contract_endpoint(&net, signin, "sub-1", PLAN_ALL);
                 run_svc.chatgpt_complete(signin, timeout, cancel)
@@ -1249,4 +1249,114 @@ fn cancelling_stops_the_wait_and_a_new_attempt_replaces_the_old_one() {
     );
     assert!(sessions.cancel(&third.attempt));
     wait_state(&sessions, &third.attempt, |s| *s == SignInState::Cancelled);
+}
+
+// ---- switching to a different ChatGPT account ---------------------------------
+
+#[test]
+fn a_different_account_registers_afresh_and_replaces_the_saved_one() {
+    let net = fake();
+    let store = MemorySecretStore::new();
+    // account sub-1 signed in once, then signed out: registration kept, tokens gone
+    signed_in_record(&store, 3600, 10);
+    store::clear_tokens(&store).unwrap();
+    let host = store::host_id(&store).unwrap();
+
+    // the same-account path cannot be used by someone else
+    let same = begin(&store, false).unwrap();
+    contract_endpoint(&net, &same, "sub-2", PLAN_ALL);
+    assert_eq!(
+        run(&net, &store, &same, &format!("&client_id={ISSUED}")),
+        Err(OAuthError::AccountMismatch)
+    );
+    assert!(
+        OAuthError::AccountMismatch
+            .to_string()
+            .contains("different account"),
+        "the message says how to switch"
+    );
+
+    // the different-account path starts from scratch
+    let fresh = begin_with(&store, false, true).unwrap();
+    assert!(fresh.is_registration());
+    assert_eq!(
+        param(fresh.authorize_url(), "client_id").as_deref(),
+        Some(DYNAMIC_CLIENT_ID),
+        "not the saved client"
+    );
+    assert_eq!(
+        param(fresh.authorize_url(), "agent_name_hint").as_deref(),
+        Some(AGENT_NAME)
+    );
+    for hint in ["id_token_hint", "login_hint"] {
+        assert!(
+            param(fresh.authorize_url(), hint).is_none(),
+            "{hint} would steer the sign-in back to the old account"
+        );
+    }
+    assert_eq!(
+        param(fresh.authorize_url(), "ext_agent_host_id").unwrap(),
+        host
+    );
+    // a new account's sign-in needs its own issued client id
+    let net2 = fake();
+    net2.on_token({
+        let challenge = param(fresh.authorize_url(), "code_challenge").unwrap();
+        let nonce = param(fresh.authorize_url(), "nonce").unwrap();
+        let redirect = fresh.redirect_uri().to_string();
+        let idp = net2.idp.clone();
+        move |f| {
+            assert_eq!(f["client_id"], "oaiapp_second");
+            assert_eq!(pkce_challenge(&f["code_verifier"]), challenge);
+            assert_eq!(f["redirect_uri"], redirect);
+            let id = idp.sign(&id_claims("oaiapp_second", &nonce, "sub-2"));
+            (
+                200,
+                json!({"access_token":"AT-2","refresh_token":"RT-2","id_token":id,
+                    "token_type":"Bearer","expires_in":3600,"scope":PLAN_ALL})
+                .to_string(),
+            )
+        }
+    });
+    let done = run(&net2, &store, &fresh, "&client_id=oaiapp_second").unwrap();
+    assert!(done.plan_usage);
+    let rec = store::load(&store).unwrap().unwrap();
+    assert_eq!(rec.registration.client_id, "oaiapp_second");
+    assert_eq!(rec.registration.subject, "sub-2");
+    assert_eq!(
+        rec.ext_agent_host_id, host,
+        "the host id is this computer's, not the account's"
+    );
+}
+
+#[test]
+fn a_cancelled_account_switch_keeps_the_saved_account() {
+    let store = MemorySecretStore::new();
+    signed_in_record(&store, 3600, 10);
+    store::clear_tokens(&store).unwrap();
+    let before = store::load(&store).unwrap().unwrap();
+    let attempt = begin_with(&store, false, true).unwrap();
+    drop(attempt); // abandoned: nothing was saved
+    let after = store::load(&store).unwrap().unwrap();
+    assert_eq!(after.registration.client_id, before.registration.client_id);
+    assert_eq!(after.registration.subject, before.registration.subject);
+}
+
+#[test]
+fn the_service_refuses_a_different_account_while_signed_in() {
+    let net = fake();
+    let store = Arc::new(MemorySecretStore::new());
+    signed_in_record(&store, 3600, 10);
+    let svc = service_over(&net, &store);
+    let err = svc
+        .chatgpt_begin_sign_in(false, true)
+        .err()
+        .expect("refused");
+    assert!(
+        matches!(&err, ProviderError::Credential(m) if m.contains("sign out")),
+        "{err}"
+    );
+    // after signing out it is allowed
+    svc.chatgpt_sign_out().unwrap();
+    assert!(svc.chatgpt_begin_sign_in(false, true).is_ok());
 }

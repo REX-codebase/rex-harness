@@ -168,12 +168,14 @@ fn chatgpt_sign_in_start(
     service: State<'_, Arc<Service>>,
     sessions: State<'_, Arc<SignInSessions>>,
     force_consent: Option<bool>,
+    new_account: Option<bool>,
 ) -> Result<SignInTicket, ProviderError> {
     let force = force_consent.unwrap_or(false);
+    let new_account = new_account.unwrap_or(false);
     let begin = Arc::clone(service.inner());
     let finish = Arc::clone(service.inner());
     sessions.start(
-        move || begin.chatgpt_begin_sign_in(force),
+        move || begin.chatgpt_begin_sign_in(force, new_account),
         move |signin, cancel| finish.chatgpt_complete(signin, CHATGPT_SIGN_IN_TIMEOUT, cancel),
         CHATGPT_SIGN_IN_TIMEOUT,
         true,

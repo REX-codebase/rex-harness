@@ -54,7 +54,7 @@ pub(crate) fn usage() -> &'static str {
      \x20 rex ps [--all] [--json] [--prune] [--limit N]\n\
      \x20 rex config [get KEY | set KEY VALUE]\n\
      \x20 rex show RUN_ID [--json]\n\
-     \x20 rex login chatgpt [--no-browser] [--force-consent] [--json]\n\
+     \x20 rex login chatgpt [--no-browser] [--force-consent] [--new-account] [--json]\n\
      \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20sign in so REX can use your ChatGPT plan\n\
      \x20 rex logout chatgpt [--json]\n\
      \x20 rex auth status [--json]\n\

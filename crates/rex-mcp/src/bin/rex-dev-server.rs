@@ -369,9 +369,13 @@ fn route(
                 .get("force_consent")
                 .and_then(|b| b.as_bool())
                 .unwrap_or(false);
+            let new_account = parsed
+                .get("new_account")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
             let (begin, finish) = (Arc::clone(live), Arc::clone(live));
             match sign_ins().start(
-                move || begin.service().chatgpt_begin_sign_in(force),
+                move || begin.service().chatgpt_begin_sign_in(force, new_account),
                 move |signin, cancel| {
                     finish.service().chatgpt_complete(
                         signin,

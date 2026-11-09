@@ -177,10 +177,10 @@ export function ChatGptSignIn({
     [onChange, stopPolling]
   );
 
-  const start = async (forceConsent: boolean) => {
+  const start = async (forceConsent: boolean, newAccount = false) => {
     setNote(null);
     setPhase({ kind: "starting" });
-    const started = await startChatGptSignIn(forceConsent);
+    const started = await startChatGptSignIn(forceConsent, newAccount);
     if (!alive.current) return;
     if (!started.ok) {
       setPhase({ kind: "error", message: describeError(started.error) });
@@ -263,6 +263,12 @@ export function ChatGptSignIn({
       {summary && open && !signin?.signed_in && (
         <>
           <ChatGptButton onClick={() => start(false)} disabled={busy} />
+          {/* a previous account is remembered on this computer: offer to switch */}
+          {signin && !signin.signed_in && signin.email && !busy && (
+            <button type="button" className="plan-secondary" onClick={() => start(false, true)}>
+              Use a different account
+            </button>
+          )}
           {phase.kind === "waiting" && (
             <div className="plan-state" role="status">
               <p>

@@ -249,9 +249,23 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
 
     /// Start a ChatGPT sign-in: bind the loopback listener and build the
     /// authorize URL. Refused until the route is open.
-    pub fn chatgpt_begin_sign_in(&self, force_consent: bool) -> Result<SignIn, ProviderError> {
+    ///
+    /// `new_account` signs in as a different ChatGPT account than the one
+    /// saved here (which an issued client cannot do); it is refused while a
+    /// sign-in is active, so a live session is never orphaned.
+    pub fn chatgpt_begin_sign_in(
+        &self,
+        force_consent: bool,
+        new_account: bool,
+    ) -> Result<SignIn, ProviderError> {
         chatgpt_plan_route().map_err(ProviderError::Credential)?;
-        chatgpt_oauth::begin(&self.secrets, force_consent).map_err(credential_error)
+        if new_account && chatgpt_oauth::status(&self.secrets).is_ok_and(|s| s.signed_in) {
+            return Err(ProviderError::Credential(
+                "sign out of ChatGPT first, then choose a different account".into(),
+            ));
+        }
+        chatgpt_oauth::begin_with(&self.secrets, force_consent, new_account)
+            .map_err(credential_error)
     }
 
     /// Wait for the browser to come back and finish the sign-in.
