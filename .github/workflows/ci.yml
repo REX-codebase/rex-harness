@@ -71,3 +71,39 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - working-directory: extensions/jetbrains
         run: gradle buildPlugin --no-daemon
+
+  # Runs the real rex-dev-server against a scripted OpenAI-compatible provider:
+  # a key and custom base URL set through the API must reach the agent, a 429
+  # is waited out, a 22 s response succeeds, and a stalled run is finished by
+  # the final check through passing gates. Self-asserting; exits 1 on failure.
+  usage-flow:
+    name: Usage flow (real backend, scripted provider)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p rex-mcp --bin rex-dev-server
+      - run: python3 verification/usage-flow/e2e-flow.py
+
+  # Real Chromium against the production build: the motion layer's checks
+  # (the pill springs and lands, Reduce leaves nothing hidden, :active survives
+  # entrance animations, ...) and the motion-preference contract script.
+  ui-verification:
+    name: UI verification (motion layer and contract)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - name: Serve the production build
+        run: |
+          nohup npx vite preview --port 4173 --strictPort --host 127.0.0.1 > preview.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:4173/ > /dev/null && exit 0; sleep 1; done
+          cat preview.log; exit 1
+      - run: node verification/motion-ui/verify-motion-ui.mjs
+      - run: node verification/motion-settings/verify-motion.mjs
