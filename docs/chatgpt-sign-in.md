@@ -55,7 +55,7 @@ crates `Proprietary`; it was left out on purpose.
 | `complete` | exchanges the code (public client: no secret), verifies the ID token against OpenAI's JWKS (RS256/ES256/EdDSA only; `iss`, `aud`, `exp`, `nonce`, `sub`), checks the granted scopes, saves everything in one write |
 | `access_token` | returns a valid token, refreshing under a cross-process lock when it is near expiry; credentials are erased only when OpenAI says the grant is gone, never on a network error |
 | `sign_out` | revokes the refresh token at OpenAI (retried), then clears local tokens; the issued client and host id are kept |
-| `store.rs` | one JSON record in the existing 0600 credential store, tokens redacted from `Debug` |
+| `store.rs` | one JSON record in the local credential store (a `0600` file; encrypted with Windows DPAPI on Windows), tokens redacted from `Debug` |
 
 On the first sign-in OpenAI registers REX as a user-defined agent (the callback
 carries the issued `client_id`, which is saved and reused). No client ID is
@@ -84,15 +84,27 @@ like the others.
 ## Using it
 
 ```
-rex login chatgpt [--no-browser] [--force-consent] [--json]
+rex login chatgpt [--no-browser] [--force-consent] [--new-account] [--json]
 rex logout chatgpt [--json]
 rex auth status [--json]
 rex exec --provider openai-chatgpt --task "…"
 ```
 
 `--force-consent` asks OpenAI to show the permission screen again: use it only
-after you declined plan usage and now want it on. In the desktop app: model menu
--> Connect subscription -> Continue with ChatGPT.
+after you declined plan usage and now want it on. `--new-account` signs in as a
+different ChatGPT account than the one saved here (the issued client is bound to
+the account that registered it); sign out first. In the desktop app: model menu
+-> Connect subscription -> Continue with ChatGPT (and *Use a different account*).
+
+## Where the sign-in is stored
+
+On this computer only; REX has no server to store it on. The tokens and the
+registration are one record in the local credential store, `secrets.json` in
+REX's data folder (`%LOCALAPPDATA%\rex-harness` on Windows): encrypted for your
+Windows account with DPAPI there, a `0600` file on macOS and Linux. The desktop
+app and the CLI share it when they use the same folder (the default on Windows),
+and renew the access token under a lock so they cannot invalidate each other.
+Details and how to move, back up or erase it: [data-and-storage.md](data-and-storage.md).
 
 The UI follows OpenAI's UI/UX guidelines: "Continue with ChatGPT" starts the
 sign-in; a "You're using your ChatGPT plan / Got it" dialog shows once, after the

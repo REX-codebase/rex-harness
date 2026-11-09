@@ -94,7 +94,7 @@ describe("Continue with ChatGPT", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Continue with ChatGPT" }));
     });
-    expect(api.startChatGptSignIn).toHaveBeenCalledWith(false);
+    expect(api.startChatGptSignIn).toHaveBeenCalledWith(false, false);
     expect(screen.getByText(/Waiting for you to finish in the browser/)).toBeTruthy();
     expect(screen.getByText(/first sign-in here/)).toBeTruthy();
     const link = screen.getByRole("link", { name: "Open the sign-in page" }) as HTMLAnchorElement;
@@ -218,7 +218,36 @@ describe("Continue with ChatGPT", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Allow ChatGPT plan usage" }));
     });
-    expect(api.startChatGptSignIn).toHaveBeenCalledWith(true);
+    expect(api.startChatGptSignIn).toHaveBeenCalledWith(true, false);
+  });
+
+  it("offers a different account when one is remembered but signed out, and registers afresh", async () => {
+    api.startChatGptSignIn.mockResolvedValue({ ok: true, ticket: TICKET });
+    api.pollChatGptSignIn.mockResolvedValue({ state: "waiting" });
+    const remembered = summary({
+      signin: { signed_in: false, email: "alex@example.com", plan_usage: false, access_token_expires_at: null },
+    });
+    render(<ChatGptSignIn summary={remembered} onChange={() => {}} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Use a different account" }));
+    });
+    expect(api.startChatGptSignIn).toHaveBeenCalledWith(false, true);
+    // the ordinary button keeps the same account
+    cleanup();
+    api.startChatGptSignIn.mockClear();
+    render(<ChatGptSignIn summary={remembered} onChange={() => {}} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Continue with ChatGPT" }));
+    });
+    expect(api.startChatGptSignIn).toHaveBeenCalledWith(false, false);
+  });
+
+  it("does not offer a different account on a first sign-in or while signed in", () => {
+    render(<ChatGptSignIn summary={summary()} onChange={() => {}} />);
+    expect(screen.queryByRole("button", { name: "Use a different account" })).toBeNull();
+    cleanup();
+    render(<ChatGptSignIn summary={signedIn(true)} onChange={() => {}} />);
+    expect(screen.queryByRole("button", { name: "Use a different account" })).toBeNull();
   });
 
   it("never renders anything credential-shaped", async () => {

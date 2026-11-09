@@ -269,11 +269,11 @@ export interface ToolResult { call_id:string; ok:boolean; tool:string; state:"pe
 export async function resolveToolApproval(callId:string,approved:boolean):Promise<ToolResult>{const b=await backend();if(b.kind!=="tauri")throw new Error("desktop runtime required");await b.invoke!("tool_resolve_approval",{callId,approved});return b.invoke!<ToolResult>("tool_execute",{callId});}
 export async function cancelToolCall(callId:string):Promise<void>{const b=await backend();if(b.kind!=="tauri")return;await b.invoke!("tool_cancel",{callId});}
 
-export async function startChatGptSignIn(forceConsent = false): Promise<SignInStart> {
+export async function startChatGptSignIn(forceConsent = false, newAccount = false): Promise<SignInStart> {
   const b = await backend();
   if (b.kind === "tauri") {
     try {
-      const ticket = await b.invoke!<SignInTicket>("chatgpt_sign_in_start", { forceConsent });
+      const ticket = await b.invoke!<SignInTicket>("chatgpt_sign_in_start", { forceConsent, newAccount });
       return { ok: true, ticket };
     } catch (error) {
       return { ok: false, error: error as ProviderErrorShape };
@@ -281,7 +281,7 @@ export async function startChatGptSignIn(forceConsent = false): Promise<SignInSt
   }
   return request<SignInStart>(`/api/providers/${CHATGPT_PROVIDER}/signin`, {
     method: "POST",
-    body: JSON.stringify({ force_consent: forceConsent }),
+    body: JSON.stringify({ force_consent: forceConsent, new_account: newAccount }),
   });
 }
 

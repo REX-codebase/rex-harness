@@ -579,7 +579,7 @@ fn the_chatgpt_plan_route_is_closed_until_release() {
     }
     let svc = service_with(ScriptedTransport::new(vec![]));
     assert!(matches!(
-        svc.chatgpt_begin_sign_in(false),
+        svc.chatgpt_begin_sign_in(false, false),
         Err(ProviderError::Credential(m)) if m.contains("not available")
     ));
     assert!(matches!(

@@ -33,6 +33,18 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # Saved credentials and the ChatGPT sign-in are encrypted with Windows DPAPI
+  # and live under %LOCALAPPDATA%. Linux cannot run that code, so run its tests
+  # on a real Windows machine: DPAPI round trips, the store's sealing and
+  # migration, and where the data folder resolves.
+  windows-credentials:
+    name: Windows (credential storage, data locations)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p rex-providers --lib -- "secrets::" "protect::" "paths::"
+
   frontend:
     name: Frontend (test, build)
     runs-on: ubuntu-latest

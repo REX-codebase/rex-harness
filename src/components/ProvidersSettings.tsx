@@ -153,10 +153,10 @@ export function ProvidersSettings() {
           {!isChatGptPlan && <label>
             <span>API key</span>
             <button type="button" className="locked-field" disabled>
-              {backend ? (liveState?.has_key ? "Stored by Rust backend" : "Not stored") : "Desktop keychain"}{" "}
+              {backend ? (liveState?.has_key ? "Stored by Rust backend" : "Not stored") : "On this computer"}{" "}
               <b>{backend ? (liveState?.has_key ? "Connected" : "Missing") : "Pending runtime"}</b>
             </button>
-            <small>{backend ? "Keys live in the backend credential store, never in this interface. Add one from the model menu in the task box." : "No key is entered or stored in this frontend preview."}</small>
+            <small>{backend ? "Keys live in the backend's local credential store (encrypted for your account on Windows), never in this interface. Add one from the model menu in the task box." : "No key is entered or stored in this frontend preview."}</small>
           </label>}
           <label>
             <span>Model discovery</span>

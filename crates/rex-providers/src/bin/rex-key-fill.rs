@@ -81,11 +81,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut port: u16 = 8788;
     let mut provider = "gemini".to_string();
-    let mut config_dir = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
-        .join(".config")
-        .join("rex-harness");
+    let mut config_dir = rex_providers::paths::data_dir(rex_providers::paths::Flavor::Desktop);
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {

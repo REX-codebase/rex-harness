@@ -53,7 +53,7 @@ fn expect_chatgpt(args: &[String], command: &str) -> Result<Vec<String>, ExecErr
         _ => Err(ExecError::usage(format!(
             "usage: rex {command} chatgpt{}",
             if command == "login" {
-                " [--no-browser] [--force-consent] [--json]"
+                " [--no-browser] [--force-consent] [--new-account] [--json]"
             } else {
                 " [--json]"
             }
@@ -63,11 +63,13 @@ fn expect_chatgpt(args: &[String], command: &str) -> Result<Vec<String>, ExecErr
 
 pub(crate) fn run_login(args: &[String]) -> Result<i32, ExecError> {
     let rest = expect_chatgpt(args, "login")?;
-    let (mut no_browser, mut force_consent, mut json_out) = (false, false, false);
+    let (mut no_browser, mut force_consent, mut new_account, mut json_out) =
+        (false, false, false, false);
     for a in &rest {
         match a.as_str() {
             "--no-browser" => no_browser = true,
             "--force-consent" => force_consent = true,
+            "--new-account" => new_account = true,
             "--json" => json_out = true,
             other => {
                 return Err(ExecError::usage(format!(
@@ -77,7 +79,9 @@ pub(crate) fn run_login(args: &[String]) -> Result<i32, ExecError> {
         }
     }
     let svc = service()?;
-    let signin = svc.chatgpt_begin_sign_in(force_consent).map_err(failure)?;
+    let signin = svc
+        .chatgpt_begin_sign_in(force_consent, new_account)
+        .map_err(failure)?;
 
     eprintln!("Sign in with ChatGPT to let REX use your ChatGPT plan.");
     eprintln!("REX will spend your plan's usage, not API credit. You can review or limit it at {CHATGPT_USAGE_URL}");
@@ -109,6 +113,7 @@ pub(crate) fn run_login(args: &[String]) -> Result<i32, ExecError> {
     let who = done.email.as_deref().unwrap_or("your ChatGPT account");
     if done.plan_usage {
         eprintln!("Signed in as {who}. Using your ChatGPT plan: use `--provider openai-chatgpt`.");
+        eprintln!("{}", storage_note());
         Ok(0)
     } else {
         eprintln!(
@@ -170,6 +175,9 @@ pub(crate) fn run_auth(args: &[String]) -> Result<i32, ExecError> {
                 );
             }
             eprintln!("{}", describe(&status));
+            if status.signed_in {
+                eprintln!("{}", storage_note());
+            }
             Ok(0)
         }
         // not signed in is a state; "not available yet" is too, not a failure
@@ -185,6 +193,14 @@ pub(crate) fn run_auth(args: &[String]) -> Result<i32, ExecError> {
         }
         Err(other) => Err(failure(other)),
     }
+}
+
+/// Where the sign-in lives. It is only ever on this computer.
+fn storage_note() -> String {
+    format!(
+        "The sign-in is saved on this computer only ({}); nothing is stored on a server.",
+        state_dir().join("secrets.json").display()
+    )
 }
 
 fn describe(status: &ChatGptStatus) -> String {
