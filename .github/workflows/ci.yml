@@ -87,9 +87,11 @@ jobs:
 
   # Real Chromium against the production build: the motion layer's checks
   # (the pill springs and lands, Reduce leaves nothing hidden, :active survives
-  # entrance animations, ...) and the motion-preference contract script.
+  # entrance animations, ...), the motion-preference contract script, and the
+  # button system (disabled primary, hover/press, Reduce and touch, tier radii,
+  # top bar fit, tab contrast, focus ring).
   ui-verification:
-    name: UI verification (motion layer and contract)
+    name: UI verification (motion layer, contract and buttons)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,3 +109,4 @@ jobs:
           cat preview.log; exit 1
       - run: node verification/motion-ui/verify-motion-ui.mjs
       - run: node verification/motion-settings/verify-motion.mjs
+      - run: node verification/buttons/verify-buttons.mjs

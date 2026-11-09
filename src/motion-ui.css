@@ -109,13 +109,7 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--color-te
 .top-shell .view-tabs { animation: drop-in 760ms var(--ease-out-expo) 90ms backwards; }
 .top-shell .fast-control { animation: drop-in 760ms var(--ease-out-expo) 170ms backwards; }
 .top-shell .ultra-control { animation: drop-in 760ms var(--ease-out-expo) 240ms backwards; }
-.rex-logo { transition: filter 450ms ease; animation: logo-ignite 1700ms 160ms var(--ease-out-quint) backwards; }
-.brand-frame:hover .rex-logo { filter: drop-shadow(0 0 10px color-mix(in srgb, var(--color-accent) 55%, transparent)); }
-@keyframes logo-ignite {
-  0% { opacity: 0; filter: brightness(.4) drop-shadow(0 0 0 transparent); }
-  38% { opacity: 1; filter: brightness(1.7) drop-shadow(0 0 16px color-mix(in srgb, var(--color-accent) 75%, transparent)); }
-  100% { opacity: 1; filter: none; }
-}
+/* The brand mark is live type now (RexWordmark, aura.css): it types itself in and carries its own glow. */
 
 /* --------------------------------------------------------------------------
    Segmented controls: one pill that glides (see useSlideIndicator)

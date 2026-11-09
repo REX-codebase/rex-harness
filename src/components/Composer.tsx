@@ -56,7 +56,8 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
           {HEADLINE.map((word, i) => (
             <Fragment key={i}>
               {i > 0 && " "}
-              <span className={word === "REX" ? "fx-sheen" : "fx-word"} style={{ "--w": i } as CSSProperties}>{word}</span>
+              {/* The rise lives on the outer span and the skew on the inner one: word-rise animates transform, so a skew on the same element would snap when it ends. */}
+              <span className="fx-word" style={{ "--w": i } as CSSProperties}>{word === "REX" ? <span className="rex-inline">REX</span> : word}</span>
             </Fragment>
           ))}
         </h1>
