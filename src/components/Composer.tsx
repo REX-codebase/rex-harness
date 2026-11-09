@@ -41,7 +41,7 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
     <section aria-label="New task">
       <div className="mb-5 sm:mb-6">
         <p className="eyebrow">New task</p>
-        <h1 className="mt-2 text-[30px] font-medium leading-[1.12] tracking-[-0.04em] text-text sm:text-[38px]">Tell REX what to do.</h1>
+        <h1 className="mt-2 text-[30px] font-medium leading-[1.12] tracking-[-0.04em] text-text sm:text-[38px]">Tell <span className="rex-inline">REX</span> what to do.</h1>
         <p className="mt-3 max-w-[54ch] text-sm leading-relaxed text-muted">One clear request. REX will work through it, verify the result, and leave a receipt.</p>
       </div>
 

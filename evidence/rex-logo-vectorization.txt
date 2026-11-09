@@ -5,3 +5,7 @@ Online conversion surface: FWD Tools Image to SVG, https://fwdtools.com/image-to
 Engine identified by the generated SVG: ImageTracer.js 1.2.6.
 Settings: default color trace, with no decorative effects. The converter screenshot is evidence/rex-logo-vectorization.png.
 Integration: the generated SVG is preserved as src/assets/rex-logo.svg. No paths were manually redrawn. The mark is shown without recoloring, filters, shadows, or animation.
+
+Update: the app header no longer uses this bitmap trace. The top-left mark is now live type
+(see docs/aura.md) with a metallic fill, glow and typed entrance, by explicit request. The trace is
+kept here as the reference for the letterforms and the two-tone split. website/ still uses it.

@@ -7,8 +7,9 @@ over the OS; System is the only mode that delegates to it.
   the OS setting flips while the app is open, the interface updates without a
   reload (`useSyncExternalStore` over a `matchMedia` change listener).
 - **Reduce** is a calm but fully usable interface: animations and transitions
-  are instant, ambient effects (Ultra blades, Fast iris, shimmer skeletons,
-  pulsing state dots) are removed, and timed mock sequencing shortens. Every
+  are instant, ambient effects (the typed-wordmark entrance, aura drift, Ultra
+  slats and shockwave, Fast iris, shimmer skeletons, pulsing state dots) are
+  removed, and timed mock sequencing shortens. Every
   control still works; nothing is only hidden.
 - **Full** is the complete approved motion design. It applies even when the
   OS asks for reduced motion, because the user explicitly chose it here.

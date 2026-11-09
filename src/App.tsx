@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { BackendBadge, TopBar } from "./components/TopBar";
 import { Composer } from "./components/Composer";
+import { AuraLayer, UltraTransition, type Origin } from "./components/Aura";
+import { useAuraPointer } from "./data/aura";
 import { StateRail } from "./components/StateRail";
 import { DesktopOnly, isDesktopRuntime } from "./components/DesktopOnly";
 import { SessionView } from "./components/SessionView";
@@ -93,6 +95,9 @@ export default function App() {
   const [ultraRun, setUltraRun] = useState<UltraSnapshot | null>(null);
   const ultraPoll = useRef<number | null>(null);
   const [ultraPulse, setUltraPulse] = useState(0);
+  const [ultraOrigin, setUltraOrigin] = useState<Origin | null>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
+  useAuraPointer(shellRef);
   const [fast, setFast] = useState(false);
   const [fastPulse, setFastPulse] = useState(0);
   const [fastPhase, setFastPhase] = useState<"idle" | "engaging" | "disengaging">("idle");
@@ -672,8 +677,8 @@ export default function App() {
   }
 
   return (
-    <div className={`harness-shell min-h-full motion-${motion} ${ultra ? "ultra-on" : ""} ${fast ? "fast-on" : ""} ${fastPhase !== "idle" ? `fast-${fastPhase}` : ""} ${reduced ? "reduced-fx" : ""}`} data-motion={motion} data-ultra={ultra ? "on" : "off"}>
-      <div className="ultra-transition" key={ultraPulse} aria-hidden="true"><span /><span /><span /><span /></div>
+    <div ref={shellRef} className={`harness-shell min-h-full motion-${motion} ${ultra ? "ultra-on" : ""} ${fast ? "fast-on" : ""} ${fastPhase !== "idle" ? `fast-${fastPhase}` : ""} ${reduced ? "reduced-fx" : ""}`} data-motion={motion} data-ultra={ultra ? "on" : "off"}>
+      {ultraPulse > 0 && <UltraTransition key={ultraPulse} engaged={ultra} origin={ultraOrigin} />}
       {fastPhase !== "idle" && (
         <div className="fast-transition" key={fastPulse} aria-hidden="true">
           <div className="fast-iris"><i /><i /><i /></div>
@@ -683,7 +688,8 @@ export default function App() {
         </div>
       )}
       <div className="ultra-atmosphere" aria-hidden="true"><span className="ultra-horizon" /><span className="ultra-scan" /></div>
-      <TopBar view={view} onView={setView} ultra={ultra} onUltra={() => { setUltra((v) => !v); setUltraPulse((v) => v + 1); }} fast={fast} onFast={toggleFast} />
+      <AuraLayer />
+      <TopBar view={view} onView={setView} ultra={ultra} onUltra={(origin) => { setUltraOrigin(origin); setUltra((v) => !v); setUltraPulse((v) => v + 1); }} fast={fast} onFast={toggleFast} />
       <div className="ultra-status" role="status" aria-live="polite"><span>ULTRA</span><b>{ultra ? "Verification tier engaged" : "Verification tier offline"}</b><small>{ultra ? "Contract, adversary and clean-room judge active" : "No extra capabilities are active"}</small></div>
       <div className="mx-auto w-full max-w-[820px] px-5 pt-3 sm:px-8">
         <div className="status-row">

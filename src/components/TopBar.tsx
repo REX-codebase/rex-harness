@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
-import rexLogo from "../assets/rex-logo.svg";
+import { BrandName, RexWordmark } from "./RexWordmark";
+import { originOf } from "../data/aura";
 
-export function TopBar({ view, onView, ultra, onUltra, fast, onFast }: { view: "task" | "settings" | "terminal" | "editor" | "git"; onView: (v: "task" | "settings" | "terminal" | "editor" | "git") => void; ultra: boolean; onUltra: () => void; fast: boolean; onFast: () => void }) {
+export function TopBar({ view, onView, ultra, onUltra, fast, onFast }: { view: "task" | "settings" | "terminal" | "editor" | "git"; onView: (v: "task" | "settings" | "terminal" | "editor" | "git") => void; ultra: boolean; onUltra: (origin: { x: number; y: number }) => void; fast: boolean; onFast: () => void }) {
   const tabsRef = useRef<HTMLElement>(null);
   // In a narrow window the tab strip scrolls; keep the current tab visible
   // when the view changes from a shortcut or a link, not just a click.
@@ -15,8 +16,8 @@ export function TopBar({ view, onView, ultra, onUltra, fast, onFast }: { view: "
   return (
     <header className="top-shell mx-auto flex w-full max-w-[820px] items-center justify-between px-5 py-5 sm:px-8 sm:py-7">
       <div className="brand-lockup flex min-w-0 items-center gap-3">
-        <span className="brand-frame"><img className="rex-logo" src={rexLogo} alt="REX" /></span>
-        <span className="brand-name truncate text-sm font-medium tracking-[-0.01em] text-text">Harness</span>
+        <span className="brand-frame"><RexWordmark ultra={ultra} /></span>
+        <BrandName ultra={ultra} />
       </div>
       <div className="top-actions flex shrink-0 items-center gap-2 sm:gap-4">
         <nav ref={tabsRef} className="view-tabs" aria-label="View">
@@ -30,7 +31,7 @@ export function TopBar({ view, onView, ultra, onUltra, fast, onFast }: { view: "
           <span className="fast-glyph" aria-hidden="true"><i /><i /><i /><i /><i /></span>
           <span className="fast-copy"><b>Fast</b><small>Preview</small></span>
         </button>
-        <button type="button" className={`ultra-control ${ultra ? "is-on" : ""}`} aria-pressed={ultra} aria-label={`${ultra ? "Turn off" : "Preview"} Ultra mode`} onClick={onUltra}>
+        <button type="button" className={`ultra-control ${ultra ? "is-on" : ""}`} aria-pressed={ultra} aria-label={`${ultra ? "Turn off" : "Preview"} Ultra mode`} onClick={(e) => onUltra(originOf(e.currentTarget.getBoundingClientRect()))}>
           <span className="ultra-glyph" aria-hidden="true"><i /><i /><i /></span>
           <span className="ultra-label">Ultra</span>
           <span className="ultra-tier">{ultra ? "Verified runs" : "Preview"}</span>
