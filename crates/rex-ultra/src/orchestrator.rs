@@ -352,6 +352,19 @@ impl RollbackGuard {
     fn disarm(&mut self) {
         self.armed = false;
     }
+
+    /// Publish a terminal state. A run that did not promote is rolled back
+    /// first, so whoever sees "rejected", "failed" or "cancelled" never sees
+    /// the workspace still holding the run's changes: letting the guard's
+    /// `Drop` do it left a window after the state was published in which the
+    /// rollback had not happened yet.
+    fn finish(&mut self, handle: &RunHandle, terminal: UltraTerminal) {
+        if self.armed {
+            let _ = self.snapshot.restore(&self.workspace);
+            self.armed = false;
+        }
+        finish(handle, terminal);
+    }
 }
 
 impl Drop for RollbackGuard {
@@ -455,7 +468,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(
     let mut ledger = match EpistemicLedger::open(&ultra_dir) {
         Ok(l) => l,
         Err(e) => {
-            finish(
+            rollback.finish(
                 &ctx.handle,
                 UltraTerminal::ProviderError {
                     detail: format!("ledger failed: {e}"),
@@ -467,7 +480,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(
     let mut evidence = match EvidenceStore::open(&ultra_dir.join("evidence")) {
         Ok(e) => e,
         Err(e) => {
-            finish(
+            rollback.finish(
                 &ctx.handle,
                 UltraTerminal::ProviderError {
                     detail: format!("evidence store failed: {e}"),
@@ -493,7 +506,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(
     ) {
         Ok(m) => m,
         Err(e) => {
-            finish(&ctx.handle, UltraTerminal::ProviderError { detail: e });
+            rollback.finish(&ctx.handle, UltraTerminal::ProviderError { detail: e });
             return;
         }
     };
@@ -509,7 +522,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(
     let mut contract: Option<AcceptanceContract> = None;
     for _ in 0..CONTRACT_ATTEMPTS {
         if cancelled(&ctx.handle) {
-            finish(&ctx.handle, UltraTerminal::Cancelled);
+            rollback.finish(&ctx.handle, UltraTerminal::Cancelled);
             return;
         }
         let mut prompt = contract::drafting_prompt(&ctx.task);
@@ -552,7 +565,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(
         }
     }
     let Some(acceptance) = contract else {
-        finish(&ctx.handle, UltraTerminal::ContractFailed { errors });
+        rollback.finish(&ctx.handle, UltraTerminal::ContractFailed { errors });
         return;
     };
     write_json(&ultra_dir.join("contract.json"), &acceptance);
@@ -623,7 +636,7 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
         ) {
             Ok(snap) => snap,
             Err(e) => {
-                finish(&ctx.handle, UltraTerminal::ProviderError { detail: e });
+                rollback.finish(&ctx.handle, UltraTerminal::ProviderError { detail: e });
                 return;
             }
         };
@@ -634,7 +647,7 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
             .builder_run_id = Some(builder_run.id.clone());
         let built = await_subrun(&inner, &ctx.handle, &builder_run.id);
         if cancelled(&ctx.handle) {
-            finish(&ctx.handle, UltraTerminal::Cancelled);
+            rollback.finish(&ctx.handle, UltraTerminal::Cancelled);
             return;
         }
         match built.terminal_reason {
@@ -655,7 +668,7 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
                     continue;
                 }
                 drop(state);
-                finish(&ctx.handle, UltraTerminal::BuilderFailed { detail });
+                rollback.finish(&ctx.handle, UltraTerminal::BuilderFailed { detail });
                 return;
             }
         }
@@ -731,7 +744,7 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
                             .builder_run_id = Some(run.id.clone());
                         let attacked = await_subrun(&inner, &ctx.handle, &run.id);
                         if cancelled(&ctx.handle) {
-                            finish(&ctx.handle, UltraTerminal::Cancelled);
+                            rollback.finish(&ctx.handle, UltraTerminal::Cancelled);
                             return;
                         }
                         let summary = attacked.completion_summary.unwrap_or_default();
@@ -775,7 +788,7 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
             let mut judge_error = String::new();
             for _ in 0..JUDGE_ATTEMPTS {
                 if cancelled(&ctx.handle) {
-                    finish(&ctx.handle, UltraTerminal::Cancelled);
+                    rollback.finish(&ctx.handle, UltraTerminal::Cancelled);
                     return;
                 }
                 let mut p = prompt.clone();
@@ -809,13 +822,13 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
                         }
                     }
                     Err(e) => {
-                        finish(&ctx.handle, UltraTerminal::ProviderError { detail: e });
+                        rollback.finish(&ctx.handle, UltraTerminal::ProviderError { detail: e });
                         return;
                     }
                 }
             }
             let Some(judge_found) = judge_report else {
-                finish(
+                rollback.finish(
                     &ctx.handle,
                     UltraTerminal::Rejected {
                         reasons: vec![format!("judge answer unusable: {judge_error}")],
@@ -1263,7 +1276,7 @@ a deterministic verifier, an adversary and a clean-room judge:\n",
                 evidence_id: "gate-failures".into(),
             },
         );
-        finish(&ctx.handle, UltraTerminal::Rejected { reasons });
+        rollback.finish(&ctx.handle, UltraTerminal::Rejected { reasons });
         return;
     }
 }

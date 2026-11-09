@@ -62,6 +62,11 @@ items below.
   been called first, because verification compares against a saved bundle and
   nothing saved one. The bundle is now saved when the task finishes. Tasks that
   finished before this fix need one `rex_proof` call before they verify.
+- **A rejected, failed or cancelled Ultra run reported its end before its workspace
+  was rolled back.** The terminal state was published first and the rollback ran
+  as the run's thread wound down, so a reader that acted on "rejected" straight
+  away could still see the run's changes (this also made a test fail about once
+  in 40 runs). The workspace is now restored before the state is published.
 - **`rex --help` exited with an error.** It printed to stderr and exited `2`; it
   now prints the usage on stdout and exits `0` (also `-h`, and `--help` after a
   command). `rex` with no command is still a usage error.
