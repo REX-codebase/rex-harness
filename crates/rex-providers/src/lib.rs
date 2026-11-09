@@ -13,6 +13,7 @@
 
 pub mod agent_loop;
 pub mod catalog;
+mod context;
 pub mod conversation;
 pub mod custody_link;
 pub mod error;
@@ -35,10 +36,11 @@ pub mod oneshot;
 
 pub use agent_loop::{AgentLoop, LoopEvent, DEFAULT_MAX_STEPS, HARD_MAX_STEPS};
 pub use autonomous::{
-    AgentEvent, AgentPreview, AgentSnapshot, AgentStatus, AutonomousRunService, Budgets, PlanItem,
-    PlanStatus, RunOptions, TerminalReason,
+    windowed_token_ceiling, AgentEvent, AgentPreview, AgentSnapshot, AgentStatus,
+    AutonomousRunService, Budgets, PlanItem, PlanStatus, RunOptions, TerminalReason,
 };
 pub use catalog::{CatalogSource, ModelCatalog, ModelInfo};
+pub use context::ContextStats;
 pub use conversation::{
     decode_turn, encode_tool_outcomes, NormalizedToolCall, NormalizedTurn, ToolOutcome,
 };

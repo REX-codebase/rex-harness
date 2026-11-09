@@ -104,6 +104,18 @@ quotas go further. Limits, caveats and measurements are in
 [docs/execution-core.md](docs/execution-core.md). The dev sidecar needs no
 `--store-file` for keys to reach agent runs.
 
+## Long runs: windowed context
+
+By default REX sends one turn at a time, which cannot overflow a window and suits
+small free-tier models. For a model with a large window, `--windowed-context`
+(`rex exec`, `rex resume`, the `rex serve` and sidecar run request, the desktop
+`custody_begin` command) keeps a real transcript and manages it against the
+window: old tool results are cleared to stubs, old turns are folded into a rolling
+summary, a provider's "too long" refusal is recovered from, and every original
+result stays retrievable through the `recall` tool. It is opt-in and leaves the
+default path untouched. Design, thresholds, and what is and is not verified:
+[docs/context-management.md](docs/context-management.md).
+
 ## Test
 
 ```bash

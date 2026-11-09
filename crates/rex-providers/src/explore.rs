@@ -810,6 +810,13 @@ pub(super) fn run_explore<T: Transport, A: Fn(&PreparedCall) -> ChildApproval>(
                     "past_runs is not available to sub-agents".into(),
                     false,
                 ),
+                AgentCall::Recall { id, .. } => (
+                    "recall".into(),
+                    id,
+                    json!({}),
+                    "recall is not available to sub-agents".into(),
+                    false,
+                ),
                 AgentCall::Remember { id, .. } => (
                     "remember".into(),
                     id,

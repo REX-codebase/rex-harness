@@ -69,6 +69,12 @@ pub(crate) fn usage() -> &'static str {
      \x20 --max-tool-calls N   tool-call budget\n\
      \x20 --max-tokens N       token budget\n\
      \x20 --timeout-secs N     wall-clock budget in seconds\n\
+     \x20 --windowed-context   keep a managed transcript (clear old results, fold\n\
+     \x20                      old turns into a summary, `recall` to read them back)\n\
+     \x20                      instead of one turn at a time; for large-window models.\n\
+     \x20                      Re-sends history each turn, so the token budget rises\n\
+     \x20                      (see --max-tokens)\n\
+     \x20 --context-window N   the model's window in tokens (or $REX_CONTEXT_WINDOW)\n\
      \x20 --json               print exactly one JSON receipt on stdout\n\
      \x20 --yes                auto-approve tool calls and plans (CI mode)\n\
      \x20 --dry-run            validate args and print config without running\n\
@@ -152,6 +158,13 @@ fn parse_exec(args: &[String]) -> Result<ExecOptions, ExecError> {
             "--yes" => opts.yes = true,
             "--dry-run" => opts.dry_run = true,
             "--detach" => opts.detach = true,
+            "--windowed-context" => opts.windowed_context = true,
+            "--context-window" => {
+                opts.context_window = Some(parse_u64(
+                    &take_value("--context-window", &mut i)?,
+                    "--context-window",
+                )?);
+            }
             "--bid" => opts.bid = true,
             "--accept-bid" => opts.accept_bid = true,
             "--budget-usd" => {

@@ -111,6 +111,8 @@ pub fn run_tournament(opts: TournamentOptions) -> Result<i32, ExecError> {
             bid: false,
             accept_bid: false,
             budget_usd: None,
+            windowed_context: false,
+            context_window: None,
             run_tag: Some(format!("-{provider}")),
             deadman_mins: None,
             deadman_file: None,

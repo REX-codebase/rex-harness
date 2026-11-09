@@ -693,6 +693,8 @@ fn custody_begin(
     plan_mode: Option<bool>,
     summarize_history: Option<bool>,
     lean: Option<bool>,
+    windowed_context: Option<bool>,
+    context_window: Option<u64>,
 ) -> Result<rex_providers::CustodiedRunView, String> {
     let task_id = format!("task-ui-{:x}", now_ms_u128());
     // The custodied workspace sits under the agent runs root: the run
@@ -712,6 +714,13 @@ fn custody_begin(
     req.summarize_history = summarize_history.unwrap_or(false);
     // Opt-in too: the lean profile gives up web access, skills and memory.
     req.lean = lean.unwrap_or(false);
+    // Opt-in: a managed transcript for models with large windows. It raises
+    // the grant's token ceiling, because the history is re-sent every turn.
+    let req = if windowed_context.unwrap_or(false) {
+        req.with_windowed_context(context_window)
+    } else {
+        req
+    };
     let run = custody_runs.begin_managed_task(req)?;
     Ok(custody_runs.view_of(&run))
 }

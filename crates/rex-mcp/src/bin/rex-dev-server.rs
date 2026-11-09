@@ -625,6 +625,14 @@ fn route(
                 .get("lean")
                 .and_then(|p| p.as_bool())
                 .unwrap_or(false);
+            // Windowed context (a managed transcript instead of the stateless
+            // loop); only an explicit `true` turns it on. `context_window` is
+            // the model's window in tokens when REX does not know it.
+            let windowed_context = parsed
+                .get("windowed_context")
+                .and_then(|p| p.as_bool())
+                .unwrap_or(false);
+            let context_window = parsed.get("context_window").and_then(|p| p.as_u64());
             // The operator identity is the caller's declaration, recorded
             // for audit; custody decisions never trust the string.
             let operator = match parsed.get("operator").and_then(|o| o.as_str()) {
@@ -673,6 +681,11 @@ fn route(
                     );
                     req.summarize_history = summarize_history;
                     req.lean = lean;
+                    let req = if windowed_context {
+                        req.with_windowed_context(context_window)
+                    } else {
+                        req
+                    };
                     match custody_runs.begin_managed_task(req) {
                         Ok(run) => json_response(
                             200,

@@ -229,6 +229,13 @@ fn handle(req: Request, stream: &mut TcpStream, reg: &Arc<Mutex<Registry>>) {
                             .collect()
                     })
                     .unwrap_or_default(),
+                // A managed transcript instead of the stateless loop; only an
+                // explicit `true` turns it on.
+                windowed_context: body
+                    .get("windowed_context")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                context_window: body.get("context_window").and_then(Value::as_u64),
                 yes: auto,
                 json: true, // keep run output machine-shaped on stdout
                 interactive: if auto { None } else { Some(slot2) },

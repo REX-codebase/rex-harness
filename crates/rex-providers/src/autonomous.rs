@@ -96,6 +96,8 @@ mod explore;
 mod fetch;
 use explore::{run_explore, ExploreLimits, ExploreOutcome, ProviderLink};
 
+use crate::context::{Action, ContextEngine};
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -127,7 +129,7 @@ impl Budgets {
         self.max_steps = self.max_steps.clamp(1, HARD_MAX_STEPS);
         self.max_tool_calls = self.max_tool_calls.clamp(1, HARD_MAX_TOOL_CALLS);
         self.max_wall_ms = self.max_wall_ms.clamp(10_000, 6 * 60 * 60 * 1000);
-        self.max_tokens = self.max_tokens.clamp(2_000, 4_000_000);
+        self.max_tokens = self.max_tokens.clamp(2_000, HARD_MAX_TOKENS);
         self
     }
 }
@@ -330,6 +332,9 @@ pub struct AgentSnapshot {
     pub preview: Option<AgentPreview>,
     pub completion_summary: Option<String>,
     pub error: Option<String>,
+    /// Windowed-context statistics (see `crate::context`); `None` for a run
+    /// that uses the default stateless loop.
+    pub context: Option<crate::context::ContextStats>,
 }
 
 /// Immutable task brief. Written exactly once; `write_brief` refuses to
@@ -367,6 +372,15 @@ struct TaskBrief {
     /// run keeps the same prompt identity and tool scope. Legacy briefs: off.
     #[serde(default)]
     lean: bool,
+    /// Windowed context (see `RunOptions::windowed_context`). Persisted so a
+    /// resumed run keeps the same tool scope and prompt identity. Legacy
+    /// briefs: off.
+    #[serde(default)]
+    windowed_context: bool,
+    /// The context window the operator stated, in tokens, resolved from the
+    /// run option or `REX_CONTEXT_WINDOW` when the run began.
+    #[serde(default)]
+    context_window: Option<u64>,
     /// Human-given session label (`rex exec --name`). Purely cosmetic: it
     /// never changes what the run may do. Legacy briefs carry none.
     #[serde(default)]
@@ -538,6 +552,7 @@ struct RunShared {
     preview_session: Option<String>,
     completion_summary: Option<String>,
     error: Option<String>,
+    context: Option<crate::context::ContextStats>,
 }
 
 struct RunHandle {
@@ -601,6 +616,12 @@ enum AgentCall {
     PastRuns {
         id: String,
         query: Option<String>,
+    },
+    /// Windowed context only: page an archived turn back in, or search the
+    /// run's own history (`crate::context`).
+    Recall {
+        id: String,
+        args: Value,
     },
     /// Add or remove a workspace note (`crate::workspace_notes`).
     Remember {
@@ -808,6 +829,18 @@ pub struct RunOptions {
     /// skills catalog, compact state. Roughly halves each request; gives up
     /// web search/fetch, skills, memory and sub-agent exploration.
     pub lean: bool,
+    /// Keep a real transcript managed against the model's context window
+    /// instead of the stateless one-pair-per-turn loop: old tool results are
+    /// cleared to stubs, old turns are folded into a rolling summary, and
+    /// everything stays retrievable through the `recall` tool. Meant for
+    /// models with large windows; each summary is an extra model call and
+    /// the history is re-sent every turn, so the default spend ceiling is
+    /// raised accordingly. A window too small for this falls back to the
+    /// stateless loop. See `crate::context`.
+    pub windowed_context: bool,
+    /// The model's context window in tokens, when it is not one REX knows.
+    /// `REX_CONTEXT_WINDOW` is the environment equivalent.
+    pub context_window: Option<u64>,
 }
 
 pub struct AutonomousRunService<S: SecretStore + 'static, T: Transport + 'static> {
@@ -880,6 +913,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
             preview: state.preview.clone(),
             completion_summary: state.completion_summary.clone(),
             error: state.error.clone(),
+            context: state.context.clone(),
         }
     }
 
@@ -931,6 +965,32 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
             workspace,
             Role::Worker,
             false,
+            session,
+        )
+    }
+
+    /// [`Self::begin_in_workspace`] with run switches (windowed context,
+    /// lean, plan mode), for callers that do not name a role: the run is a
+    /// worker.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_in_workspace_with_run_options(
+        &self,
+        task: &str,
+        provider: &str,
+        requested_model: Option<&str>,
+        budgets: Option<Budgets>,
+        workspace: Option<PathBuf>,
+        opts: RunOptions,
+        session: SessionMeta,
+    ) -> Result<AgentSnapshot, String> {
+        self.begin_in_workspace_with_options(
+            task,
+            provider,
+            requested_model,
+            budgets,
+            workspace,
+            Role::Worker,
+            opts,
             session,
         )
     }
@@ -991,7 +1051,10 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
             plan_mode,
             summarize_history,
             lean,
+            windowed_context,
+            context_window,
         } = opts;
+        let context_window = context_window.or_else(crate::context::limits::env_override);
         let task = task.trim();
         if task.is_empty() {
             return Err("task is empty".into());
@@ -1010,7 +1073,14 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
                 "provider {provider} has no documented autonomous protocol adapter"
             ));
         }
-        let budgets = budgets.unwrap_or_default().clamped();
+        let budgets = match budgets {
+            Some(b) => b,
+            None if windowed_context => {
+                windowed_default_budgets(provider, requested_model, context_window)
+            }
+            None => Budgets::default(),
+        }
+        .clamped();
         {
             let runs = self.runs.lock().map_err(|_| "run registry poisoned")?;
             let active = runs
@@ -1053,7 +1123,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
         };
         fs::create_dir_all(state_dir.join("evidence")).map_err(|e| e.to_string())?;
         fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
-        let (scoped_tools, allowed_tools) = lean_scope(scoped_tools_for(role), lean);
+        let (scoped_tools, allowed_tools) = run_scope(role, lean, windowed_context);
         let (system_prompt, prompt_version, prompt_hash) = assemble_run_prompt(role, &scoped_tools);
         let brief = TaskBrief {
             id: id.clone(),
@@ -1068,6 +1138,8 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
             plan_mode,
             summarize_history,
             lean,
+            windowed_context,
+            context_window,
             name: session.name,
             continued_from: session.continued_from,
         };
@@ -1096,6 +1168,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
                 preview_session: None,
                 completion_summary: None,
                 error: None,
+                context: None,
             }),
             cond: Condvar::new(),
             cancel: AtomicBool::new(false),
@@ -1440,7 +1513,9 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
             .as_deref()
             .and_then(Role::from_name)
             .unwrap_or(Role::Worker);
-        let (scoped_tools, _) = scoped_tools_for(role);
+        // The same scope the run began with: lean and windowed both change
+        // the tool contract, and the identity gate compares its hash.
+        let (scoped_tools, _) = run_scope(role, brief.lean, brief.windowed_context);
         let (system_prompt, current_version, current_hash) =
             assemble_run_prompt(role, &scoped_tools);
         // Prompt-identity gate. A checkpoint written under different prompt
@@ -1477,6 +1552,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
                 preview_session: None,
                 completion_summary: None,
                 error: None,
+                context: None,
             }),
             cond: Condvar::new(),
             cancel: AtomicBool::new(false),
@@ -1896,6 +1972,9 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
     // clipped outputs kept by an earlier drive of this run (resume)
     cp.outputs = crate::output_store::OutputStore::attached(ctx.state_dir.join("outputs"));
     let budgets = ctx.brief.budgets;
+    // Windowed context keeps a managed transcript; `None` is the stateless
+    // loop, byte for byte what runs have always done.
+    let mut engine = open_context_engine(&ctx, protocol, &model, cp.step);
 
     // ---- plan mode: propose the plan, wait for trusted approval ---------
     // No tool executes before approval. Denial ends the run as Denied with
@@ -2023,7 +2102,8 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
         }
 
         // ---- opt-in summary of history dropped from working memory -------
-        if ctx.brief.summarize_history {
+        // (windowed context folds history itself, with its own summaries)
+        if engine.is_none() && ctx.brief.summarize_history {
             summarize_history_step(
                 &ctx,
                 &mut ledger,
@@ -2049,17 +2129,66 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
             )),
             None => Vec::new(),
         };
-        let mut state_msg = build_state_message(
-            &ctx.brief,
-            &cp,
-            budgets,
-            current_plan(&ctx.handle),
-            project.as_ref(),
-            user_rules.as_ref(),
-            &skills,
-            &notes,
-            ctx.brief.lean,
-        );
+        let plan_now = current_plan(&ctx.handle);
+        let inputs = StateInputs {
+            project: project.as_ref(),
+            user_rules: user_rules.as_ref(),
+            skills: &skills,
+            notes: &notes,
+        };
+        let link = ProviderLink {
+            protocol,
+            base_url: &base_url,
+            key: &key,
+            model: &model,
+        };
+        let turn_no = cp.step + 1;
+        // A windowed turn makes room first (clear, then summarise) and sends
+        // the managed transcript; the stateless turn sends the previous pair.
+        let (mut state_msg, mut history) = match engine.as_mut() {
+            Some(e) => match windowed_frame(
+                &ctx,
+                &mut ledger,
+                e,
+                &link,
+                &mut cp,
+                budgets,
+                &inputs,
+                &plan_now,
+                turn_no,
+            ) {
+                Ok(frame) => frame,
+                Err(reason) => {
+                    // Test-only: a simulated process death must not write a
+                    // terminal state, wherever in the turn it lands.
+                    #[cfg(test)]
+                    if matches!(reason, TerminalReason::Cancelled) && silent_halt(&ctx, &cp) {
+                        return;
+                    }
+                    finish(&ctx, &mut ledger, reason, started, &cp);
+                    return;
+                }
+            },
+            None => (
+                build_state_message(
+                    &ctx.brief,
+                    &cp,
+                    budgets,
+                    plan_now.clone(),
+                    inputs.project,
+                    inputs.user_rules,
+                    inputs.skills,
+                    inputs.notes,
+                    ctx.brief.lean,
+                ),
+                cp.last_pair
+                    .as_ref()
+                    .map(|p| {
+                        crate::context::wire::messages(protocol, &p.model_parts, &p.response_parts)
+                    })
+                    .unwrap_or_default(),
+            ),
+        };
         if final_check {
             state_msg.push_str(&final_check_directive(cp.turns_since_progress));
         }
@@ -2067,42 +2196,30 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
         let reads = tools.take_images();
         let show = !images_rejected;
         let (wire_images, evidence_images) = WireImage::from_reads(&reads, show);
-        let build = |images: &[WireImage]| {
-            let body = build_request(
-                protocol,
-                &model,
-                &ctx.system_prompt,
-                &state_msg,
-                cp.last_pair.as_ref(),
-                &ctx.mcp_tools,
-                images,
-            );
-            // Declare only the tools this run may actually call. The prompt
-            // already lists just those, and the harness refuses the rest, so
-            // sending their schemas was pure cost (the lean profile and
-            // role-scoped runs such as the adversary both rely on this).
-            let body = match &ctx.brief.allowed_tools {
-                Some(allowed) => retain_tools(protocol, &body, |n| allowed.iter().any(|a| a == n)),
-                None => body,
-            };
-            if final_check {
-                restrict_to_final_check(protocol, &body)
-            } else {
-                body
-            }
+        let build = |state: &str, history: &[Value], images: &[WireImage]| {
+            assemble_request(&ctx, protocol, &model, state, history, images, final_check)
         };
-        let mut request_body = build(&wire_images);
+        let mut request_body = build(&state_msg, &history, &wire_images);
         let mut evidence_body = if show && !reads.is_empty() {
-            build(&evidence_images)
+            build(&state_msg, &history, &evidence_images)
         } else {
             request_body.clone()
         };
-        let turn_no = cp.step + 1;
         let evidence_path = ctx
             .state_dir
             .join("evidence")
             .join(format!("turn-{turn_no}-request.json"));
-        let _ = fs::write(&evidence_path, &evidence_body);
+        // A windowed request carries the whole transcript, which `log.jsonl`
+        // already holds, so the evidence folder gets a manifest of what was
+        // shown instead of a copy per turn (that would grow quadratically).
+        let mut manifest = engine.as_ref().map(|e| {
+            e.manifest(e.estimate_tokens(request_body.len()))
+                .to_string()
+        });
+        let _ = fs::write(
+            &evidence_path,
+            manifest.as_deref().unwrap_or(&evidence_body),
+        );
 
         // ---- provider turn with bounded retry/backoff --------------------
         let send = |body: &str| {
@@ -2132,14 +2249,92 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
                 },
             );
             let (hidden, _) = WireImage::from_reads(&reads, false);
-            request_body = build(&hidden);
+            request_body = build(&state_msg, &history, &hidden);
             evidence_body = request_body.clone();
-            let _ = fs::write(&evidence_path, &evidence_body);
+            let _ = fs::write(
+                &evidence_path,
+                manifest.as_deref().unwrap_or(&evidence_body),
+            );
+            attempt = send(&request_body);
+        }
+        // A provider that refuses the request as too long means the window
+        // was estimated too generously (a table floor, a small local
+        // context, a denser tokenizer). Learn the real size, make room and
+        // try again, rather than ending the run.
+        let mut overflow_retries = 0;
+        loop {
+            let overflowed = matches!(
+                &attempt,
+                Err(d) if crate::context::overflow::detail_is_overflow(d)
+            );
+            if !overflowed || overflow_retries >= MAX_OVERFLOW_RETRIES {
+                break;
+            }
+            let Some(e) = engine.as_mut() else { break };
+            overflow_retries += 1;
+            let est = e.estimate_tokens(request_body.len());
+            e.note_overflow(est);
+            RunHandle::push_event(
+                &ctx.handle.shared,
+                AgentEvent::Info {
+                    message: format!(
+                        "the provider refused the request as too long (about {est} tokens by estimate); making room and retrying ({overflow_retries}/{MAX_OVERFLOW_RETRIES})"
+                    ),
+                },
+            );
+            if let Some(l) = ledger.as_mut() {
+                l.append(
+                    "context_overflow",
+                    json!({"turn": turn_no, "estimated_tokens": est, "retry": overflow_retries}),
+                );
+            }
+            match windowed_frame(
+                &ctx,
+                &mut ledger,
+                e,
+                &link,
+                &mut cp,
+                budgets,
+                &inputs,
+                &plan_now,
+                turn_no,
+            ) {
+                Ok((st, h)) => {
+                    state_msg = st;
+                    history = h;
+                }
+                Err(reason) => {
+                    #[cfg(test)]
+                    if matches!(reason, TerminalReason::Cancelled) && silent_halt(&ctx, &cp) {
+                        return;
+                    }
+                    finish(&ctx, &mut ledger, reason, started, &cp);
+                    return;
+                }
+            }
+            if final_check {
+                state_msg.push_str(&final_check_directive(cp.turns_since_progress));
+            }
+            let (current, _) = WireImage::from_reads(&reads, !images_rejected);
+            request_body = build(&state_msg, &history, &current);
+            evidence_body = request_body.clone();
+            manifest = Some(
+                e.manifest(e.estimate_tokens(request_body.len()))
+                    .to_string(),
+            );
+            let _ = fs::write(
+                &evidence_path,
+                manifest.as_deref().unwrap_or(&evidence_body),
+            );
             attempt = send(&request_body);
         }
         let response = match attempt {
             Ok(r) => r,
             Err(detail) => {
+                #[cfg(test)]
+                if detail == "cancelled" && silent_halt(&ctx, &cp) {
+                    return;
+                }
                 finish(
                     &ctx,
                     &mut ledger,
@@ -2157,6 +2352,15 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
             &response,
         );
         cp.step += 1;
+        if let Some(e) = engine.as_mut() {
+            // An image adds bytes and few tokens, so only clean requests
+            // teach the estimator its bytes-per-token ratio.
+            if reads.is_empty() {
+                if let Some(prompt) = usage_prompt_tokens(protocol, &response) {
+                    e.calibrate(request_body.len(), prompt);
+                }
+            }
+        }
         let (usage_total, response_text) =
             (usage_tokens(protocol, &response), response.len() as u64);
         cp.tokens_used += usage_total.unwrap_or((evidence_body.len() as u64 + response_text) / 4);
@@ -2240,6 +2444,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
             decoded.thought_signature,
             &mut cp,
             started,
+            engine.as_ref(),
         );
         if let Some(fatal) = out.fatal {
             #[cfg(test)]
@@ -2301,6 +2506,13 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
             cp.digest.remove(0);
         }
         cp.model = model.clone();
+        if let (Some(e), Some(pair)) = (engine.as_mut(), out.pair.as_ref()) {
+            e.record_turn(
+                turn_no,
+                pair.model_parts.clone(),
+                pair.response_parts.clone(),
+            );
+        }
         cp.last_pair = out.pair;
         // `started` measures this drive session; elapsed_base_ms carries time
         // from before a resume, so total elapsed stays truthful.
@@ -2328,6 +2540,35 @@ fn build_state_message(
     notes: &[String],
     lean: bool,
 ) -> String {
+    render_state(
+        &state_payload(
+            brief, cp, budgets, plan, project, user_rules, skills, notes, lean,
+        ),
+        lean,
+    )
+}
+
+fn render_state(payload: &Value, lean: bool) -> String {
+    let text = if lean {
+        serde_json::to_string(payload)
+    } else {
+        serde_json::to_string_pretty(payload)
+    };
+    text.unwrap_or_else(|_| "{}".into())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn state_payload(
+    brief: &TaskBrief,
+    cp: &Checkpoint,
+    budgets: Budgets,
+    plan: Vec<PlanItem>,
+    project: Option<&rex_prompt::project::ProjectInstructions>,
+    user_rules: Option<&rex_prompt::project::ProjectInstructions>,
+    skills: &[rex_prompt::skills::SkillInfo],
+    notes: &[String],
+    lean: bool,
+) -> Value {
     let digest: Vec<&DigestEntry> = cp.digest.iter().rev().take(DIGEST_WINDOW).collect();
     let digest: Vec<&DigestEntry> = digest.into_iter().rev().collect();
     let older = crate::memory::earlier(&cp.observations, cp.step);
@@ -2397,12 +2638,7 @@ fn build_state_message(
             ""
         },
     });
-    let text = if lean {
-        serde_json::to_string(&payload)
-    } else {
-        serde_json::to_string_pretty(&payload)
-    };
-    text.unwrap_or_else(|_| "{}".into())
+    payload
 }
 
 /// The loop's actual tool offering, mirrored into the prompt's tool
@@ -2679,6 +2915,11 @@ fn user_content(protocol: ProviderProtocol, state_msg: &str, images: &[WireImage
     }
 }
 
+/// The stateless loop's request: the previous turn's pair as the only
+/// history. Production builds every request through [`assemble_request`];
+/// this form is what the request-shape tests pin, and a test asserts it is
+/// exactly `build_request_with_history` over the same pair.
+#[cfg(test)]
 fn build_request(
     protocol: ProviderProtocol,
     model: &str,
@@ -2688,54 +2929,115 @@ fn build_request(
     mcp_tools: &[ExtTool],
     images: &[WireImage],
 ) -> String {
+    let history: Vec<Value> = prev
+        .map(|p| crate::context::wire::messages(protocol, &p.model_parts, &p.response_parts))
+        .unwrap_or_default();
+    build_request_with_history(
+        protocol, model, system, state_msg, &history, mcp_tools, images, false,
+    )
+}
+
+/// The request for one turn: the system prompt, the tool declarations, the
+/// provider messages of earlier turns (`history`, oldest first) and the
+/// state message. The stateless loop passes the previous turn's pair as its
+/// history; the windowed loop passes the whole managed transcript and sets
+/// `recall` to declare the `recall` tool.
+///
+/// The state message is last for Anthropic and the OpenAI-compatible wire,
+/// so everything before it is a stable prefix a provider can cache. Gemini
+/// keeps it first, as the stateless loop always has: its contents must
+/// alternate user and model turns, and the state is the opening user turn.
+#[allow(clippy::too_many_arguments)]
+fn build_request_with_history(
+    protocol: ProviderProtocol,
+    model: &str,
+    system: &str,
+    state_msg: &str,
+    history: &[Value],
+    mcp_tools: &[ExtTool],
+    images: &[WireImage],
+    recall: bool,
+) -> String {
     let user = user_content(protocol, state_msg, images);
     match protocol {
         ProviderProtocol::Gemini => {
             let mut contents = vec![json!({"role":"user","parts": user})];
-            if let Some(pair) = prev {
-                if !pair.model_parts.is_empty() {
-                    contents.push(json!({"role":"model","parts": pair.model_parts}));
-                }
-                if !pair.response_parts.is_empty() {
-                    contents.push(json!({"role":"user","parts": pair.response_parts}));
-                }
-            }
-            json!({"contents": contents, "tools": gemini_tool_definitions_with(mcp_tools),
+            contents.extend(history.iter().cloned());
+            json!({"contents": contents, "tools": with_recall(protocol, gemini_tool_definitions_with(mcp_tools), recall),
                 "systemInstruction": {"parts":[{"text": system}]},
                 "toolConfig":{"functionCallingConfig":{"mode":"AUTO"}},
                 "generationConfig":{"temperature":0.2,"maxOutputTokens":8192}})
             .to_string()
         }
         ProviderProtocol::Anthropic => {
-            let mut messages = Vec::new();
-            if let Some(pair) = prev {
-                if !pair.model_parts.is_empty() {
-                    messages.push(json!({"role":"assistant","content":pair.model_parts}));
-                }
-                if !pair.response_parts.is_empty() {
-                    messages.push(json!({"role":"user","content":pair.response_parts}));
-                }
-            }
+            let mut messages: Vec<Value> = history.to_vec();
             messages.push(json!({"role":"user","content": user}));
             json!({"model":model,"max_tokens":8192,"temperature":0.2,
                 "system":system,
-                "messages":messages,"tools":anthropic_tool_definitions_with(mcp_tools)})
+                "messages":messages,"tools":with_recall(protocol, anthropic_tool_definitions_with(mcp_tools), recall)})
             .to_string()
         }
         ProviderProtocol::OpenAiCompatible => {
             let mut messages = vec![json!({"role":"system","content":system})];
-            if let Some(pair) = prev {
-                if !pair.model_parts.is_empty() {
-                    messages.push(json!({"role":"assistant","content":Value::Null,"tool_calls":pair.model_parts}));
-                }
-                messages.extend(pair.response_parts.clone());
-            }
+            messages.extend(history.iter().cloned());
             messages.push(json!({"role":"user","content": user}));
-            json!({"model":model,"messages":messages,"tools":openai_tool_definitions_with(mcp_tools),
+            json!({"model":model,"messages":messages,"tools":with_recall(protocol, openai_tool_definitions_with(mcp_tools), recall),
                 "tool_choice":"auto","temperature":0.2,"max_tokens":8192})
             .to_string()
         }
     }
+}
+
+/// The `recall` tool as a Gemini function declaration. Declared only for
+/// windowed runs, the way `mcp_call` is declared only when MCP servers are
+/// connected, so every other run's request stays exactly as it was.
+fn recall_declaration() -> Value {
+    json!({
+        "name": "recall",
+        "description": "Read back something from earlier in this run that was cleared from view to save room. A cleared result carries its turn and call number: pass turn (and call) to read it again in full, paging with offset. Or pass query to search everything this run has seen: tool output, file contents, error text. With no arguments it lists what is archived. The text is the original, but the files may have changed since: an item marked stale_after_turn was modified later.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {"type": "STRING", "description": "words, identifiers or error text to find"},
+                "turn": {"type": "INTEGER", "description": "turn number shown in a cleared result"},
+                "call": {"type": "INTEGER", "description": "which call of that turn, from 0"},
+                "offset": {"type": "INTEGER", "description": "character offset to continue a long result from"},
+                "limit": {"type": "INTEGER", "description": "passages to return for a query (default 5, at most 8)"}
+            }
+        }
+    })
+}
+
+/// Add the `recall` declaration in `protocol`'s shape when `recall` is set.
+fn with_recall(protocol: ProviderProtocol, mut defs: Value, recall: bool) -> Value {
+    if !recall {
+        return defs;
+    }
+    let d = recall_declaration();
+    match protocol {
+        ProviderProtocol::Gemini => {
+            if let Some(decls) = defs[0]["functionDeclarations"].as_array_mut() {
+                decls.push(d);
+            }
+        }
+        ProviderProtocol::Anthropic => {
+            if let Some(arr) = defs.as_array_mut() {
+                arr.push(json!({
+                    "name": d["name"], "description": d["description"],
+                    "input_schema": lowercase_schema(d["parameters"].clone())
+                }));
+            }
+        }
+        ProviderProtocol::OpenAiCompatible => {
+            if let Some(arr) = defs.as_array_mut() {
+                arr.push(json!({"type": "function", "function": {
+                    "name": d["name"], "description": d["description"],
+                    "parameters": lowercase_schema(d["parameters"].clone())
+                }}));
+            }
+        }
+    }
+    defs
 }
 
 fn gemini_tool_definitions() -> Value {
@@ -3090,10 +3392,15 @@ fn generate_with_retry<T: Transport>(
         match result {
             Ok((status, text)) if status / 100 == 2 => return Ok(text),
             Ok((status, text)) => {
-                let detail = format!(
+                let mut detail = format!(
                     "provider HTTP {status}: {}",
                     structured_http_failure(status, &text)
                 );
+                // The raw body is only visible here (it is redacted from
+                // durable state), so say now whether the request was too long.
+                if crate::context::overflow::is_context_overflow(status, &text) {
+                    detail.push_str(&format!(" [{}]", crate::context::overflow::OVERFLOW_MARK));
+                }
                 if !retryable || attempt >= PROVIDER_RETRIES {
                     return Err(detail);
                 }
@@ -3128,19 +3435,40 @@ fn usage_tokens(protocol: ProviderProtocol, response: &str) -> Option<u64> {
         ProviderProtocol::Gemini => value
             .pointer("/usageMetadata/totalTokenCount")
             .and_then(Value::as_u64),
-        ProviderProtocol::Anthropic => Some(
-            value
-                .pointer("/usage/input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                + value
-                    .pointer("/usage/output_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-        ),
+        ProviderProtocol::Anthropic => {
+            let n = |p: &str| value.pointer(p).and_then(Value::as_u64).unwrap_or(0);
+            // cache writes and reads are input the provider processed; they
+            // are reported apart from `input_tokens` and are zero unless the
+            // request asked for caching (only windowed runs do)
+            Some(
+                n("/usage/input_tokens")
+                    + n("/usage/output_tokens")
+                    + n("/usage/cache_creation_input_tokens")
+                    + n("/usage/cache_read_input_tokens"),
+            )
+        }
         ProviderProtocol::OpenAiCompatible => {
             value.pointer("/usage/total_tokens").and_then(Value::as_u64)
         }
+    }
+}
+
+/// The input side of a response's usage: what the provider counted in the
+/// request. The context engine calibrates its token estimate against this.
+fn usage_prompt_tokens(protocol: ProviderProtocol, response: &str) -> Option<u64> {
+    let value: Value = serde_json::from_str(response).ok()?;
+    let n = |p: &str| value.pointer(p).and_then(Value::as_u64);
+    match protocol {
+        ProviderProtocol::Gemini => n("/usageMetadata/promptTokenCount"),
+        ProviderProtocol::Anthropic => {
+            n("/usage/input_tokens")?;
+            Some(
+                n("/usage/input_tokens").unwrap_or(0)
+                    + n("/usage/cache_creation_input_tokens").unwrap_or(0)
+                    + n("/usage/cache_read_input_tokens").unwrap_or(0),
+            )
+        }
+        ProviderProtocol::OpenAiCompatible => n("/usage/prompt_tokens"),
     }
 }
 
@@ -3275,6 +3603,13 @@ fn decode_gemini_calls(response: &str) -> Result<DecodedCalls, String> {
                         .get("query")
                         .and_then(Value::as_str)
                         .map(str::to_string),
+                },
+                raw,
+            )),
+            "recall" => calls.push((
+                AgentCall::Recall {
+                    id,
+                    args: args.clone(),
                 },
                 raw,
             )),
@@ -3493,6 +3828,7 @@ const AGENT_CALL_NAMES: &[&str] = &[
     "web_fetch",
     "read_output",
     "past_runs",
+    "recall",
     "remember",
     "load_skill",
     "ask_user",
@@ -3595,6 +3931,7 @@ fn decode_named_call(
             },
             Some(raw),
         ),
+        "recall" => (AgentCall::Recall { id, args }, Some(raw)),
         "remember" => match remember_args(&args) {
             Ok((action, text, old)) => (
                 AgentCall::Remember {
@@ -3835,6 +4172,7 @@ fn execute_turn<S: SecretStore + 'static, T: Transport + 'static>(
     thought_signature: Option<String>,
     cp: &mut Checkpoint,
     started: Instant,
+    engine: Option<&crate::context::ContextEngine>,
 ) -> DriveOut {
     let protocol = link.protocol;
     let mut out = DriveOut {
@@ -4345,6 +4683,43 @@ fn execute_turn<S: SecretStore + 'static, T: Transport + 'static>(
                     json!({"functionCall":{"name":"past_runs","args": call_args}}),
                 );
                 response_parts.push(function_response(protocol, "past_runs", &id, ok, &content));
+            }
+            AgentCall::Recall { id, args } => {
+                let allowed = ctx
+                    .brief
+                    .allowed_tools
+                    .as_ref()
+                    .is_none_or(|a| a.iter().any(|t| t == "recall"));
+                let (ok, content) = match (allowed, engine) {
+                    (false, _) => (
+                        false,
+                        "tool recall is not enabled for this run's role; use only the tools listed in your tool contract".to_string(),
+                    ),
+                    (true, None) => (
+                        false,
+                        "recall is only available when the run keeps a windowed context; the history is not archived in this run".to_string(),
+                    ),
+                    (true, Some(engine)) => engine.recall(&args),
+                };
+                if let Some(l) = ledger.as_mut() {
+                    l.append("recall", json!({"args": args, "ok": ok}));
+                }
+                out.digest_actions.push(DigestAction {
+                    tool: "recall".into(),
+                    ok,
+                    target: args
+                        .get("query")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| args.get("turn").map(|t| format!("turn {t}"))),
+                    error_kind: (!ok).then(|| "recall_unavailable".to_string()),
+                });
+                push_model_part(
+                    &mut model_parts,
+                    raw,
+                    json!({"functionCall":{"name":"recall","args": args}}),
+                );
+                response_parts.push(function_response(protocol, "recall", &id, ok, &content));
             }
             AgentCall::ReadOutput {
                 id,
@@ -5495,6 +5870,526 @@ fn summarize_history_step<S: SecretStore + 'static, T: Transport + 'static>(
     RunHandle::push_event(&ctx.handle.shared, AgentEvent::Info { message });
 }
 
+// ---------------------------------------------------------------------------
+// Windowed context (see `crate::context`)
+// ---------------------------------------------------------------------------
+
+/// Times one turn may make room and re-measure before it sends anyway.
+const MAX_CONTEXT_PASSES: usize = 4;
+/// Times a provider's "too long" refusal is answered by compacting and
+/// retrying before the run fails with the provider's own error.
+const MAX_OVERFLOW_RETRIES: usize = 2;
+/// Spend ceiling the loop applies to every budget.
+const HARD_MAX_TOKENS: u64 = 4_000_000;
+
+/// Replaces the stateless loop's closing rule ("the digest below carries the
+/// recent truth"), which stops being true when the history is carried.
+const WINDOWED_RULE: &str = "Earlier turns appear above as the conversation. To make room, old tool results may be replaced by short stubs and old turns folded into compacted_history; call recall to read an original result again before relying on a detail.";
+
+/// The `recall` tool as the prompt's tool contract describes it.
+fn recall_spec() -> ToolSpec {
+    ToolSpec::new(
+        "recall",
+        "Read back an earlier turn of this run whose result was cleared to save room, or search this run's own history.",
+        false,
+        false,
+    )
+}
+
+/// A role's tool scope, as the brief's switches shape it. `begin` and
+/// `resume` both call this, so a resumed run assembles exactly the prompt it
+/// started under (the identity gate refuses anything else). Lean narrows to
+/// its core first; windowed then adds `recall`, which is read-only, so a
+/// role that may read may recall.
+fn run_scope(role: Role, lean: bool, windowed: bool) -> (Vec<ToolSpec>, Option<Vec<String>>) {
+    let (mut specs, mut allowed) = lean_scope(scoped_tools_for(role), lean);
+    if windowed && !specs.is_empty() {
+        specs.push(recall_spec());
+        if let Some(list) = allowed.as_mut() {
+            list.push("recall".to_string());
+        }
+    }
+    (specs, allowed)
+}
+
+/// Spend ceiling for a windowed run whose caller chose no budget: the
+/// stateless default would end it after a few turns, because the history is
+/// re-sent every turn.
+fn windowed_default_budgets(provider: &str, model: Option<&str>, window: Option<u64>) -> Budgets {
+    let mut b = Budgets::default();
+    let limits = crate::context::limits::resolve(provider, model.unwrap_or(""), window);
+    if let Some(policy) = crate::context::policy::ContextPolicy::for_limits(&limits) {
+        b.max_tokens = policy.default_run_token_budget(DEFAULT_MAX_TOKENS, HARD_MAX_TOKENS);
+    }
+    b
+}
+
+/// The token ceiling a windowed run needs, for callers that choose the budget
+/// themselves (a custody grant, the CLI's `--windowed-context`).
+pub fn windowed_token_ceiling(provider: &str, model: Option<&str>, window: Option<u64>) -> u64 {
+    windowed_default_budgets(provider, model, window).max_tokens
+}
+
+/// What the state message is built from besides the run's own checkpoint.
+struct StateInputs<'a> {
+    project: Option<&'a rex_prompt::project::ProjectInstructions>,
+    user_rules: Option<&'a rex_prompt::project::ProjectInstructions>,
+    skills: &'a [rex_prompt::skills::SkillInfo],
+    notes: &'a [String],
+}
+
+/// Words that say what the run is working on now, for proactive recall: the
+/// titles and notes of the in-progress plan items.
+fn proactive_query(plan: &[PlanItem]) -> String {
+    plan.iter()
+        .filter(|i| i.status == PlanStatus::InProgress)
+        .map(|i| format!("{} {}", i.title, i.note.as_deref().unwrap_or("")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The state message of a windowed turn. The transcript carries the recent
+/// turns, so the digest and working-memory excerpts the stateless loop sends
+/// are left out; the rolling summary and any recalled passages go in.
+fn windowed_state_message(
+    brief: &TaskBrief,
+    cp: &Checkpoint,
+    budgets: Budgets,
+    plan: &[PlanItem],
+    inputs: &StateInputs<'_>,
+    summary: Option<&crate::context::transcript::SummaryRecord>,
+    recalled: Option<Value>,
+) -> String {
+    let mut payload = state_payload(
+        brief,
+        cp,
+        budgets,
+        plan.to_vec(),
+        inputs.project,
+        inputs.user_rules,
+        inputs.skills,
+        inputs.notes,
+        brief.lean,
+    );
+    if let Some(obj) = payload.as_object_mut() {
+        for k in ["recent_turns", "earlier_observations", "history_summary"] {
+            obj.remove(k);
+        }
+        if let Some(sum) = summary {
+            obj.insert(
+                "compacted_history".into(),
+                json!({
+                    "note": crate::context::compaction::SUMMARY_NOTE,
+                    "covers_turns_up_to": sum.covers_upto,
+                    "generation": sum.generation,
+                    "mode": sum.mode,
+                    "text": sum.text,
+                }),
+            );
+        }
+        if let Some(r) = recalled {
+            obj.insert("recalled".into(), r);
+        }
+    }
+    if let Some(rules) = payload
+        .pointer_mut("/contract/rules")
+        .and_then(Value::as_array_mut)
+    {
+        if let Some(last) = rules.last_mut() {
+            *last = json!(WINDOWED_RULE);
+        }
+    }
+    if let Some(tools) = payload
+        .pointer_mut("/contract/tools")
+        .and_then(Value::as_array_mut)
+    {
+        tools.push(json!("recall"));
+    }
+    render_state(&payload, brief.lean)
+}
+
+/// Mark the stable parts of an Anthropic request for prompt caching: the
+/// system prompt, the tool list and the last message of history. Everything
+/// up to a marker is read from the cache on the next turn, so a long
+/// transcript is paid for once. The state message that follows changes every
+/// turn and is deliberately not marked. Only the first-party endpoint is
+/// known to accept this, so only it is asked.
+fn mark_anthropic_cache(body: &str) -> String {
+    let Ok(mut v) = serde_json::from_str::<Value>(body) else {
+        return body.to_string();
+    };
+    let marker = json!({"type": "ephemeral"});
+    if let Some(sys) = v.get("system").and_then(Value::as_str).map(str::to_string) {
+        v["system"] = json!([{"type": "text", "text": sys, "cache_control": marker}]);
+    }
+    if let Some(last) = v
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .and_then(|t| t.last_mut())
+    {
+        last["cache_control"] = marker.clone();
+    }
+    if let Some(msgs) = v.get_mut("messages").and_then(Value::as_array_mut) {
+        // the last message is the state; the one before it ends the history
+        if msgs.len() >= 2 {
+            let i = msgs.len() - 2;
+            if let Some(block) = msgs[i]
+                .get_mut("content")
+                .and_then(Value::as_array_mut)
+                .and_then(|b| b.last_mut())
+            {
+                block["cache_control"] = marker;
+            }
+        }
+    }
+    v.to_string()
+}
+
+/// Opens a windowed conversation on the wire formats that require the first
+/// message to come from the user. History is placed before the state message
+/// (so that everything before it is a stable prefix a provider can cache),
+/// which would otherwise start the conversation with the assistant's first
+/// tool call. Anthropic has historically refused that, and strict chat
+/// templates served behind OpenAI-compatible endpoints (Gemma, Mistral)
+/// refuse an assistant turn straight after the system prompt. The text is
+/// constant, so the prefix stays byte-identical from turn to turn.
+const WINDOWED_SEED: &str = "Earlier turns of this run follow, then the current task state.";
+
+/// One request, shaped exactly as it is sent: tools narrowed to the run's
+/// scope, the final-check restriction, and (Anthropic, windowed) cache
+/// markers. The stateless loop and the windowed loop both go through here.
+fn assemble_request<S: SecretStore + 'static, T: Transport + 'static>(
+    ctx: &LoopCtx<S, T>,
+    protocol: ProviderProtocol,
+    model: &str,
+    state: &str,
+    history: &[Value],
+    images: &[WireImage],
+    final_check: bool,
+) -> String {
+    // Gemini's contents already open with the state message, as a user turn.
+    let seeded: Vec<Value>;
+    let history = if ctx.brief.windowed_context
+        && protocol != ProviderProtocol::Gemini
+        && !history.is_empty()
+    {
+        seeded = std::iter::once(json!({"role": "user", "content": WINDOWED_SEED}))
+            .chain(history.iter().cloned())
+            .collect();
+        &seeded[..]
+    } else {
+        history
+    };
+    let body = build_request_with_history(
+        protocol,
+        model,
+        &ctx.system_prompt,
+        state,
+        history,
+        &ctx.mcp_tools,
+        images,
+        ctx.brief.windowed_context,
+    );
+    // Declare only the tools this run may actually call. The prompt already
+    // lists just those, and the harness refuses the rest, so sending their
+    // schemas was pure cost (the lean profile and role-scoped runs such as
+    // the adversary both rely on this).
+    let body = match &ctx.brief.allowed_tools {
+        Some(allowed) => retain_tools(protocol, &body, |n| allowed.iter().any(|a| a == n)),
+        None => body,
+    };
+    let body = if final_check {
+        restrict_to_final_check(protocol, &body)
+    } else {
+        body
+    };
+    if ctx.brief.windowed_context
+        && protocol == ProviderProtocol::Anthropic
+        && ctx.brief.provider == "anthropic"
+    {
+        mark_anthropic_cache(&body)
+    } else {
+        body
+    }
+}
+
+/// Open the context engine for a windowed run, or say why the run stays
+/// stateless.
+fn open_context_engine<S: SecretStore + 'static, T: Transport + 'static>(
+    ctx: &LoopCtx<S, T>,
+    protocol: ProviderProtocol,
+    model: &str,
+    step: usize,
+) -> Option<ContextEngine> {
+    if !ctx.brief.windowed_context {
+        return None;
+    }
+    let limits =
+        crate::context::limits::resolve(&ctx.brief.provider, model, ctx.brief.context_window);
+    let Some(policy) = crate::context::policy::ContextPolicy::for_limits(&limits) else {
+        RunHandle::push_event(
+            &ctx.handle.shared,
+            AgentEvent::Info {
+                message: format!(
+                    "windowed context needs more room than a {}-token window leaves for a transcript; this run keeps the stateless loop",
+                    limits.context_window
+                ),
+            },
+        );
+        return None;
+    };
+    let recall = ctx
+        .brief
+        .allowed_tools
+        .as_ref()
+        .is_none_or(|a| a.iter().any(|t| t == "recall"));
+    RunHandle::push_event(
+        &ctx.handle.shared,
+        AgentEvent::Info {
+            message: format!(
+                "windowed context: {} token window ({}), {} tokens of input room; clearing from 55%, summarising from 75%",
+                policy.window,
+                match policy.source {
+                    crate::context::limits::LimitSource::Override => "stated",
+                    crate::context::limits::LimitSource::Table => "from the model table",
+                    crate::context::limits::LimitSource::Default => "assumed; pass a context window to change it",
+                },
+                policy.input_budget()
+            ),
+        },
+    );
+    Some(ContextEngine::open(
+        protocol,
+        ctx.state_dir.join("context"),
+        policy,
+        recall,
+        step,
+    ))
+}
+
+/// Build the state message and the history for one windowed turn, making
+/// room first when the request would be too big: stub old results, and when
+/// that is not enough fold the old prefix into a summary. Re-measures after
+/// every action. Returns the state message and the history messages.
+#[allow(clippy::too_many_arguments)]
+fn windowed_frame<S: SecretStore + 'static, T: Transport + 'static>(
+    ctx: &LoopCtx<S, T>,
+    ledger: &mut Option<Ledger>,
+    engine: &mut ContextEngine,
+    link: &ProviderLink<'_>,
+    cp: &mut Checkpoint,
+    budgets: Budgets,
+    inputs: &StateInputs<'_>,
+    plan: &[PlanItem],
+    turn_no: usize,
+) -> Result<(String, Vec<Value>), TerminalReason> {
+    let mut passes = 0;
+    loop {
+        let history = engine.history();
+        let recalled = engine.proactive(&proactive_query(plan));
+        let state = windowed_state_message(
+            &ctx.brief,
+            cp,
+            budgets,
+            plan,
+            inputs,
+            engine.summary(),
+            recalled,
+        );
+        let body = assemble_request(ctx, link.protocol, link.model, &state, &history, &[], false);
+        let est = engine.estimate_tokens(body.len());
+        let action = if passes >= MAX_CONTEXT_PASSES {
+            None
+        } else {
+            engine.plan(est, turn_no)
+        };
+        let stats = engine.stats(est);
+        if let Ok(mut sh) = ctx.handle.shared.lock() {
+            sh.context = Some(stats);
+        }
+        let Some(action) = action else {
+            return Ok((state, history));
+        };
+        passes += 1;
+        match action {
+            Action::Stub { upto } => {
+                engine.apply_stub(upto);
+                if let Some(l) = ledger.as_mut() {
+                    l.append(
+                        "context_stub",
+                        json!({"turn": turn_no, "upto": upto, "estimated_tokens": est}),
+                    );
+                }
+                RunHandle::push_event(
+                    &ctx.handle.shared,
+                    AgentEvent::Info {
+                        message: format!(
+                            "context at about {est} tokens: cleared older tool results up to turn {upto} (recall brings them back)"
+                        ),
+                    },
+                );
+            }
+            Action::Compact { upto, emergency } => {
+                compact_step(
+                    ctx, ledger, engine, link, cp, budgets, plan, upto, emergency, turn_no, est,
+                )?;
+            }
+        }
+    }
+}
+
+/// Fold turns up to `upto` into the rolling summary. A model writes it when
+/// it can (the run's own model, no tools, one call per chunk of old turns,
+/// each anchored on the summary so far); otherwise, or when the call fails,
+/// is empty, would pass the token budget or three have failed in a row, it
+/// is built from the log by code. Compaction therefore always happens.
+#[allow(clippy::too_many_arguments)]
+fn compact_step<S: SecretStore + 'static, T: Transport + 'static>(
+    ctx: &LoopCtx<S, T>,
+    ledger: &mut Option<Ledger>,
+    engine: &mut ContextEngine,
+    link: &ProviderLink<'_>,
+    cp: &mut Checkpoint,
+    budgets: Budgets,
+    plan: &[PlanItem],
+    upto: usize,
+    emergency: bool,
+    turn_no: usize,
+    before_est: u64,
+) -> Result<(), TerminalReason> {
+    use crate::context::compaction as cc;
+    use crate::context::transcript::SummaryMode;
+    let protocol = link.protocol;
+    let plan_json = serde_json::to_string(plan).unwrap_or_else(|_| "[]".into());
+    let files = cp.files_written.clone();
+    let job = engine.summary_job(upto);
+    let max_chars = engine.policy().summary_max_chars();
+    let system = cc::summary_system(max_chars);
+    let max_out = (max_chars as u64 / 3).clamp(600, 4_000);
+
+    let mut mode = SummaryMode::Mechanical;
+    let mut why = String::new();
+    let mut running = job.previous.clone();
+    let (mut spent, mut redacted, mut calls) = (0u64, 0usize, 0usize);
+    if !engine.breaker().model_allowed() {
+        why = "model summaries are off after repeated failures".into();
+    } else if job.chunks.is_empty() {
+        why = "no turns to summarise".into();
+    } else {
+        let mut ok = true;
+        for chunk in &job.chunks {
+            let user = cc::summary_user(
+                running.as_deref(),
+                chunk,
+                (job.first_turn, upto),
+                &plan_json,
+                &files,
+            );
+            let body = cc::request(protocol, link.model, &system, &user, max_out);
+            let estimate = engine.estimate_tokens(body.len()) + max_out;
+            if cp.tokens_used + estimate > budgets.max_tokens {
+                why = format!("a summary would pass the token budget (about {estimate} tokens)");
+                ok = false;
+                break;
+            }
+            let evidence = ctx.state_dir.join("evidence");
+            let tag = format!("{}-{calls}", cp.step);
+            let _ = fs::write(evidence.join(format!("compact-{tag}-request.json")), &body);
+            match generate_with_retry(
+                ctx.service.transport(),
+                protocol,
+                link.base_url,
+                link.key,
+                link.model,
+                &body,
+                &ctx.handle,
+            ) {
+                Ok(resp) => {
+                    let _ = fs::write(evidence.join(format!("compact-{tag}-response.json")), &resp);
+                    let used = usage_tokens(protocol, &resp)
+                        .unwrap_or((body.len() as u64 + resp.len() as u64) / 4);
+                    cp.tokens_used += used;
+                    spent += used;
+                    calls += 1;
+                    match cc::sanitize_summary(&cc::reply_texts(protocol, &resp), max_chars) {
+                        Ok(clean) => {
+                            redacted += clean.redacted_lines;
+                            running = Some(clean.text);
+                        }
+                        Err(e) => {
+                            why = e;
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                Err(detail) => {
+                    if detail == "cancelled" || ctx.handle.cancel.load(Ordering::SeqCst) {
+                        return Err(TerminalReason::Cancelled);
+                    }
+                    why = detail;
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok && running.is_some() {
+            mode = SummaryMode::Model;
+        } else {
+            engine.breaker_mut().note_model_failure();
+        }
+    }
+    let text = match (mode, running) {
+        (SummaryMode::Model, Some(t)) if !t.trim().is_empty() => t,
+        _ => {
+            mode = SummaryMode::Mechanical;
+            engine.mechanical(upto, &plan_json, &files)
+        }
+    };
+    let bytes_of = |e: &ContextEngine| {
+        e.history()
+            .iter()
+            .map(|m| m.to_string().len())
+            .sum::<usize>()
+    };
+    let fixed = before_est.saturating_sub(engine.estimate_tokens(bytes_of(engine)));
+    let rec = engine.finish_compaction(text, upto, mode, turn_no, before_est, |e| {
+        fixed
+            + e.estimate_tokens(bytes_of(e))
+            + e.estimate_tokens(e.summary().map_or(0, |s| s.text.len()))
+    });
+    let after =
+        fixed + engine.estimate_tokens(bytes_of(engine)) + engine.estimate_tokens(rec.text.len());
+    if let Some(l) = ledger.as_mut() {
+        l.append(
+            "context_compaction",
+            json!({
+                "turn": turn_no, "upto": upto, "emergency": emergency,
+                "mode": rec.mode, "generation": rec.generation,
+                "fingerprint": rec.fingerprint, "summary_chars": rec.text.chars().count(),
+                "estimated_before": before_est, "estimated_after": after,
+                "model_calls": calls, "usage_tokens": spent,
+                "redacted_lines": redacted, "fallback_reason": why,
+            }),
+        );
+    }
+    RunHandle::push_event(
+        &ctx.handle.shared,
+        AgentEvent::Info {
+            message: match mode {
+                SummaryMode::Model => format!(
+                    "folded turns up to {upto} into a summary: about {before_est} to {after} tokens{}",
+                    if redacted > 0 { format!("; {redacted} line(s) removed as instruction-like") } else { String::new() }
+                ),
+                SummaryMode::Mechanical => format!(
+                    "folded turns up to {upto} with a mechanical summary ({why}): about {before_est} to {after} tokens"
+                ),
+            },
+        },
+    );
+    Ok(())
+}
+
 /// Plan gate: one model turn with only `update_plan` declared, then park in
 /// `AwaitingPlan` until the trusted UI approves. No tool executes before
 /// approval - the plan turn's tool-call accounting is restored afterwards
@@ -5624,6 +6519,7 @@ fn plan_gate<S: SecretStore + 'static, T: Transport + 'static>(
                 AgentCall::WebFetch { .. } => Some("web_fetch".to_string()),
                 AgentCall::ReadOutput { .. } => Some("read_output".to_string()),
                 AgentCall::PastRuns { .. } => Some("past_runs".to_string()),
+                AgentCall::Recall { .. } => Some("recall".to_string()),
                 AgentCall::Remember { .. } => Some("remember".to_string()),
                 AgentCall::LoadSkill { .. } => Some("load_skill".to_string()),
                 AgentCall::AskUser { .. } => Some("ask_user".to_string()),
@@ -5662,6 +6558,7 @@ fn plan_gate<S: SecretStore + 'static, T: Transport + 'static>(
             decoded.thought_signature,
             cp,
             started,
+            None,
         );
         cp.tool_calls = tool_calls_before;
         if let Some(fatal) = out.fatal {
@@ -6053,6 +6950,20 @@ mod tests {
         reject_images: std::sync::atomic::AtomicBool,
         /// Body returned with the scripted failures (default: a bare message).
         fail_body: Mutex<Option<String>>,
+        /// How a context-compaction request is answered, by recognising the
+        /// summarizer's system prompt in the body: `Ok(text)` is a summary,
+        /// `Err(status)` a refusal. `None` serves it from the queue like any
+        /// other request.
+        summary_reply: Mutex<Option<Result<String, u16>>>,
+        summary_calls: std::sync::atomic::AtomicUsize,
+        /// The wire shape of the replies this transport makes up itself (a
+        /// summary, or the closing text turn). Scripted turns are served
+        /// exactly as the test wrote them.
+        shape: Mutex<ProviderProtocol>,
+        /// Act like a model with a real window: answer a (non-summary)
+        /// request bigger than this many bytes with a context-length 400.
+        /// Zero turns it off.
+        overflow_above_bytes: std::sync::atomic::AtomicUsize,
     }
 
     impl Script {
@@ -6066,6 +6977,10 @@ mod tests {
                 max_in_flight: Default::default(),
                 reject_images: Default::default(),
                 fail_body: Default::default(),
+                summary_reply: Default::default(),
+                summary_calls: Default::default(),
+                shape: Mutex::new(ProviderProtocol::Gemini),
+                overflow_above_bytes: Default::default(),
             }
         }
         fn failing(turns: Vec<String>, count: u32, status: u16) -> Self {
@@ -6078,6 +6993,18 @@ mod tests {
                 max_in_flight: Default::default(),
                 reject_images: Default::default(),
                 fail_body: Default::default(),
+                summary_reply: Default::default(),
+                summary_calls: Default::default(),
+                shape: Mutex::new(ProviderProtocol::Gemini),
+                overflow_above_bytes: Default::default(),
+            }
+        }
+        /// A plain text reply in this transport's wire shape.
+        fn text_reply(&self, text: &str) -> String {
+            match *self.shape.lock().unwrap() {
+                ProviderProtocol::Gemini => text_turn(text),
+                ProviderProtocol::Anthropic => json!({"content":[{"type":"text","text":text}],"stop_reason":"end_turn","usage":{"input_tokens":50,"output_tokens":20}}).to_string(),
+                ProviderProtocol::OpenAiCompatible => json!({"choices":[{"message":{"content":text},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":20,"total_tokens":70}}).to_string(),
             }
         }
         /// `count` rate-limit answers in the shape Groq really returns.
@@ -6121,6 +7048,27 @@ mod tests {
                     r#"{"error":{"message":"image input is not supported by this model"}}"#.into(),
                 ));
             }
+            let is_summary = body.contains("You compact the working history");
+            if is_summary {
+                self.summary_calls.fetch_add(1, Ordering::SeqCst);
+                match &*self.summary_reply.lock().unwrap() {
+                    Some(Ok(text)) => return Ok((200, self.text_reply(text))),
+                    Some(Err(status)) => {
+                        return Ok((
+                            *status,
+                            r#"{"error":{"message":"scripted summary failure"}}"#.into(),
+                        ))
+                    }
+                    None => {}
+                }
+            }
+            let limit = self.overflow_above_bytes.load(Ordering::SeqCst);
+            if limit > 0 && !is_summary && body.len() > limit {
+                return Ok((
+                    400,
+                    r#"{"error":{"code":"context_length_exceeded","message":"This model's maximum context length was exceeded."}}"#.into(),
+                ));
+            }
             {
                 let mut fail = self.fail_posts.lock().unwrap();
                 if fail.0 > 0 {
@@ -6147,7 +7095,7 @@ mod tests {
             });
             match next {
                 Some(body) => Ok((200, body)),
-                None => Ok((200, text_turn("nothing more to do"))),
+                None => Ok((200, self.text_reply("nothing more to do"))),
             }
         }
     }
@@ -6351,6 +7299,8 @@ mod tests {
             plan_mode: false,
             summarize_history: false,
             lean: false,
+            windowed_context: false,
+            context_window: None,
             name: None,
             continued_from: None,
         };
@@ -8403,6 +9353,8 @@ mod tests {
             plan_mode: false,
             summarize_history: false,
             lean: false,
+            windowed_context: false,
+            context_window: None,
             name: None,
             continued_from: None,
         };
@@ -11159,5 +12111,1054 @@ mod tests {
             done.terminal_reason
         );
         svc2.teardown(&run_id).unwrap();
+    }
+
+    // ----------------------------------------------------------------------
+    // Windowed context, end to end through the real loop
+    // ----------------------------------------------------------------------
+    //
+    // Sizing, measured rather than assumed: a request carries about 27 KB of
+    // system prompt and tool declarations; a `read_file` result reaches the
+    // model clipped to about 4.6 KB. On a 29.5k-token window that makes
+    // clearing start near turn 8 and the first summary near turn 30, well
+    // inside the 64-step cap.
+    mod windowed {
+        use super::*;
+
+        const SUMMARY: &str = "TASK Read the numbered note files in order. PROGRESS The earliest files were read and none needed changes. NEXT Keep reading the remaining files.";
+        /// Smallest window windowed mode accepts (input budget just over 20k tokens).
+        const SMALL: u64 = 29_500;
+
+        /// `lines` lines of text, `MARK_nn` first and `DEEPMARK_nn` on line
+        /// 20. A stub previews only the head, so it never holds the deep marker.
+        fn body_of(n: usize, lines: usize) -> String {
+            let mut s = format!("MARK_{n:02}\n");
+            for i in 0..lines {
+                if i == 20 {
+                    s.push_str(&format!("DEEPMARK_{n:02} sits on this line\n"));
+                }
+                s.push_str(&format!(
+                    "line {i} of file {n}: lorem ipsum dolor sit amet consectetur adipiscing elit\n"
+                ));
+            }
+            s
+        }
+
+        fn seed(root: &Path, files: usize) -> PathBuf {
+            let ws = root.join("runs").join("ws");
+            fs::create_dir_all(&ws).unwrap();
+            for n in 1..=files {
+                fs::write(ws.join(format!("f{n:02}.txt")), body_of(n, 80)).unwrap();
+            }
+            ws
+        }
+
+        fn big_budgets() -> Budgets {
+            Budgets {
+                max_steps: 64,
+                max_tool_calls: 150,
+                max_wall_ms: 120_000,
+                max_tokens: 4_000_000,
+            }
+        }
+
+        /// Reads of `from..=to`, with a plan update before every third one:
+        /// the loop ends a run that makes no progress for six turns, and
+        /// reading is not progress.
+        fn mixed(from: usize, to: usize) -> Vec<String> {
+            let mut v = Vec::new();
+            for (i, n) in (from..=to).enumerate() {
+                if i % 3 == 0 {
+                    v.push(call_turn(vec![plan_call(vec![(
+                        "1",
+                        &format!("reading file {n}"),
+                        "in_progress",
+                    )])]));
+                }
+                v.push(call_turn(vec![read_call(&format!("f{n:02}.txt"))]));
+            }
+            v
+        }
+
+        fn begin_w(
+            svc: &Arc<Svc>,
+            ws: &Path,
+            windowed: bool,
+            window: Option<u64>,
+        ) -> AgentSnapshot {
+            svc.begin_in_workspace_with_options(
+                "read every note",
+                "gemini",
+                None,
+                Some(big_budgets()),
+                Some(ws.to_path_buf()),
+                Role::Worker,
+                RunOptions {
+                    windowed_context: windowed,
+                    context_window: window,
+                    ..RunOptions::default()
+                },
+                SessionMeta::default(),
+            )
+            .unwrap()
+        }
+
+        fn state_dir(root: &Path, id: &str) -> PathBuf {
+            root.join("runs").join(id).join("state")
+        }
+
+        fn ledger(root: &Path, id: &str, kind: &str) -> Vec<Value> {
+            fs::read_to_string(state_dir(root, id).join("ledger.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .filter(|v| v["kind"] == kind)
+                .map(|v| v["data"].clone())
+                .collect()
+        }
+
+        fn infos(s: &AgentSnapshot) -> Vec<String> {
+            s.events
+                .iter()
+                .filter_map(|e| match e {
+                    AgentEvent::Info { message } => Some(message.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn run_to_end(svc: &Arc<Svc>, id: &str) -> AgentSnapshot {
+            wait_terminal(svc, id, 120_000)
+        }
+
+        fn is_summarizer(body: &str) -> bool {
+            body.contains("You compact the working history")
+        }
+
+        fn not_a_provider_error(done: &AgentSnapshot) -> bool {
+            !matches!(
+                done.terminal_reason,
+                Some(TerminalReason::ProviderError { .. })
+            )
+        }
+
+        #[test]
+        fn a_windowed_run_carries_the_transcript_clears_old_results_and_recalls_them() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ws = seed(tmp.path(), 24);
+            let mut turns = mixed(1, 22);
+            // turn 3 read f02; by now its result is long cleared
+            turns.push(call_turn(vec![
+                json!({"functionCall":{"name":"recall","args":{"turn": 3}}}),
+            ]));
+            let svc = Arc::new(service(tmp.path(), Script::new(turns)));
+            let snap = begin_w(&svc, &ws, true, Some(32_768));
+            let done = run_to_end(&svc, &snap.id);
+            let posts = svc.service().transport().seen();
+
+            // The transcript is carried: one request holds two earlier results
+            // at once. The stateless loop only ever shows the previous turn's.
+            assert!(
+                posts
+                    .iter()
+                    .any(|b| b.contains("DEEPMARK_01") && b.contains("DEEPMARK_02")),
+                "no request carried more than one earlier result"
+            );
+            // Old results are cleared to stubs that say how to get them back.
+            assert!(posts.iter().any(|b| b.contains("cleared from context")));
+            assert!(posts.iter().any(|b| b.contains("recall(turn=3, call=0)")));
+            // The post after the recall call carries the original text that
+            // had been cleared.
+            let last = posts.last().unwrap();
+            assert!(
+                last.contains("DEEPMARK_02"),
+                "recall(turn=3) must bring the cleared result back"
+            );
+            // The window held. Unmanaged, 30 turns would be ~170 KB.
+            let largest = posts.iter().map(String::len).max().unwrap();
+            assert!(largest < 90_000, "largest request {largest} bytes");
+
+            // Evidence is a manifest, not a copy of the whole transcript per turn.
+            let ev = fs::read_to_string(
+                state_dir(tmp.path(), &snap.id)
+                    .join("evidence")
+                    .join("turn-4-request.json"),
+            )
+            .unwrap();
+            let manifest: Value = serde_json::from_str(&ev).unwrap();
+            assert_eq!(manifest["windowed"], true);
+            assert!(ev.len() < 4_000, "manifest is {} bytes", ev.len());
+            // The lossless log has every turn, whole.
+            let log = fs::read_to_string(state_dir(tmp.path(), &snap.id).join("context/log.jsonl"))
+                .unwrap();
+            // 22 reads and the recall. Plan-only turns leave no pair: the
+            // plan travels in the state message, not in the conversation.
+            assert_eq!(log.lines().count(), 23, "turns logged");
+            assert!(log.contains("DEEPMARK_01") && log.contains("DEEPMARK_22"));
+
+            let ctx = done
+                .context
+                .clone()
+                .expect("windowed runs report context stats");
+            assert_eq!(ctx.turns_recorded, 23);
+            assert!(ctx.turns_stubbed >= 8, "{ctx:?}");
+            assert_eq!(ctx.compactions, 0, "stubbing alone was enough here");
+            assert_eq!(
+                (ctx.window, ctx.window_source.as_str()),
+                (32_768, "override")
+            );
+            // batching: far fewer clearing passes than turns
+            let passes = ledger(tmp.path(), &snap.id, "context_stub").len();
+            assert!(
+                (2..=14).contains(&passes),
+                "{passes} clearing passes over {} turns",
+                ctx.turns_recorded
+            );
+        }
+
+        #[test]
+        fn old_turns_are_folded_into_a_model_summary_and_the_window_holds() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ws = seed(tmp.path(), 48);
+            let script = Script::new(mixed(1, 46));
+            *script.summary_reply.lock().unwrap() = Some(Ok(SUMMARY.into()));
+            let svc = Arc::new(service(tmp.path(), script));
+            let snap = begin_w(&svc, &ws, true, Some(SMALL));
+            let done = run_to_end(&svc, &snap.id);
+            let posts = svc.service().transport().seen();
+
+            let summarizer: Vec<&String> = posts.iter().filter(|b| is_summarizer(b)).collect();
+            assert!(!summarizer.is_empty(), "no summary was requested");
+            // A tool-free request whose input is bracketed as untrusted data.
+            assert!(!summarizer[0].contains("functionDeclarations"));
+            assert!(summarizer[0].contains("UNTRUSTED DATA"));
+            assert!(summarizer[0].contains("PLAN (authoritative"));
+
+            // The summary rides in the state message and the folded turns are gone.
+            let main: Vec<&String> = posts.iter().filter(|b| !is_summarizer(b)).collect();
+            let last = main.last().unwrap();
+            assert!(last.contains("compacted_history") && last.contains(SUMMARY));
+            assert!(
+                !last.contains("MARK_01\\n"),
+                "a folded turn must not be sent again"
+            );
+            // The window held. Unmanaged, 60 turns would be ~300 KB.
+            let largest = main.iter().map(|b| b.len()).max().unwrap();
+            assert!(largest < 85_000, "largest managed request {largest} bytes");
+
+            // Nothing was lost: the log still has the folded turns.
+            let log = fs::read_to_string(state_dir(tmp.path(), &snap.id).join("context/log.jsonl"))
+                .unwrap();
+            assert!(log.contains("MARK_01"));
+
+            let entries = ledger(tmp.path(), &snap.id, "context_compaction");
+            assert!(!entries.is_empty());
+            assert!(entries.iter().all(|e| e["mode"] == "model"), "{entries:?}");
+            assert_eq!(entries[0]["generation"], 1);
+            assert!(
+                entries[0]["estimated_after"].as_u64() < entries[0]["estimated_before"].as_u64(),
+                "{:?}",
+                entries[0]
+            );
+            let ctx = done.context.clone().unwrap();
+            assert!(ctx.model_compactions >= 1 && ctx.mechanical_compactions == 0);
+            assert!(ctx.turns_folded >= 10, "{ctx:?}");
+            assert!(infos(&done).iter().any(|m| m.contains("into a summary")));
+        }
+
+        #[test]
+        fn a_failing_summarizer_falls_back_to_a_mechanical_summary_without_ending_the_run() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ws = seed(tmp.path(), 48);
+            let script = Script::new(mixed(1, 46));
+            *script.summary_reply.lock().unwrap() = Some(Err(400));
+            let svc = Arc::new(service(tmp.path(), script));
+            let snap = begin_w(&svc, &ws, true, Some(SMALL));
+            let done = run_to_end(&svc, &snap.id);
+            let posts = svc.service().transport().seen();
+
+            assert!(not_a_provider_error(&done), "{:?}", done.terminal_reason);
+            let entries = ledger(tmp.path(), &snap.id, "context_compaction");
+            assert!(!entries.is_empty());
+            assert!(entries.iter().all(|e| e["mode"] == "mechanical"));
+            assert!(!entries[0]["fallback_reason"].as_str().unwrap().is_empty());
+            assert!(posts.iter().any(|b| b.contains("Mechanical summary")));
+            let asked = svc
+                .service()
+                .transport()
+                .summary_calls
+                .load(Ordering::SeqCst);
+            assert!(asked >= 1, "the model was tried first");
+            let ctx = done.context.unwrap();
+            assert_eq!(ctx.model_compactions, 0);
+            assert!(ctx.mechanical_compactions >= 1);
+        }
+
+        #[test]
+        fn a_provider_that_refuses_the_request_as_too_long_is_answered_by_making_room() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ws = seed(tmp.path(), 34);
+            let script = Script::new(mixed(1, 32));
+            *script.summary_reply.lock().unwrap() = Some(Ok(SUMMARY.into()));
+            // The model's real window is far smaller than the stated 200k,
+            // so nothing is cleared until the provider refuses.
+            let limit = 100_000;
+            script.overflow_above_bytes.store(limit, Ordering::SeqCst);
+            let svc = Arc::new(service(tmp.path(), script));
+            let snap = begin_w(&svc, &ws, true, Some(200_000));
+            let done = run_to_end(&svc, &snap.id);
+            let posts = svc.service().transport().seen();
+
+            assert!(not_a_provider_error(&done), "{:?}", done.terminal_reason);
+            assert!(
+                posts.iter().any(|b| b.len() > limit),
+                "the refusal never happened"
+            );
+            assert!(infos(&done)
+                .iter()
+                .any(|m| m.contains("refused the request as too long")));
+            assert!(!ledger(tmp.path(), &snap.id, "context_overflow").is_empty());
+            // The recovery cleared old results (cheaper than a summary), and the
+            // run carried on with requests that fit.
+            assert!(!ledger(tmp.path(), &snap.id, "context_stub").is_empty());
+            let last_main = posts.iter().rev().find(|b| !is_summarizer(b)).unwrap();
+            assert!(last_main.len() <= limit, "{} bytes", last_main.len());
+            let ctx = done.context.unwrap();
+            assert!(ctx.overflow_recoveries >= 1);
+            // The window was learned: the engine now plans around far less than 200k.
+            assert!(
+                ctx.input_budget < 100_000,
+                "input budget {}",
+                ctx.input_budget
+            );
+        }
+
+        #[test]
+        fn an_overflow_that_cannot_be_recovered_fails_with_the_providers_refusal_not_a_loop() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ws = seed(tmp.path(), 4);
+            let script = Script::new(mixed(1, 3));
+            // below even the fixed part of a request: no amount of clearing helps
+            script.overflow_above_bytes.store(10_000, Ordering::SeqCst);
+            let svc = Arc::new(service(tmp.path(), script));
+            let snap = begin_w(&svc, &ws, true, Some(200_000));
+            let done = run_to_end(&svc, &snap.id);
+            match &done.terminal_reason {
+                Some(TerminalReason::ProviderError { detail }) => {
+                    assert!(detail.contains("context_window_exceeded"), "{detail}");
+                }
+                other => panic!("expected the provider's refusal, got {other:?}"),
+            }
+            let posts = svc.service().transport().seen();
+            // the first attempt plus at most MAX_OVERFLOW_RETRIES retries
+            assert!(
+                posts.len() <= 1 + MAX_OVERFLOW_RETRIES,
+                "{} requests",
+                posts.len()
+            );
+        }
+
+        #[test]
+        fn a_windowed_run_resumes_with_its_history_and_summary_after_a_crash() {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().to_path_buf();
+            let ws = seed(&root, 48);
+            // A repo's own instructions ride in every request. 8,000 characters
+            // is the most REX reads, and it brings the first summary forward.
+            fs::write(
+                ws.join("AGENTS.md"),
+                "- keep changes small and tested; prefer the existing helpers\n".repeat(140),
+            )
+            .unwrap();
+            let run_id;
+            {
+                let script = Script::new(mixed(1, 46));
+                *script.summary_reply.lock().unwrap() = Some(Ok(SUMMARY.into()));
+                script.post_delay_ms.store(40, Ordering::SeqCst);
+                let svc = Arc::new(service(&root, script));
+                let snap = begin_w(&svc, &ws, true, Some(SMALL));
+                run_id = snap.id.clone();
+                // wait until a summary has been written, then kill the run
+                let start = Instant::now();
+                loop {
+                    let view =
+                        fs::read_to_string(state_dir(&root, &run_id).join("context/view.jsonl"))
+                            .unwrap_or_default();
+                    if view.contains("\"ev\":\"compact\"") {
+                        break;
+                    }
+                    assert!(
+                        start.elapsed().as_secs() < 60,
+                        "no compaction before the deadline; step {}",
+                        svc.snapshot(&run_id).unwrap().step
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // process death: stops without a terminal state
+                svc.halt_without_terminal(&run_id);
+                std::thread::sleep(Duration::from_millis(400));
+            }
+
+            let script2 = Script::new(mixed(30, 34));
+            *script2.summary_reply.lock().unwrap() = Some(Ok(SUMMARY.into()));
+            let svc2 = Arc::new(service(&root, script2));
+            // The prompt-identity gate must accept a windowed run: it
+            // assembles the same tool contract (with recall) it began with.
+            let resumed = svc2.resume(&run_id).expect("a windowed run resumes");
+            assert!(resumed.step >= 6, "resumed at step {}", resumed.step);
+            let done = run_to_end(&svc2, &run_id);
+            let posts = svc2.service().transport().seen();
+            let first = posts
+                .iter()
+                .find(|b| !is_summarizer(b))
+                .expect("the resumed run made a request");
+            assert!(
+                first.contains("compacted_history") && first.contains(SUMMARY),
+                "the summary must survive the restart"
+            );
+            assert!(
+                first.contains("DEEPMARK_"),
+                "turns recorded before the crash are still sent"
+            );
+            let ctx = done.context.expect("stats after resume");
+            assert!(ctx.turns_folded >= 1, "{ctx:?}");
+        }
+
+        // ------------------------------------------------------------------
+        // The same long run on the other two wire formats. The loop tests
+        // above use Gemini's shape; these check that a replayed conversation
+        // is one the Anthropic and OpenAI-compatible APIs accept.
+        // ------------------------------------------------------------------
+
+        fn service_for(root: &Path, script: Script, provider: &str) -> Svc {
+            let store = MemorySecretStore::new();
+            store.set_key(provider, "test-key").unwrap();
+            AutonomousRunService::new(ProviderService::new(store, script), None, root.join("runs"))
+        }
+
+        fn shaped_call(shape: ProviderProtocol, n: &mut usize, name: &str, input: Value) -> String {
+            *n += 1;
+            let id = format!("call_{n}");
+            match shape {
+                ProviderProtocol::Anthropic => json!({
+                    "content": [{"type":"tool_use","id": id,"name": name,"input": input}],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 100, "output_tokens": 40}
+                })
+                .to_string(),
+                ProviderProtocol::OpenAiCompatible => json!({
+                    "choices": [{"message": {"content": null, "tool_calls": [
+                        {"id": id, "type": "function",
+                         "function": {"name": name, "arguments": input.to_string()}}
+                    ]}, "finish_reason": "tool_calls"}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140}
+                })
+                .to_string(),
+                ProviderProtocol::Gemini => {
+                    call_turn(vec![json!({"functionCall": {"name": name, "args": input}})])
+                }
+            }
+        }
+
+        fn mixed_for(shape: ProviderProtocol, from: usize, to: usize) -> Vec<String> {
+            let mut n = 0;
+            let mut v = Vec::new();
+            for (i, f) in (from..=to).enumerate() {
+                if i % 3 == 0 {
+                    v.push(shaped_call(
+                        shape,
+                        &mut n,
+                        "update_plan",
+                        json!({"items": [{"id":"1","title": format!("reading file {f}"),"status":"in_progress"}]}),
+                    ));
+                }
+                v.push(shaped_call(
+                    shape,
+                    &mut n,
+                    "read_file",
+                    json!({"path": format!("f{f:02}.txt")}),
+                ));
+            }
+            v
+        }
+
+        fn parse(body: &str) -> Value {
+            serde_json::from_str(body).unwrap()
+        }
+
+        fn sorted(mut v: Vec<String>) -> Vec<String> {
+            v.sort();
+            v
+        }
+
+        /// What the Messages API enforces: the conversation opens with the
+        /// user, ends with the user, and every `tool_use` is answered by a
+        /// `tool_result` for exactly its id in the next message.
+        fn assert_valid_anthropic(body: &str) {
+            let v = parse(body);
+            let msgs = v["messages"].as_array().unwrap();
+            assert_eq!(msgs[0]["role"], "user", "must open with the user");
+            assert_eq!(
+                msgs.last().unwrap()["role"],
+                "user",
+                "must end with the user"
+            );
+            let mut seen_ids = Vec::new();
+            let mut i = 0;
+            while i < msgs.len() {
+                if msgs[i]["role"] == "assistant" {
+                    let ids: Vec<String> = msgs[i]["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|b| b["type"] == "tool_use")
+                        .map(|b| b["id"].as_str().unwrap().to_string())
+                        .collect();
+                    assert!(!ids.is_empty(), "an assistant turn with no tool_use");
+                    let next = &msgs[i + 1];
+                    assert_eq!(next["role"], "user", "results must follow the call");
+                    let answered: Vec<String> = next["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|b| b["type"] == "tool_result")
+                        .map(|b| b["tool_use_id"].as_str().unwrap().to_string())
+                        .collect();
+                    assert_eq!(
+                        sorted(ids.clone()),
+                        sorted(answered),
+                        "unmatched call/result"
+                    );
+                    seen_ids.extend(ids);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            let unique: std::collections::HashSet<_> = seen_ids.iter().collect();
+            assert_eq!(unique.len(), seen_ids.len(), "tool_use ids must be unique");
+        }
+
+        /// What chat-completions endpoints (and strict chat templates)
+        /// enforce: system first, then a user turn, then assistant tool calls
+        /// each followed by one `tool` message per call id, ending on the user.
+        fn assert_valid_openai(body: &str) {
+            let v = parse(body);
+            let msgs = v["messages"].as_array().unwrap();
+            assert_eq!(msgs[0]["role"], "system");
+            assert_eq!(
+                msgs[1]["role"], "user",
+                "an assistant turn may not follow the system prompt"
+            );
+            assert_eq!(msgs.last().unwrap()["role"], "user");
+            let mut seen_ids = Vec::new();
+            let mut i = 0;
+            while i < msgs.len() {
+                match msgs[i]["role"].as_str().unwrap() {
+                    "assistant" => {
+                        let ids: Vec<String> = msgs[i]["tool_calls"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|c| c["id"].as_str().unwrap().to_string())
+                            .collect();
+                        let mut answered = Vec::new();
+                        i += 1;
+                        while i < msgs.len() && msgs[i]["role"] == "tool" {
+                            answered.push(msgs[i]["tool_call_id"].as_str().unwrap().to_string());
+                            i += 1;
+                        }
+                        assert_eq!(
+                            sorted(ids.clone()),
+                            sorted(answered),
+                            "unmatched call/result"
+                        );
+                        seen_ids.extend(ids);
+                    }
+                    "tool" => panic!("a tool message with no call before it"),
+                    _ => i += 1,
+                }
+            }
+            let unique: std::collections::HashSet<_> = seen_ids.iter().collect();
+            assert_eq!(unique.len(), seen_ids.len());
+        }
+
+        fn run_shaped(
+            shape: ProviderProtocol,
+            provider: &str,
+            model: &str,
+        ) -> (tempfile::TempDir, Arc<Svc>, AgentSnapshot) {
+            let tmp = tempfile::tempdir().unwrap();
+            let ws = seed(tmp.path(), 30);
+            // a repo's own instructions bring the first summary forward
+            fs::write(
+                ws.join("AGENTS.md"),
+                "- keep changes small and tested; prefer the existing helpers\n".repeat(140),
+            )
+            .unwrap();
+            let script = Script::new(mixed_for(shape, 1, 28));
+            *script.shape.lock().unwrap() = shape;
+            *script.summary_reply.lock().unwrap() = Some(Ok(SUMMARY.into()));
+            let svc = Arc::new(service_for(tmp.path(), script, provider));
+            let snap = svc
+                .begin_in_workspace_with_options(
+                    "read every note",
+                    provider,
+                    Some(model),
+                    Some(big_budgets()),
+                    Some(ws),
+                    Role::Worker,
+                    RunOptions {
+                        windowed_context: true,
+                        context_window: Some(SMALL),
+                        ..RunOptions::default()
+                    },
+                    SessionMeta::default(),
+                )
+                .unwrap();
+            let done = run_to_end(&svc, &snap.id);
+            (tmp, svc, done)
+        }
+
+        #[test]
+        fn a_long_anthropic_run_replays_only_valid_conversations_and_marks_the_cache() {
+            let (_tmp, svc, done) =
+                run_shaped(ProviderProtocol::Anthropic, "anthropic", "claude-test");
+            let posts = svc.service().transport().seen();
+            let main: Vec<&String> = posts.iter().filter(|b| !is_summarizer(b)).collect();
+            assert!(main.len() >= 25, "{} requests", main.len());
+            for body in &main {
+                assert_valid_anthropic(body);
+            }
+            // the managed parts all happened on this wire format
+            assert!(main.iter().any(|b| b.contains("cleared from context")));
+            assert!(main
+                .iter()
+                .any(|b| b.contains("compacted_history") && b.contains(SUMMARY)));
+            // the seed opens the conversation once there is history
+            assert!(main.last().unwrap().contains(WINDOWED_SEED));
+            assert!(!main[0].contains(WINDOWED_SEED), "no history, no seed");
+            // prompt caching: system as blocks, last tool and last history message marked
+            let last = parse(main.last().unwrap());
+            assert_eq!(last["system"][0]["cache_control"]["type"], "ephemeral");
+            assert_eq!(
+                last["tools"].as_array().unwrap().last().unwrap()["cache_control"]["type"],
+                "ephemeral"
+            );
+            let msgs = last["messages"].as_array().unwrap();
+            assert_eq!(
+                msgs[msgs.len() - 2]["content"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()["cache_control"]["type"],
+                "ephemeral"
+            );
+            assert!(!msgs.last().unwrap().to_string().contains("cache_control"));
+            // at most four breakpoints are allowed per request
+            assert!(main.iter().all(|b| b.matches("cache_control").count() <= 4));
+            // the summarizer is a plain tool-free request in this format
+            let sum = parse(posts.iter().find(|b| is_summarizer(b)).unwrap());
+            assert!(sum.get("tools").is_none() && sum["messages"].as_array().unwrap().len() == 1);
+            assert!(
+                !matches!(
+                    done.terminal_reason,
+                    Some(TerminalReason::ProviderError { .. })
+                ),
+                "{:?}",
+                done.terminal_reason
+            );
+            assert!(done.context.unwrap().compactions >= 1);
+        }
+
+        #[test]
+        fn a_long_openai_compatible_run_replays_only_valid_conversations() {
+            let (_tmp, svc, done) =
+                run_shaped(ProviderProtocol::OpenAiCompatible, "openai", "gpt-test");
+            let posts = svc.service().transport().seen();
+            let main: Vec<&String> = posts.iter().filter(|b| !is_summarizer(b)).collect();
+            assert!(main.len() >= 25, "{} requests", main.len());
+            for body in &main {
+                assert_valid_openai(body);
+            }
+            assert!(main.iter().any(|b| b.contains("cleared from context")));
+            assert!(main
+                .iter()
+                .any(|b| b.contains("compacted_history") && b.contains(SUMMARY)));
+            assert!(main.last().unwrap().contains(WINDOWED_SEED));
+            // only the first-party Anthropic endpoint is asked to cache
+            assert!(main.iter().all(|b| !b.contains("cache_control")));
+            // recall is declared on this wire format too
+            assert!(parse(main.last().unwrap())["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["function"]["name"] == "recall"));
+            assert!(
+                !matches!(
+                    done.terminal_reason,
+                    Some(TerminalReason::ProviderError { .. })
+                ),
+                "{:?}",
+                done.terminal_reason
+            );
+            assert!(done.context.unwrap().compactions >= 1);
+        }
+
+        #[test]
+        fn the_stateless_loop_is_not_given_the_seed_or_cache_markers() {
+            // A default run on these wire formats must be exactly what it was.
+            for (shape, provider, model) in [
+                (ProviderProtocol::Anthropic, "anthropic", "claude-test"),
+                (ProviderProtocol::OpenAiCompatible, "openai", "gpt-test"),
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let ws = seed(tmp.path(), 6);
+                let script = Script::new(mixed_for(shape, 1, 4));
+                *script.shape.lock().unwrap() = shape;
+                let svc = Arc::new(service_for(tmp.path(), script, provider));
+                let snap = svc
+                    .begin_in_workspace_with_options(
+                        "read",
+                        provider,
+                        Some(model),
+                        Some(big_budgets()),
+                        Some(ws),
+                        Role::Worker,
+                        RunOptions::default(),
+                        SessionMeta::default(),
+                    )
+                    .unwrap();
+                run_to_end(&svc, &snap.id);
+                let posts = svc.service().transport().seen();
+                assert!(posts.len() >= 4);
+                for b in &posts {
+                    assert!(
+                        !b.contains(WINDOWED_SEED) && !b.contains("cache_control"),
+                        "{provider}"
+                    );
+                    assert!(
+                        !b.contains("recall"),
+                        "{provider}: recall leaked into a stateless run"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn recall_is_refused_in_a_stateless_run_and_not_declared() {
+            let tmp = tempfile::tempdir().unwrap();
+            let svc = Arc::new(service(
+                tmp.path(),
+                Script::new(vec![
+                    call_turn(vec![
+                        json!({"functionCall":{"name":"recall","args":{"query":"anything"}}}),
+                    ]),
+                    text_turn("ok"),
+                ]),
+            ));
+            let snap = svc.begin("try recall", "gemini", Some(budgets())).unwrap();
+            wait_terminal(&svc, &snap.id, 20_000);
+            let posts = svc.service().transport().seen();
+            assert!(!declared_tools(&posts[0]).contains(&"recall".to_string()));
+            assert!(!posts[0].contains("`recall`"), "nor in the prompt contract");
+            assert!(posts[1].contains("only available when the run keeps a windowed context"));
+        }
+
+        #[test]
+        fn a_window_too_small_for_a_transcript_keeps_the_stateless_loop() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ws = seed(tmp.path(), 1);
+            let svc = Arc::new(service(tmp.path(), Script::new(vec![text_turn("hello")])));
+            let snap = begin_w(&svc, &ws, true, Some(20_000));
+            let done = wait_terminal(&svc, &snap.id, 20_000);
+            assert!(done.context.is_none(), "no engine for a 20k window");
+            assert!(infos(&done)
+                .iter()
+                .any(|m| m.contains("keeps the stateless loop")));
+        }
+
+        #[test]
+        fn the_windowed_tool_contract_adds_recall_and_changes_only_that() {
+            let (legacy, legacy_allowed) = run_scope(Role::Worker, false, false);
+            let (win, win_allowed) = run_scope(Role::Worker, false, true);
+            assert!(!legacy.iter().any(|t| t.name == "recall"));
+            assert_eq!(win.len(), legacy.len() + 1);
+            assert!(win.iter().any(|t| t.name == "recall"));
+            assert!(legacy_allowed.is_none() && win_allowed.is_none());
+            assert_ne!(
+                assemble_run_prompt(Role::Worker, &legacy).2,
+                assemble_run_prompt(Role::Worker, &win).2,
+                "a windowed run has its own prompt identity"
+            );
+            // the default prompt is untouched
+            assert_eq!(
+                assemble_run_prompt(Role::Worker, &legacy).2,
+                assemble_run_prompt(Role::Worker, &scoped_tools_for(Role::Worker).0).2
+            );
+
+            // lean keeps its core and gains recall, in the prompt and the allowlist
+            let (lean, allowed) = run_scope(Role::Worker, true, true);
+            let allowed = allowed.unwrap();
+            assert_eq!(lean.len(), LEAN_TOOLS.len() + 1);
+            assert!(allowed.contains(&"recall".to_string()));
+            assert_eq!(allowed.len(), lean.len());
+
+            // a read-only role may recall; a role with no tools gets nothing
+            let (adv, adv_allowed) = run_scope(Role::Adversary, false, true);
+            assert!(adv.iter().any(|t| t.name == "recall"));
+            assert!(adv_allowed.unwrap().contains(&"recall".to_string()));
+            let none_role = [Role::ContractDrafter, Role::CleanRoomJudge]
+                .into_iter()
+                .find(|r| scoped_tools_for(*r).0.is_empty())
+                .expect("some role has no tools");
+            assert!(run_scope(none_role, false, true).0.is_empty());
+        }
+
+        #[test]
+        fn lean_runs_resume_under_the_same_prompt_they_began_with() {
+            // run_scope is shared by begin and resume. Before it, resume
+            // rebuilt the full contract for a lean run and the identity gate
+            // refused it.
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().to_path_buf();
+            let ws = seed(&root, 30);
+            let run_id;
+            {
+                let script = Script::new(mixed(1, 28));
+                script.post_delay_ms.store(40, Ordering::SeqCst);
+                let svc = Arc::new(service(&root, script));
+                let snap = svc
+                    .begin_in_workspace_with_options(
+                        "lean and resumable",
+                        "gemini",
+                        None,
+                        Some(big_budgets()),
+                        Some(ws.clone()),
+                        Role::Worker,
+                        RunOptions {
+                            lean: true,
+                            ..RunOptions::default()
+                        },
+                        SessionMeta::default(),
+                    )
+                    .unwrap();
+                run_id = snap.id.clone();
+                let start = Instant::now();
+                while svc.snapshot(&run_id).unwrap().step < 3 {
+                    assert!(start.elapsed().as_secs() < 30);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                svc.halt_without_terminal(&run_id);
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            let svc2 = Arc::new(service(&root, Script::new(vec![text_turn("done")])));
+            svc2.resume(&run_id)
+                .expect("a lean run must resume under its own prompt identity");
+        }
+
+        #[test]
+        fn a_windowed_run_with_no_budget_gets_a_ceiling_that_fits_re_sending_history() {
+            let tmp = tempfile::tempdir().unwrap();
+            let svc = Arc::new(service(tmp.path(), Script::new(vec![text_turn("hi")])));
+            let begin = |windowed: bool| {
+                svc.begin_in_workspace_with_options(
+                    "t",
+                    "gemini",
+                    None,
+                    None,
+                    None,
+                    Role::Worker,
+                    RunOptions {
+                        windowed_context: windowed,
+                        ..RunOptions::default()
+                    },
+                    SessionMeta::default(),
+                )
+                .unwrap()
+            };
+            assert_eq!(begin(false).max_tokens, DEFAULT_MAX_TOKENS);
+            assert_eq!(
+                begin(true).max_tokens,
+                HARD_MAX_TOKENS,
+                "twenty windows of a 1M-class model, clamped to the hard ceiling"
+            );
+        }
+
+        #[test]
+        fn request_shapes_declare_recall_only_when_asked_and_cache_markers_are_well_formed() {
+            for p in [
+                ProviderProtocol::Gemini,
+                ProviderProtocol::Anthropic,
+                ProviderProtocol::OpenAiCompatible,
+            ] {
+                let without =
+                    build_request_with_history(p, "m", "sys", "state", &[], &[], &[], false);
+                let with = build_request_with_history(p, "m", "sys", "state", &[], &[], &[], true);
+                assert!(!without.contains("\"recall\""), "{p:?}");
+                assert!(with.contains("\"name\":\"recall\""), "{p:?}");
+                assert!(with.len() > without.len());
+                // the stateless wrapper is the history-based builder with the
+                // previous pair as its history
+                let pair = TurnPair {
+                    model_parts: vec![
+                        json!({"functionCall":{"name":"read_file","args":{"path":"a"}}}),
+                    ],
+                    response_parts: vec![
+                        json!({"functionResponse":{"name":"read_file","response":{"ok":true,"content":"x"}}}),
+                    ],
+                };
+                let legacy = build_request(p, "m", "sys", "state", Some(&pair), &[], &[]);
+                let hist =
+                    crate::context::wire::messages(p, &pair.model_parts, &pair.response_parts);
+                assert_eq!(
+                    legacy,
+                    build_request_with_history(p, "m", "sys", "state", &hist, &[], &[], false)
+                );
+            }
+            // Anthropic: system, last tool and the last history message are
+            // marked; the volatile state is not
+            let history = vec![
+                json!({"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read_file","input":{}}]}),
+                json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]}),
+            ];
+            let body = build_request_with_history(
+                ProviderProtocol::Anthropic,
+                "m",
+                "sys",
+                "state",
+                &history,
+                &[],
+                &[],
+                true,
+            );
+            let marked: Value = serde_json::from_str(&mark_anthropic_cache(&body)).unwrap();
+            assert_eq!(marked["system"][0]["cache_control"]["type"], "ephemeral");
+            assert_eq!(marked["system"][0]["text"], "sys");
+            let tools = marked["tools"].as_array().unwrap();
+            assert_eq!(tools.last().unwrap()["cache_control"]["type"], "ephemeral");
+            assert!(tools[0].get("cache_control").is_none());
+            let msgs = marked["messages"].as_array().unwrap();
+            assert_eq!(msgs.len(), 3);
+            assert_eq!(msgs[1]["content"][0]["cache_control"]["type"], "ephemeral");
+            assert!(
+                !msgs[2].to_string().contains("cache_control"),
+                "the volatile state is never cached"
+            );
+            // no history: only system and tools are marked, and nothing panics
+            let bare = build_request_with_history(
+                ProviderProtocol::Anthropic,
+                "m",
+                "sys",
+                "state",
+                &[],
+                &[],
+                &[],
+                true,
+            );
+            let marked: Value = serde_json::from_str(&mark_anthropic_cache(&bare)).unwrap();
+            assert!(!marked["messages"].to_string().contains("cache_control"));
+        }
+
+        #[test]
+        fn anthropic_cache_tokens_count_toward_spend_and_the_prompt_size() {
+            let r = json!({"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":2000,"cache_read_input_tokens":30000}}).to_string();
+            assert_eq!(usage_tokens(ProviderProtocol::Anthropic, &r), Some(32_150));
+            assert_eq!(
+                usage_prompt_tokens(ProviderProtocol::Anthropic, &r),
+                Some(32_100)
+            );
+            // without caching nothing changes
+            let plain = json!({"usage":{"input_tokens":100,"output_tokens":50}}).to_string();
+            assert_eq!(usage_tokens(ProviderProtocol::Anthropic, &plain), Some(150));
+            let g = json!({"usageMetadata":{"promptTokenCount":900,"totalTokenCount":1000}})
+                .to_string();
+            assert_eq!(usage_prompt_tokens(ProviderProtocol::Gemini, &g), Some(900));
+            let o = json!({"usage":{"prompt_tokens":700,"total_tokens":800}}).to_string();
+            assert_eq!(
+                usage_prompt_tokens(ProviderProtocol::OpenAiCompatible, &o),
+                Some(700)
+            );
+            assert_eq!(usage_prompt_tokens(ProviderProtocol::Gemini, "{}"), None);
+        }
+
+        #[test]
+        fn the_windowed_state_replaces_the_digest_and_names_recall() {
+            let brief = TaskBrief {
+                id: "r".into(),
+                task: "t".into(),
+                provider: "gemini".into(),
+                budgets: Budgets::default(),
+                created_at_ms: 1,
+                prompt_version: legacy_prompt_marker(),
+                prompt_hash: legacy_prompt_marker(),
+                role: None,
+                allowed_tools: None,
+                plan_mode: false,
+                summarize_history: false,
+                lean: false,
+                windowed_context: true,
+                context_window: None,
+                name: None,
+                continued_from: None,
+            };
+            let mut cp = Checkpoint::default();
+            cp.digest.push(DigestEntry {
+                turn: 1,
+                actions: vec![],
+            });
+            let inputs = StateInputs {
+                project: None,
+                user_rules: None,
+                skills: &[],
+                notes: &[],
+            };
+            let summary = crate::context::transcript::SummaryRecord {
+                text: "earlier work".into(),
+                covers_upto: 4,
+                generation: 2,
+                mode: crate::context::transcript::SummaryMode::Model,
+                fingerprint: "ab".into(),
+            };
+            let msg = windowed_state_message(
+                &brief,
+                &cp,
+                Budgets::default(),
+                &[],
+                &inputs,
+                Some(&summary),
+                Some(json!({"items": []})),
+            );
+            let v: Value = serde_json::from_str(&msg).unwrap();
+            for gone in ["recent_turns", "earlier_observations", "history_summary"] {
+                assert!(
+                    v.get(gone).is_none(),
+                    "{gone} is carried by the transcript instead"
+                );
+            }
+            assert_eq!(v["compacted_history"]["text"], "earlier work");
+            assert_eq!(v["compacted_history"]["covers_turns_up_to"], 4);
+            assert!(v["recalled"].is_object());
+            let rules = v["contract"]["rules"].as_array().unwrap();
+            assert!(rules.last().unwrap().as_str().unwrap().contains("recall"));
+            assert!(!msg.contains("the digest below carries the recent truth"));
+            assert!(v["contract"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t == "recall"));
+            // without a summary or recalled passages the fields are absent, not null
+            let bare: Value = serde_json::from_str(&windowed_state_message(
+                &brief,
+                &cp,
+                Budgets::default(),
+                &[],
+                &inputs,
+                None,
+                None,
+            ))
+            .unwrap();
+            assert!(bare.get("compacted_history").is_none() && bare.get("recalled").is_none());
+        }
     }
 }
