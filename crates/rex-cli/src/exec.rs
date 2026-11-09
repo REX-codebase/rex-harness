@@ -40,7 +40,18 @@ impl<S: SecretStore> EnvSecretStore<S> {
 }
 
 impl<S: SecretStore> SecretStore for EnvSecretStore<S> {
+    fn lock_dir(&self) -> Option<PathBuf> {
+        self.inner.lock_dir()
+    }
+
     fn get_key(&self, provider: &str) -> Result<Option<String>, ProviderError> {
+        // Internal records (`<provider>#base_url`, `openai-chatgpt#oauth`) are
+        // not API keys: an environment variable must never stand in for one.
+        // Without this, `REX_API_KEY` would be read back as a saved sign-in or
+        // a base URL.
+        if provider.contains('#') {
+            return self.inner.get_key(provider);
+        }
         let name = Self::env_name(provider);
         if let Ok(v) = std::env::var(&name) {
             let v = v.trim().to_string();
@@ -91,6 +102,11 @@ pub struct ExecOptions {
     pub accept_bid: bool,
     /// Dollar cap: converted worst-case into a token budget. Needs --model.
     pub budget_usd: Option<f64>,
+    /// Keep a managed transcript instead of the stateless loop (see
+    /// `rex_providers::RunOptions::windowed_context`).
+    pub windowed_context: bool,
+    /// The model's context window in tokens, when REX does not know it.
+    pub context_window: Option<u64>,
     /// Internal disambiguator for parallel-family runs (e.g. tournament
     /// contestants): each tag gets its own staged workspace directory.
     /// Not a CLI flag.
@@ -478,6 +494,10 @@ pub fn execute(mut opts: ExecOptions) -> Result<ExecOutput, ExecError> {
             opts.provider
         )));
     }
+    if opts.provider == "openai-chatgpt" {
+        // refuse before staging a workspace or starting anything
+        rex_providers::policy::chatgpt_plan_route().map_err(ExecError::usage)?;
+    }
 
     // Proof contract: load `.rex/policy.json` from the source workspace
     // before anything else, and fail closed on a malformed contract.
@@ -538,6 +558,15 @@ pub fn execute(mut opts: ExecOptions) -> Result<ExecOutput, ExecError> {
     };
 
     let mut budgets = Budgets::default();
+    if opts.windowed_context {
+        // The history is re-sent every turn, so the stateless default would
+        // end the run in a few turns. An explicit --max-tokens still wins.
+        budgets.max_tokens = rex_providers::windowed_token_ceiling(
+            &opts.provider,
+            opts.model.as_deref(),
+            opts.context_window,
+        );
+    }
     if let Some(s) = opts.max_steps {
         budgets.max_steps = s;
     }
@@ -660,12 +689,17 @@ pub fn execute(mut opts: ExecOptions) -> Result<ExecOutput, ExecError> {
     };
 
     let snap = agent
-        .begin_in_workspace(
+        .begin_in_workspace_with_run_options(
             &effective_task,
             &opts.provider,
             opts.model.as_deref(),
             Some(budgets),
             staged_workspace.clone(),
+            rex_providers::RunOptions {
+                windowed_context: opts.windowed_context,
+                context_window: opts.context_window,
+                ..Default::default()
+            },
             rex_providers::autonomous::SessionMeta {
                 name: opts.name.clone(),
                 continued_from: opts.continued_from.clone(),
@@ -680,6 +714,12 @@ pub fn execute(mut opts: ExecOptions) -> Result<ExecOutput, ExecError> {
                 opts.provider
             ),
             None => eprintln!("rex: run {run_id} started (provider {})", opts.provider),
+        }
+        if opts.provider == "openai-chatgpt" {
+            eprintln!(
+                "rex: using your ChatGPT plan; review or limit usage at {}",
+                rex_providers::CHATGPT_USAGE_URL
+            );
         }
     }
     // `rex serve` registers the live run here.
@@ -1051,6 +1091,8 @@ pub fn run_resume(args: &[String]) -> Result<i32, ExecError> {
     let mut json = false;
     let mut dry_run = false;
     let mut detach = false;
+    let mut windowed_context = false;
+    let mut context_window: Option<u64> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -1061,6 +1103,13 @@ pub fn run_resume(args: &[String]) -> Result<i32, ExecError> {
                 .ok_or_else(|| ExecError::usage(format!("{flag} expects a value")))
         };
         match a {
+            "--windowed-context" => windowed_context = true,
+            "--context-window" => {
+                context_window = Some(parse_u64(
+                    &take_value("--context-window", &mut i)?,
+                    "--context-window",
+                )?)
+            }
             "--task" => task = Some(take_value("--task", &mut i)?),
             "--name" => name = Some(validate_session_name(&take_value("--name", &mut i)?)?),
             "--provider" => provider = Some(take_value("--provider", &mut i)?),
@@ -1197,6 +1246,8 @@ pub fn run_resume(args: &[String]) -> Result<i32, ExecError> {
         json,
         dry_run,
         detach,
+        windowed_context,
+        context_window,
         ..Default::default()
     };
     if !json {

@@ -3502,6 +3502,7 @@ dependencies = [
  "rex-prompt",
  "rex-search",
  "rex-tools",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

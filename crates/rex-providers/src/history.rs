@@ -83,6 +83,13 @@ pub fn build_request(protocol: ProviderProtocol, model: &str, user: &str) -> Str
             "temperature": 0.1, "max_tokens": SUMMARY_MAX_OUTPUT_TOKENS
         })
         .to_string(),
+        // the ChatGPT-plan route accepts no token cap or temperature
+        ProviderProtocol::OpenAiResponses => crate::responses::request(
+            model,
+            SUMMARY_SYSTEM,
+            &[crate::responses::user_item(user)],
+            None,
+        ),
     }
 }
 

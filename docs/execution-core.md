@@ -100,8 +100,10 @@ own key. Facts that matter, all measured unless marked:
 
 - Ultra's own roles were not changed. The judge and adversary already accept a
   different provider and model; the UI does not expose that yet.
-- Per-turn prompt caching, a cheaper summariser model, and routing planning
-  turns to a smaller model than execution turns are designs only.
+- Prompt caching exists only for windowed runs on Anthropic's own endpoint
+  (see [context-management.md](context-management.md)); the stateless loop
+  does not use it. A cheaper summariser model, and routing planning turns to
+  a smaller model than execution turns, are designs only.
 - In the development sandbox (running as root, not CI) the existing suite
   stalled intermittently in browser-dependent tests (3 of 14 runs on unmodified
   code), leaked headless Chromium processes (37 left behind per run) and had

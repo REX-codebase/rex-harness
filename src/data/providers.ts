@@ -1,6 +1,13 @@
-export type ProviderProtocol = "gemini" | "anthropic" | "openai-compatible";
+export type ProviderProtocol = "gemini" | "anthropic" | "openai-compatible" | "openai-responses";
 export type ProviderStatus = "not-configured" | "draft" | "needs-runtime" | "unsupported";
-export type AccessStatus = "supported" | "tool-scoped" | "not-permitted" | "not-offered";
+export type AccessStatus =
+  | "supported"
+  | "tool-scoped"
+  | "not-permitted"
+  | "not-offered"
+  | "undocumented"
+  | "partner-gated"
+  | "open-source-only";
 
 // One evaluated way to connect a provider account. Mirrors the backend's
 // access policy (crates/rex-providers/src/policy.rs), which is the source of
@@ -20,7 +27,7 @@ export type ProviderPreset = {
   summary: string;
   baseUrl?: string;
   baseUrlLocked?: boolean;
-  modelDiscovery: "native" | "openai-models" | "manual";
+  modelDiscovery: "native" | "openai-models" | "chatgpt-plan-models" | "manual";
   examples?: string;
   /** A practical, honest note shown in the Connect dialog (limits, quirks). */
   note?: string;
@@ -98,11 +105,27 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         label: "OpenAI API key",
         detail: "OpenAI documents API keys for programmatic access, billed through the Platform account at standard API rates.",
       },
+    ],
+  },
+  {
+    // Your ChatGPT plan, through OpenAI's Sign in with ChatGPT for open-source,
+    // locally hosted apps. The credential is only ever the one the sign-in
+    // issued (never pasted), and the route is open while REX is released as
+    // open source. The backend decides; `accessStatusFor` reads its verdict
+    // and this static line is only the fallback.
+    id: "openai-chatgpt",
+    name: "OpenAI (ChatGPT plan)",
+    protocol: "openai-responses",
+    summary: "Use the ChatGPT plan you already pay for, through OpenAI's Sign in with ChatGPT, instead of an API key.",
+    baseUrl: "https://api.openai.com/v1",
+    modelDiscovery: "chatgpt-plan-models",
+    note: "Eligible requests use your ChatGPT plan's usage or credits, not API billing. You can review and limit that usage in ChatGPT settings. REX never sees your ChatGPT password and never reads your conversations.",
+    access: [
       {
         kind: "subscription-oauth",
-        status: "not-offered",
-        label: "ChatGPT sign-in",
-        detail: "OpenAI documents Sign in with ChatGPT only for its own Codex clients; no documented contract exists for third-party harnesses. The official Codex CLI remains available separately as an installed agent with its own sign-in.",
+        status: "supported",
+        label: "Continue with ChatGPT",
+        detail: "OpenAI offers this to open-source, locally hosted apps, and REX is both: it registers itself at your first sign-in and you approve spending your plan.",
       },
     ],
   },
@@ -330,6 +353,7 @@ export const protocolLabel: Record<ProviderProtocol, string> = {
   gemini: "Gemini API",
   anthropic: "Anthropic API shape",
   "openai-compatible": "OpenAI-compatible",
+  "openai-responses": "OpenAI Responses (ChatGPT plan)",
 };
 
 export const accessStatusLabel: Record<AccessStatus, string> = {
@@ -337,4 +361,20 @@ export const accessStatusLabel: Record<AccessStatus, string> = {
   "tool-scoped": "Tool-scoped",
   "not-permitted": "Forbidden",
   "not-offered": "Not offered",
+  undocumented: "Not documented",
+  "partner-gated": "Partner approval",
+  "open-source-only": "After open-source release",
 };
+
+/** The verdict for one access line: the backend's, when it is running and
+ *  knows the line, and the bundled one otherwise. The backend is the source
+ *  of truth, so a route that opens (the ChatGPT plan at the open-source
+ *  release) opens here without a frontend release. */
+export function accessStatusFor(
+  summaries: { id: string; access?: { label: string; status: AccessStatus }[] }[],
+  providerId: string,
+  line: AccessLine
+): AccessStatus {
+  const live = summaries.find((s) => s.id === providerId)?.access?.find((a) => a.label === line.label);
+  return live?.status ?? line.status;
+}

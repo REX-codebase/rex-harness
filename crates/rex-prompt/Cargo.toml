@@ -3,7 +3,7 @@ name = "rex-prompt"
 version = "1.0.0"
 edition = "2021"
 description = "REX modular system-prompt architecture: constitution, twin, roles, tool contracts, epistemic state, history, gates"
-license = "Proprietary"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 serde = { workspace = true }

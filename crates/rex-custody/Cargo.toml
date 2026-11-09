@@ -3,7 +3,7 @@ name = "rex-custody"
 version = "0.1.0"
 edition = "2021"
 description = "Task-scoped custody kernel for REX agent-operator mode"
-license = "Proprietary"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 rex-tools = { path = "../rex-tools" }

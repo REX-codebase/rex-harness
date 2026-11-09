@@ -22,6 +22,10 @@ pub enum ProviderError {
     InvalidResponse(String),
     /// Credential store failed.
     Store(String),
+    /// The credential is not usable and the message says what to do about
+    /// it (sign in again, enable plan usage, the route is not available).
+    /// The text never carries secret material.
+    Credential(String),
 }
 
 impl fmt::Display for ProviderError {
@@ -35,6 +39,7 @@ impl fmt::Display for ProviderError {
             ProviderError::EmptyCatalog => write!(f, "provider returned no usable models"),
             ProviderError::InvalidResponse(d) => write!(f, "unexpected provider response: {d}"),
             ProviderError::Store(d) => write!(f, "credential store error: {d}"),
+            ProviderError::Credential(d) => write!(f, "{d}"),
         }
     }
 }

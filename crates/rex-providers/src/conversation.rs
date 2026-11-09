@@ -36,11 +36,25 @@ pub fn decode_turn(protocol: ProviderProtocol, body: &str) -> Result<NormalizedT
         ProviderProtocol::Gemini => decode_gemini(&value),
         ProviderProtocol::Anthropic => decode_anthropic(&value),
         ProviderProtocol::OpenAiCompatible => decode_openai(&value),
+        ProviderProtocol::OpenAiResponses => decode_responses(&value),
     }
 }
 
 pub fn encode_tool_outcomes(protocol: ProviderProtocol, outcomes: &[ToolOutcome]) -> Value {
     match protocol {
+        // Responses input is a flat list of items, one output per call
+        ProviderProtocol::OpenAiResponses => Value::Array(
+            outcomes
+                .iter()
+                .map(|o| {
+                    json!({
+                        "type": "function_call_output",
+                        "call_id": o.provider_call_id,
+                        "output": o.content
+                    })
+                })
+                .collect(),
+        ),
         ProviderProtocol::OpenAiCompatible => Value::Array(
             outcomes
                 .iter()
@@ -131,6 +145,29 @@ fn decode_openai(v: &Value) -> Result<NormalizedTurn, String> {
             .get("finish_reason")
             .and_then(Value::as_str)
             .is_some_and(|r| r != "tool_calls"),
+    })
+}
+
+/// A Responses reply, as `responses::normalize` leaves it: the terminal
+/// event's response object, with an `output` array of items.
+fn decode_responses(v: &Value) -> Result<NormalizedTurn, String> {
+    if v.get("output").and_then(Value::as_array).is_none() {
+        return Err("missing output".into());
+    }
+    let mut calls = vec![];
+    for c in crate::responses::function_calls(v) {
+        let args = if c.arguments.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&c.arguments)
+                .map_err(|e| format!("invalid tool arguments: {e}"))?
+        };
+        calls.push(tool(&args, c.call_id, &c.name)?);
+    }
+    Ok(NormalizedTurn {
+        text: crate::responses::output_texts(v),
+        finished: calls.is_empty(),
+        tool_calls: calls,
     })
 }
 

@@ -3,7 +3,7 @@ name = "rex-providers"
 version = "0.1.0"
 edition = "2021"
 description = "REX Harness provider core: live model catalogs, credentials, and provider status"
-license = "Proprietary"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 rex-mcp-ext = { path = "../rex-mcp-ext" }
@@ -19,6 +19,9 @@ url = "2"
 base64 = { workspace = true }
 regex = "1"
 unicode-normalization = "0.1"
+# already in the dependency graph through rustls; used for secure randomness,
+# SHA-256 (PKCE) and ID-token signature verification
+ring = "0.17"
 
 
 [dev-dependencies]

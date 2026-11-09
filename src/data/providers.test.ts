@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PROVIDER_PRESETS, defaultLean } from "./providers";
+import { PROVIDER_PRESETS, accessStatusFor, accessStatusLabel, defaultLean } from "./providers";
 
 describe("provider presets", () => {
   it("ids are unique", () => {
@@ -38,5 +38,29 @@ describe("provider presets", () => {
 
   it("tells local-server users a placeholder key is needed", () => {
     expect(PROVIDER_PRESETS.find((p) => p.id === "local")?.note).toMatch(/placeholder/i);
+  });
+
+  it("the ChatGPT plan is its own provider, signed in rather than pasted, and offered while REX is open source", () => {
+    const p = PROVIDER_PRESETS.find((x) => x.id === "openai-chatgpt")!;
+    expect(p.protocol).toBe("openai-responses");
+    expect(p.modelDiscovery).toBe("chatgpt-plan-models");
+    expect(p.access.map((a) => a.kind)).toEqual(["subscription-oauth"]);
+    expect(p.access[0].status).toBe("supported");
+    expect(p.access[0].label).toBe("Continue with ChatGPT");
+    // the API-key provider no longer claims anything about ChatGPT sign-in
+    const api = PROVIDER_PRESETS.find((x) => x.id === "openai")!;
+    expect(api.access.map((a) => a.kind)).toEqual(["api-key"]);
+  });
+
+  it("the backend's verdict wins over the bundled one, so a route that closes or opens needs no frontend release", () => {
+    const line = PROVIDER_PRESETS.find((x) => x.id === "openai-chatgpt")!.access[0];
+    expect(accessStatusFor([], "openai-chatgpt", line)).toBe("supported");
+    const closed = [{ id: "openai-chatgpt", access: [{ label: "Continue with ChatGPT", status: "open-source-only" as const }] }];
+    expect(accessStatusFor(closed, "openai-chatgpt", line)).toBe("open-source-only");
+    expect(accessStatusFor(closed, "gemini", line)).toBe("supported");
+  });
+
+  it("every access status has a label", () => {
+    for (const p of PROVIDER_PRESETS) for (const a of p.access) expect(accessStatusLabel[a.status], a.label).toBeTruthy();
   });
 });

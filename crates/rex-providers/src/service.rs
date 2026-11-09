@@ -1,7 +1,8 @@
 use crate::catalog::{CatalogSource, ModelCatalog, ModelInfo};
+use crate::chatgpt_oauth::{self, OAuthError, SignIn, SignOutReport, SignedIn};
 use crate::error::ProviderError;
 use crate::http::Transport;
-use crate::policy::{access_policies, AccessPolicy};
+use crate::policy::{access_policies, chatgpt_plan_route, AccessPolicy};
 use crate::providers::{find_spec, registry, ModelDiscovery, ProviderProtocol, ProviderSpec};
 use crate::secrets::SecretStore;
 use serde::Serialize;
@@ -27,10 +28,31 @@ pub struct ProviderSummary {
     pub discovery: ModelDiscovery,
     pub access: Vec<AccessPolicy>,
     pub base_url: Option<String>,
+    /// Whether a usable credential exists: a stored key, or for the ChatGPT
+    /// plan route a sign-in that allows plan usage.
     pub has_key: bool,
+    /// The ChatGPT sign-in, for the provider that has one. Never a credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signin: Option<chatgpt_oauth::Status>,
     pub catalog: Option<ModelCatalog>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<ProviderError>,
+}
+
+/// How a sign-in failure reaches the rest of the backend: transient trouble
+/// stays a network error (the credentials are intact and a retry may work),
+/// storage failures stay storage failures, and everything else is a
+/// credential problem whose message says what to do.
+fn credential_error(e: OAuthError) -> ProviderError {
+    match e {
+        OAuthError::Transient(m) => ProviderError::Network(m),
+        OAuthError::Store(m) => ProviderError::Store(m),
+        other => ProviderError::Credential(other.to_string()),
+    }
+}
+
+fn is_chatgpt_plan(provider: &str) -> bool {
+    provider == chatgpt_oauth::PROVIDER_ID
 }
 
 /// The base-URL override is kept beside the key, under a name no provider id
@@ -100,6 +122,11 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
             .into_iter()
             .map(|spec| {
                 let state = self.state_for(spec.id);
+                let signin = if is_chatgpt_plan(spec.id) && chatgpt_plan_route().is_ok() {
+                    chatgpt_oauth::status(&self.secrets).ok()
+                } else {
+                    None
+                };
                 ProviderSummary {
                     id: spec.id.to_string(),
                     name: spec.name.to_string(),
@@ -107,7 +134,11 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
                     discovery: spec.discovery,
                     access: access_policies(spec.id),
                     base_url: self.resolve_base_url(spec.id, state.base_url, spec.default_base_url),
-                    has_key: self.secrets.has_key(spec.id),
+                    has_key: match &signin {
+                        Some(status) => status.signed_in && status.plan_usage,
+                        None => !is_chatgpt_plan(spec.id) && self.secrets.has_key(spec.id),
+                    },
+                    signin,
                     catalog: state.catalog,
                     last_error: state.last_error,
                 }
@@ -125,6 +156,13 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
     ) -> Result<(), ProviderError> {
         let spec =
             find_spec(provider).ok_or_else(|| ProviderError::Unsupported(provider.to_string()))?;
+        if is_chatgpt_plan(provider) {
+            // The credential for this route is only ever the one the sign-in
+            // issued; a pasted string would be a token REX did not obtain.
+            return Err(ProviderError::Unsupported(
+                "this provider takes no pasted key; use Continue with ChatGPT".into(),
+            ));
+        }
         if key.trim().is_empty() {
             return Err(ProviderError::NotConfigured);
         }
@@ -154,6 +192,15 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
     }
 
     pub fn clear_key(&self, provider: &str) -> Result<(), ProviderError> {
+        if is_chatgpt_plan(provider) {
+            // Disconnecting is signing out: revoke at OpenAI, then clear.
+            self.chatgpt_sign_out()?;
+            self.mutate(provider, |s| {
+                s.catalog = None;
+                s.last_error = None;
+            });
+            return Ok(());
+        }
         self.secrets.clear_key(provider)?;
         // Disconnecting also forgets the custom endpoint; leaving it behind
         // would point the next key at a host the user no longer chose.
@@ -185,8 +232,53 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
 
     /// Read a stored key for a provider call inside the backend. The value
     /// is never serialized, logged, or returned across the frontend bridge.
+    ///
+    /// For the ChatGPT plan route this is the signed-in account's access
+    /// token, renewed when it is close to expiry, and only while the route is
+    /// open (`policy::OPEN_SOURCE_RELEASE`). It lives about an hour, so a long
+    /// run asks again at every turn instead of holding one.
     pub fn get_key(&self, provider: &str) -> Result<Option<String>, ProviderError> {
+        if is_chatgpt_plan(provider) {
+            chatgpt_plan_route().map_err(ProviderError::Credential)?;
+            return chatgpt_oauth::access_token(&self.transport, &self.secrets)
+                .map(Some)
+                .map_err(credential_error);
+        }
         self.secrets.get_key(provider)
+    }
+
+    /// Start a ChatGPT sign-in: bind the loopback listener and build the
+    /// authorize URL. Refused until the route is open.
+    pub fn chatgpt_begin_sign_in(&self, force_consent: bool) -> Result<SignIn, ProviderError> {
+        chatgpt_plan_route().map_err(ProviderError::Credential)?;
+        chatgpt_oauth::begin(&self.secrets, force_consent).map_err(credential_error)
+    }
+
+    /// Wait for the browser to come back and finish the sign-in.
+    pub fn chatgpt_complete(
+        &self,
+        signin: &SignIn,
+        timeout: std::time::Duration,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<SignedIn, ProviderError> {
+        chatgpt_plan_route().map_err(ProviderError::Credential)?;
+        let done = chatgpt_oauth::complete(&self.transport, &self.secrets, signin, timeout, cancel)
+            .map_err(credential_error)?;
+        self.mutate(chatgpt_oauth::PROVIDER_ID, |s| s.last_error = None);
+        Ok(done)
+    }
+
+    /// Sign out: revoke the renewable session at OpenAI and clear the tokens
+    /// here. Allowed whether or not the route is currently open, so a user is
+    /// never stuck signed in.
+    pub fn chatgpt_sign_out(&self) -> Result<SignOutReport, ProviderError> {
+        chatgpt_oauth::sign_out(&self.transport, &self.secrets).map_err(credential_error)
+    }
+
+    /// The sign-in as the UI may see it (no credential).
+    pub fn chatgpt_status(&self) -> Result<chatgpt_oauth::Status, ProviderError> {
+        chatgpt_plan_route().map_err(ProviderError::Credential)?;
+        chatgpt_oauth::status(&self.secrets).map_err(credential_error)
     }
 
     pub fn transport(&self) -> &T {
@@ -224,7 +316,6 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
         let spec =
             find_spec(provider).ok_or_else(|| ProviderError::Unsupported(provider.to_string()))?;
         let key = self
-            .secrets
             .get_key(provider)?
             .ok_or(ProviderError::NotConfigured)?;
         let base = self
@@ -286,7 +377,36 @@ fn fetch_models(
         ProviderProtocol::Gemini => fetch_gemini(transport, base, key, spec.id),
         ProviderProtocol::Anthropic => fetch_anthropic(transport, base, key, spec.id),
         ProviderProtocol::OpenAiCompatible => fetch_openai_models(transport, base, key, spec.id),
+        ProviderProtocol::OpenAiResponses => {
+            fetch_chatgpt_plan_models(transport, base, key, spec.id)
+        }
     }
+}
+
+/// `GET /models` for a ChatGPT-plan token: a `models` array of
+/// `{slug, display_name, visibility}`. Only `visibility: "list"` entries are
+/// meant for a picker, and the server's order is kept: the first one is the
+/// default, so it is not re-sorted.
+fn fetch_chatgpt_plan_models(
+    transport: &dyn Transport,
+    base: &str,
+    key: &str,
+    provider: &str,
+) -> Result<Vec<ModelInfo>, ProviderError> {
+    let url = format!("{base}/models");
+    let headers = vec![("authorization".to_string(), format!("Bearer {key}"))];
+    let (status, body) = transport.get(&url, &headers)?;
+    check_status(status)?;
+    let listed =
+        crate::responses::parse_model_list(&body).map_err(ProviderError::InvalidResponse)?;
+    Ok(listed
+        .into_iter()
+        .map(|(slug, label)| ModelInfo {
+            id: slug,
+            label,
+            provider: provider.to_string(),
+        })
+        .collect())
 }
 
 fn fetch_gemini(

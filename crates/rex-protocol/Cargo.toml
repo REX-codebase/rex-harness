@@ -3,7 +3,7 @@ name = "rex-protocol"
 version = "0.1.0"
 edition = "2021"
 description = "Versioned protocol types for the REX MCP execution surface"
-license = "Proprietary"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 serde = { workspace = true }

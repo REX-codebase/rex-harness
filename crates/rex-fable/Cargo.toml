@@ -3,7 +3,7 @@ name = "rex-fable"
 version = "0.1.0"
 edition = "2021"
 description = "Native Fable gate: THINK → PROVE → ATTACK → WRITE session lifecycle with epistemic ledger and mechanical authority timer"
-license = "Proprietary"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 serde = { workspace = true }

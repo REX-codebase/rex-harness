@@ -14,6 +14,12 @@ pub trait SecretStore: Send + Sync {
     fn has_key(&self, provider: &str) -> bool {
         matches!(self.get_key(provider), Ok(Some(_)))
     }
+    /// A directory processes sharing this store can put a lock file in, when
+    /// the store is on disk. Used to serialise rotating-token refreshes
+    /// across processes (the CLI and the desktop sidecar share one store).
+    fn lock_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// A shared handle to a store is itself a store. The dev sidecar builds one
@@ -32,6 +38,9 @@ impl<S: SecretStore + ?Sized> SecretStore for std::sync::Arc<S> {
     }
     fn has_key(&self, provider: &str) -> bool {
         (**self).has_key(provider)
+    }
+    fn lock_dir(&self) -> Option<std::path::PathBuf> {
+        (**self).lock_dir()
     }
 }
 
@@ -146,6 +155,9 @@ impl FileSecretStore {
 }
 
 impl SecretStore for FileSecretStore {
+    fn lock_dir(&self) -> Option<std::path::PathBuf> {
+        self.path.parent().map(std::path::Path::to_path_buf)
+    }
     fn get_key(&self, provider: &str) -> Result<Option<String>, ProviderError> {
         let _guard = self
             .inner

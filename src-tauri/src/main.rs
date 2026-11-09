@@ -21,7 +21,8 @@ use rex_preview::{
 use rex_providers::{
     AgentSnapshot, AutonomousRunService, Budgets, FileSecretStore, LiveRunService, ModelCatalog,
     ProviderError, ProviderService, ProviderSummary, RunSnapshot, SearchProvider,
-    SearchProviderSummary, SearchRouter, UreqTransport,
+    SearchProviderSummary, SearchRouter, SignInSessions, SignInState, SignInTicket, SignOutReport,
+    UreqTransport, CHATGPT_SIGN_IN_TIMEOUT,
 };
 use rex_search::{IndexHit, IndexedDocument, LocalIndex, SearchRequest, SearchResponse};
 use rex_tools::{CallState, PreparedCall, ToolRequest, ToolResult, ToolRuntime};
@@ -159,6 +160,46 @@ fn provider_refresh(
 #[tauri::command]
 fn provider_catalog(service: State<'_, Arc<Service>>, provider: String) -> Option<ModelCatalog> {
     service.catalog(&provider)
+}
+
+/// Start "Continue with ChatGPT": open the system browser on the one-shot
+/// loopback launch link and wait for the sign-in in the background. Refused
+/// with a reason if the route is closed (`OPEN_SOURCE_RELEASE`). The ticket
+/// and every later state carry no credential.
+#[tauri::command]
+fn chatgpt_sign_in_start(
+    service: State<'_, Arc<Service>>,
+    sessions: State<'_, Arc<SignInSessions>>,
+    force_consent: Option<bool>,
+) -> Result<SignInTicket, ProviderError> {
+    let force = force_consent.unwrap_or(false);
+    let begin = Arc::clone(service.inner());
+    let finish = Arc::clone(service.inner());
+    sessions.start(
+        move || begin.chatgpt_begin_sign_in(force),
+        move |signin, cancel| finish.chatgpt_complete(signin, CHATGPT_SIGN_IN_TIMEOUT, cancel),
+        CHATGPT_SIGN_IN_TIMEOUT,
+        true,
+    )
+}
+
+#[tauri::command]
+fn chatgpt_sign_in_poll(
+    sessions: State<'_, Arc<SignInSessions>>,
+    attempt: String,
+) -> Option<SignInState> {
+    sessions.poll(&attempt)
+}
+
+#[tauri::command]
+fn chatgpt_sign_in_cancel(sessions: State<'_, Arc<SignInSessions>>, attempt: String) -> bool {
+    sessions.cancel(&attempt)
+}
+
+/// Revoke the renewable session at OpenAI and clear the tokens here.
+#[tauri::command]
+fn chatgpt_sign_out(service: State<'_, Arc<Service>>) -> Result<SignOutReport, ProviderError> {
+    service.chatgpt_sign_out()
 }
 
 /// Run a bounded, robots-aware live evidence search over explicit public seeds.
@@ -685,6 +726,7 @@ fn now_ms_u128() -> u128 {
 /// plan-only model turn and parks in `awaiting_plan` until the UI approves
 /// it through `custody_decide_plan`. No tool executes before approval.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // one parameter per run option the UI sends
 fn custody_begin(
     custody_runs: State<'_, Arc<CustodyRuns>>,
     task: String,
@@ -693,6 +735,8 @@ fn custody_begin(
     plan_mode: Option<bool>,
     summarize_history: Option<bool>,
     lean: Option<bool>,
+    windowed_context: Option<bool>,
+    context_window: Option<u64>,
 ) -> Result<rex_providers::CustodiedRunView, String> {
     let task_id = format!("task-ui-{:x}", now_ms_u128());
     // The custodied workspace sits under the agent runs root: the run
@@ -712,6 +756,13 @@ fn custody_begin(
     req.summarize_history = summarize_history.unwrap_or(false);
     // Opt-in too: the lean profile gives up web access, skills and memory.
     req.lean = lean.unwrap_or(false);
+    // Opt-in: a managed transcript for models with large windows. It raises
+    // the grant's token ceiling, because the history is re-sent every turn.
+    let req = if windowed_context.unwrap_or(false) {
+        req.with_windowed_context(context_window)
+    } else {
+        req
+    };
     let run = custody_runs.begin_managed_task(req)?;
     Ok(custody_runs.view_of(&run))
 }
@@ -1467,6 +1518,7 @@ fn main() {
     // tauri_plugin_updater once TAURI_SIGNING_PRIVATE_KEY exists.
     tauri::Builder::default()
         .manage(service)
+        .manage(Arc::new(SignInSessions::new()))
         .manage(search_service)
         .manage(tools)
         .manage(preview)
@@ -1497,6 +1549,10 @@ fn main() {
             provider_clear_key,
             provider_refresh,
             provider_catalog,
+            chatgpt_sign_in_start,
+            chatgpt_sign_in_poll,
+            chatgpt_sign_in_cancel,
+            chatgpt_sign_out,
             search_live,
             search_provider_summaries,
             search_provider_set_key,

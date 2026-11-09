@@ -80,7 +80,7 @@ pub fn supersede(list: &mut Vec<Observation>, path: Option<&str>) {
     });
 }
 
-fn same_path(a: &str, b: &str) -> bool {
+pub(crate) fn same_path(a: &str, b: &str) -> bool {
     let norm = |s: &str| s.trim_start_matches("./").trim_end_matches('/').to_string();
     norm(a) == norm(b)
         || a.ends_with(&format!("/{}", norm(b)))

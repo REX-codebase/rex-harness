@@ -3,7 +3,7 @@ name = "rex-mcp"
 version = "0.1.0"
 edition = "2021"
 description = "Local stdio MCP server exposing the REX Harness custody loop"
-license = "Proprietary"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 rex-protocol = { path = "../rex-protocol" }

@@ -10,6 +10,7 @@ mod config;
 mod deadman;
 mod exec;
 mod ledger;
+mod login;
 mod policy;
 mod provenance;
 mod ps;
@@ -53,13 +54,17 @@ pub(crate) fn usage() -> &'static str {
      \x20 rex ps [--all] [--json] [--prune] [--limit N]\n\
      \x20 rex config [get KEY | set KEY VALUE]\n\
      \x20 rex show RUN_ID [--json]\n\
+     \x20 rex login chatgpt [--no-browser] [--force-consent] [--json]\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20sign in so REX can use your ChatGPT plan\n\
+     \x20 rex logout chatgpt [--json]\n\
+     \x20 rex auth status [--json]\n\
      \x20 rex keygen [--force]\n\
      \x20 rex verify RECEIPT.json [--public-key BASE64]\n\
      \x20 rex --version\n\
      \n\
      options:\n\
      \x20 --task TEXT          task description (or pass as trailing words)\n\
-     \x20 --provider NAME      gemini|anthropic|openai|xai|deepseek|kimi|kimi-coding|qwen|glm|local\n\
+     \x20 --provider NAME      gemini|anthropic|openai|openai-chatgpt|xai|deepseek|kimi|kimi-coding|qwen|glm|local\n\
      \x20                      (default: $REX_PROVIDER or anthropic)\n\
      \x20 --model ID           model id (default: $REX_MODEL or provider default)\n\
      \x20 --workspace DIR      directory to copy into the run sandbox\n\
@@ -69,6 +74,12 @@ pub(crate) fn usage() -> &'static str {
      \x20 --max-tool-calls N   tool-call budget\n\
      \x20 --max-tokens N       token budget\n\
      \x20 --timeout-secs N     wall-clock budget in seconds\n\
+     \x20 --windowed-context   keep a managed transcript (clear old results, fold\n\
+     \x20                      old turns into a summary, `recall` to read them back)\n\
+     \x20                      instead of one turn at a time; for large-window models.\n\
+     \x20                      Re-sends history each turn, so the token budget rises\n\
+     \x20                      (see --max-tokens)\n\
+     \x20 --context-window N   the model's window in tokens (or $REX_CONTEXT_WINDOW)\n\
      \x20 --json               print exactly one JSON receipt on stdout\n\
      \x20 --yes                auto-approve tool calls and plans (CI mode)\n\
      \x20 --dry-run            validate args and print config without running\n\
@@ -81,7 +92,8 @@ pub(crate) fn usage() -> &'static str {
      \n\
      credentials: $REX_<PROVIDER>_API_KEY wins, then $REX_API_KEY;\n\
      otherwise the file credential store under $REX_STATE_DIR\n\
-     (default ~/.rex/harness) is used.\n\
+     (default ~/.rex/harness) is used. `openai-chatgpt` uses your ChatGPT\n\
+     plan through `rex login chatgpt` (never a pasted key).\n\
      \n\
      exit codes: 0 completed · 2 usage/config/approval needed ·\n\
      \x203 run ended without completing · 1 internal error\n"
@@ -152,6 +164,13 @@ fn parse_exec(args: &[String]) -> Result<ExecOptions, ExecError> {
             "--yes" => opts.yes = true,
             "--dry-run" => opts.dry_run = true,
             "--detach" => opts.detach = true,
+            "--windowed-context" => opts.windowed_context = true,
+            "--context-window" => {
+                opts.context_window = Some(parse_u64(
+                    &take_value("--context-window", &mut i)?,
+                    "--context-window",
+                )?);
+            }
             "--bid" => opts.bid = true,
             "--accept-bid" => opts.accept_bid = true,
             "--budget-usd" => {
@@ -365,6 +384,9 @@ fn main() -> ExitCode {
         Some("ps") => crate::ps::run_ps(&args[1..]),
         Some("config") => crate::config::run_config(&args[1..]),
         Some("show") => run_show(&args[1..]),
+        Some("login") => crate::login::run_login(&args[1..]),
+        Some("logout") => crate::login::run_logout(&args[1..]),
+        Some("auth") => crate::login::run_auth(&args[1..]),
         Some("keygen") => run_keygen(&args[1..]).map(|_| 0),
         Some("verify") => run_verify(&args[1..]),
         Some(other) => Err(ExecError::usage(format!(

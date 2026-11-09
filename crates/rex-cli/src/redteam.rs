@@ -114,6 +114,8 @@ fn exec_opts_for(
         bid: false,
         accept_bid: false,
         budget_usd: None,
+        windowed_context: false,
+        context_window: None,
         run_tag: None,
         deadman_mins: None,
         deadman_file: None,

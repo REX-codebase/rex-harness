@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+@font-face{font-family:"Orbitron";font-weight:900;src:url("../../node_modules/@fontsource/orbitron/files/orbitron-latin-900-normal.woff2") format("woff2")}
+@font-face{font-family:"Inter";font-weight:600;src:url("../../node_modules/@fontsource/inter/files/inter-latin-600-normal.woff2") format("woff2")}
+*{box-sizing:border-box;margin:0}
+html,body{width:150px;height:57px;overflow:hidden;background:#fff}
+/* The installer's page header is white: a light badge with the dark app tile. */
+.art{position:relative;width:150px;height:57px;overflow:hidden;background:linear-gradient(90deg,#fff 0%,#f6f4fd 100%);font-family:"Inter",sans-serif}
+.art::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;background:linear-gradient(90deg,rgba(169,154,247,0),#a99af7)}
+.icon{position:absolute;right:12px;top:10px;width:35px;height:35px;border-radius:9px;filter:drop-shadow(0 2px 4px rgba(75,55,160,.35))}
+.mark{position:absolute;right:54px;top:13px;font-family:"Orbitron",sans-serif;font-weight:900;font-size:19px;line-height:1;letter-spacing:.045em;transform:skewX(-14deg);transform-origin:100% 100%;
+  background:linear-gradient(180deg,#2a2440 0 53%,#6f5fd0 53% 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{position:absolute;right:54px;top:35px;font-weight:600;font-size:6.5px;letter-spacing:.38em;color:#7a6fb8;text-transform:uppercase;margin-right:-.38em}
+</style>
+<div class="art">
+  <img class="icon" src="../../src-tauri/icons/icon.png" alt="">
+  <div class="mark">REX</div>
+  <div class="sub">Harness</div>
+</div>

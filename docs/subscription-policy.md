@@ -1,8 +1,11 @@
 # Subscription & access policy
 
-**Verified 2026-09-19.** Sources are official provider documentation unless
-marked otherwise. When a provider changes its terms, update this document,
-`crates/rex-providers/src/policy.rs`, and the `VERIFIED_ON` date together.
+**Verified 2026-09-19** (the OpenAI ChatGPT-plan route was re-read from OpenAI's
+own documentation on **2026-11-09**). Sources are official provider
+documentation unless marked otherwise. When a provider changes its terms,
+update this document, `crates/rex-providers/src/policy.rs`, and the matching
+verification date (`VERIFIED_ON`, or `OPENAI_SIWC_VERIFIED_ON` for the OpenAI
+ChatGPT rows) together.
 
 ## The rule
 
@@ -28,7 +31,7 @@ REX never uses, and will never accept a contribution that adds:
 | --- | --- | --- |
 | Google Gemini | **Offered** - AI Studio key, free tier exists | **Not offered** - plans are for Google's own products |
 | Anthropic | **Offered** - Claude Console key | **Forbidden by Anthropic** - never offered |
-| OpenAI | **Offered** - Platform key | **REX-implemented OAuth not offered** (undocumented for arbitrary harnesses). The official Codex CLI stays available as an installed-agent route - see below |
+| OpenAI | **Offered** - Platform key | **Offered** - ChatGPT plan through OpenAI's documented Sign in with ChatGPT for open-source, locally hosted apps (`openai-chatgpt`); on while REX is open source (`OPEN_SOURCE_RELEASE`). The official Codex CLI stays available as an installed-agent route - see below |
 | xAI (Grok) | **Offered** - console.x.ai key | **Partner-gated** - xAI officially enables subscription OAuth in named harnesses; no public route lets an arbitrary new harness self-register |
 | Kimi (Moonshot) | **Offered** - platform key | **Offered** - Kimi for Coding, officially for third-party tools |
 | Zhipu GLM | **Offered** - Z.AI open platform key | **Not offered** - GLM Coding Plan is limited to Z.AI's tool list |
@@ -80,18 +83,36 @@ Console are the permitted route.
 
 ### OpenAI - two distinct routes
 
-**REX-implemented ChatGPT OAuth: not offered (undocumented for arbitrary
-harnesses).** Pi currently implements the real Codex OAuth flow: OpenAI authorization
-and token endpoints, PKCE/device code, OpenAI's Codex client ID, and the ChatGPT Codex
-backend. OpenAI also names Pi among the tools OSS maintainers may prefer in its Codex
-for Open Source programme. This is evidence that Pi usage is known and welcomed, not
-evidence of a ban. The missing piece for REX is a public contract for arbitrary new
-harnesses: OpenAI's auth page documents Codex app, CLI and IDE sign-in, but not
-third-party client registration or reuse of the first-party Codex client ID/backend.
-The openai/codex request for that contract remains unanswered. REX therefore keeps
-its own OAuth implementation disabled as **undocumented/unsupported**, not forbidden
-or illegal. There is no grounded claim here that OpenAI bans users merely for using
-Pi.
+**ChatGPT plan through Sign in with ChatGPT: documented for open-source apps;
+on in REX because REX is open source.** Re-verified 2026-11-09.
+OpenAI now publishes a contract for exactly this: "ChatGPT plan usage is an
+optional capability within Sign in with ChatGPT. In addition to identity scopes,
+your open-source app can request permission to use the user's ChatGPT plan for
+eligible Responses API requests." Its docs cover "open-source and locally hosted
+apps"; a paid or remotely hosted app has to go through OpenAI's interest form
+instead. The flow is self-service: the app registers itself at the user's first
+sign-in (dynamic registration, `agent_name_hint`, no client secret, no
+pre-issued client ID), the user approves spending their plan, and requests go to
+the public Responses API with the user's access token. The quickstart says the
+capability "is available to all open-source partners and selected private
+clients".
+
+That supersedes the earlier verdict ("undocumented for arbitrary harnesses"),
+which was right when it was written and is no longer true. What did not change
+is the rule: REX uses **this** contract and nothing else. It never uses Codex's
+own client ID, never calls the ChatGPT Codex backend, and never copies another
+harness's OAuth client (see "The rule" above). A route that works for Pi through
+a copied first-party client is still not a route REX takes.
+
+REX qualifies for the documented route only as an open-source, locally hosted
+app. REX is released under `MIT OR Apache-2.0` and the repository has been public
+since 2026-11-09, so `policy::OPEN_SOURCE_RELEASE` is `true` and the route is on.
+It stays a switch on purpose: set it to `false` and REX cannot start a sign-in,
+hand out a token, or run a model on a ChatGPT plan (the CLI, the desktop app and
+the sidecar all refuse with the reason), which is what to do if REX ever stops
+qualifying (a relicence, the repository going private, or OpenAI changing its
+terms). A test refuses a `true` while any crate declares `license = "Proprietary"`
+or the repository has no LICENSE file. Details: `docs/chatgpt-sign-in.md`.
 
 **Official Codex CLI as an installed agent: retained.** OpenAI's own documentation
 covers driving the Codex CLI non-interactively from scripts, pipelines and other
@@ -108,11 +129,18 @@ interface change, the route fails closed until re-review.
   - https://developers.openai.com/codex/non-interactive-mode
   - https://openai.com/policies/terms-of-use/
 
-- Official sources:
+- Official sources for the ChatGPT-plan route (read 2026-11-09):
+  - https://developers.openai.com/siwc/quickstart
+  - https://developers.openai.com/siwc/token-sharing-open-source
+  - https://developers.openai.com/siwc/token-sharing-open-source/sign-in
+  - https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations
+  - https://developers.openai.com/siwc/ui-ux-guidelines
+- Official sources for the Codex CLI route:
   - https://developers.openai.com/codex/auth
   - https://developers.openai.com/community/codex-for-oss
   - https://github.com/openai/codex/issues/36886
-- Pi implementation evidence (snapshot inspected 2026-09-19):
+- Pi implementation evidence (snapshot inspected 2026-09-19), kept as history of why
+  copying a first-party client is not the route:
   - https://github.com/earendil-works/pi/blob/36b60d2e8985899743c4cf5bd5f8929832a3f05d/packages/ai/src/auth/oauth/openai-codex.ts
   - https://github.com/earendil-works/pi/blob/36b60d2e8985899743c4cf5bd5f8929832a3f05d/packages/ai/src/providers/openai-codex.ts
 
@@ -212,7 +240,10 @@ installed-agent backend. Details and sources:
 - `crates/rex-providers/src/policy.rs` carries every verdict above as data,
   with the same sources, and exposes it to the UI via `ProviderSummary`.
 - Tests fail if a non-offered route loses its sources, if any
-  consumer-subscription OAuth route is ever marked offered, or if
+  consumer-subscription OAuth route other than OpenAI's documented one is ever
+  marked offered, if the OpenAI route stops citing its Sign in with ChatGPT
+  documentation or disagrees with `OPEN_SOURCE_RELEASE`, if that switch is
+  on while a crate is still proprietary or the LICENSE files are missing, or if
   Anthropic's prohibition regresses.
 - The settings UI renders these verdicts next to each provider, including
   the reason a subscription is not connectable.

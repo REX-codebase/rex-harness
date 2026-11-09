@@ -56,6 +56,31 @@ pub struct ManagedTaskRequest {
     /// Lean prompt profile for free and small-context models (see
     /// `autonomous::RunOptions::lean`). Off unless the caller asks.
     pub lean: bool,
+    /// Windowed context management (see `autonomous::RunOptions::
+    /// windowed_context`). Off unless the caller asks.
+    pub windowed_context: bool,
+    /// The model's context window in tokens, when REX does not know it.
+    pub context_window: Option<u64>,
+}
+
+impl ManagedTaskRequest {
+    /// Ask for windowed context management (see `autonomous::RunOptions::
+    /// windowed_context`). Such a run re-sends its history every turn, so the
+    /// grant's token ceiling is raised to what that needs; a grant is the
+    /// operator's authorisation and the run never exceeds it, so the larger
+    /// figure is stated here, in the request the grant is made from, and
+    /// never applied behind it. It never lowers a ceiling the caller set.
+    pub fn with_windowed_context(mut self, context_window: Option<u64>) -> Self {
+        self.windowed_context = true;
+        self.context_window = context_window;
+        let needed = crate::autonomous::windowed_token_ceiling(
+            &self.provider,
+            self.model.as_deref(),
+            context_window,
+        );
+        self.budgets.max_tokens = self.budgets.max_tokens.max(needed);
+        self
+    }
 }
 
 /// Flat view the shell returns when a custodied run starts or is polled:
@@ -130,6 +155,8 @@ pub fn ui_managed_request(
         plan_mode,
         summarize_history: false,
         lean: false,
+        windowed_context: false,
+        context_window: None,
     }
 }
 
@@ -262,6 +289,8 @@ impl<S: SecretStore + 'static, T: Transport + 'static> CustodyRunService<S, T> {
                     plan_mode: req.plan_mode,
                     summarize_history: req.summarize_history,
                     lean: req.lean,
+                    windowed_context: req.windowed_context,
+                    context_window: req.context_window,
                 },
                 SessionMeta::default(),
             )
@@ -570,6 +599,8 @@ mod tests {
             plan_mode: false,
             summarize_history: false,
             lean: false,
+            windowed_context: false,
+            context_window: None,
         }
     }
 
@@ -870,6 +901,7 @@ mod tests {
             preview: None,
             completion_summary: None,
             error: None,
+            context: None,
         };
         let run = CustodiedRun {
             grant,

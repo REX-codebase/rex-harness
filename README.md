@@ -104,6 +104,18 @@ quotas go further. Limits, caveats and measurements are in
 [docs/execution-core.md](docs/execution-core.md). The dev sidecar needs no
 `--store-file` for keys to reach agent runs.
 
+## Long runs: windowed context
+
+By default REX sends one turn at a time, which cannot overflow a window and suits
+small free-tier models. For a model with a large window, `--windowed-context`
+(`rex exec`, `rex resume`, the `rex serve` and sidecar run request, the desktop
+`custody_begin` command) keeps a real transcript and manages it against the
+window: old tool results are cleared to stubs, old turns are folded into a rolling
+summary, a provider's "too long" refusal is recovered from, and every original
+result stays retrievable through the `recall` tool. It is opt-in and leaves the
+default path untouched. Design, thresholds, and what is and is not verified:
+[docs/context-management.md](docs/context-management.md).
+
 ## Test
 
 ```bash
@@ -146,7 +158,7 @@ evidence/       grounding receipts from the build session
 The first real backend slice lives in `crates/rex-providers` (workspace root `Cargo.toml`):
 
 - **Provider core** - registry for Gemini, Anthropic, OpenAI, xAI, DeepSeek, Kimi, Kimi for Coding, Qwen, GLM, local, and custom endpoints; live model-catalog fetch with pagination; normalization into one model shape; truthful error taxonomy (not-configured, auth, rate-limit, network, unsupported, empty catalog, invalid response).
-- **Access policy** - `crates/rex-providers/src/policy.rs` decides which account types REX may connect, grounded in each provider's official documentation (verified 2026-09-19). Consumer subscriptions are offered only where the provider explicitly permits third-party harness use (today: Kimi for Coding); Claude Pro/Max sign-in is forbidden by Anthropic, and ChatGPT, X Premium/SuperGrok, Google AI, GLM Coding Plan, Alibaba Coding Plan, and GitHub Copilot subscriptions are refused with sourced reasons. Full matrix: `docs/subscription-policy.md`.
+- **Access policy** - `crates/rex-providers/src/policy.rs` decides which account types REX may connect, grounded in each provider's official documentation (verified 2026-09-19). Consumer subscriptions are offered only where the provider explicitly permits third-party harness use (today: Kimi for Coding); Claude Pro/Max sign-in is forbidden by Anthropic, and X Premium/SuperGrok, Google AI, GLM Coding Plan, Alibaba Coding Plan, and GitHub Copilot subscriptions are refused with sourced reasons. ChatGPT is the one with a documented official route for open-source apps (Sign in with ChatGPT, REX's own dynamically registered client); REX is open source, so "Continue with ChatGPT" is on - see `docs/chatgpt-sign-in.md`. Full matrix: `docs/subscription-policy.md`.
 - **Credentials** - keys enter through the backend only, land in a permission-locked store (0600), and are never returned to the frontend, logged, or serialized.
 - **Desktop app** - `src-tauri` exposes the core through Tauri commands (`provider_summaries`, `provider_set_key`, `provider_clear_key`, `provider_refresh`, `provider_catalog`).
 - **Dev sidecar** - `cargo run -p rex-mcp --bin rex-dev-server` bridges the same core to the vite dev frontend on 127.0.0.1:8787. `--replay gemini=crates/rex-providers/fixtures/gemini-list-models-live.json` seeds the recorded live Gemini catalog, labeled as recorded in the UI.
@@ -186,3 +198,22 @@ frontend bridge, visible agent-cursor/iteration/evidence UI, and adversarial uni
 tests. Native preview process spawning and browser-engine capture are still open;
 the Tauri bridge truthfully leaves a newly started preview in `starting` until
 that supervisor lands.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.
+
+Using a ChatGPT plan through "Continue with ChatGPT" depends on REX being open
+source (OpenAI offers it to open-source, locally hosted apps). See
+`docs/chatgpt-sign-in.md`.
