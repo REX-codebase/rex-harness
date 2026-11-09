@@ -33,6 +33,16 @@ pub struct ProviderSummary {
     pub last_error: Option<ProviderError>,
 }
 
+/// The base-URL override is kept beside the key, under a name no provider id
+/// can collide with, so every service instance that shares this store (the
+/// UI's service and the agent's own copy) resolves the same endpoint. It used
+/// to live only in the memory of the instance that handled the Connect
+/// dialog, which made custom endpoints and non-default local URLs invisible
+/// to runs: the agent failed with "no base URL configured".
+fn base_url_slot(provider: &str) -> String {
+    format!("{provider}#base_url")
+}
+
 struct ProviderState {
     base_url: Option<String>,
     catalog: Option<ModelCatalog>,
@@ -96,7 +106,7 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
                     protocol: spec.protocol,
                     discovery: spec.discovery,
                     access: access_policies(spec.id),
-                    base_url: state.base_url.or(spec.default_base_url.map(str::to_string)),
+                    base_url: self.resolve_base_url(spec.id, state.base_url, spec.default_base_url),
                     has_key: self.secrets.has_key(spec.id),
                     catalog: state.catalog,
                     last_error: state.last_error,
@@ -124,6 +134,11 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
         {
             if let Some(url) = base_url {
                 let trimmed = url.trim().trim_end_matches('/').to_string();
+                if trimmed.is_empty() {
+                    self.secrets.clear_key(&base_url_slot(provider))?;
+                } else {
+                    self.secrets.set_key(&base_url_slot(provider), &trimmed)?;
+                }
                 self.mutate(provider, |s| {
                     s.base_url = if trimmed.is_empty() {
                         None
@@ -140,11 +155,32 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
 
     pub fn clear_key(&self, provider: &str) -> Result<(), ProviderError> {
         self.secrets.clear_key(provider)?;
+        // Disconnecting also forgets the custom endpoint; leaving it behind
+        // would point the next key at a host the user no longer chose.
+        self.secrets.clear_key(&base_url_slot(provider))?;
         self.mutate(provider, |s| {
+            s.base_url = None;
             s.catalog = None;
             s.last_error = None;
         });
         Ok(())
+    }
+
+    /// The shared store is the source of truth for the override; this
+    /// instance's own memory is only a fallback, then the provider default.
+    fn resolve_base_url(
+        &self,
+        provider: &str,
+        in_memory: Option<String>,
+        default: Option<&'static str>,
+    ) -> Option<String> {
+        self.secrets
+            .get_key(&base_url_slot(provider))
+            .ok()
+            .flatten()
+            .filter(|u| !u.trim().is_empty())
+            .or(in_memory)
+            .or_else(|| default.map(str::to_string))
     }
 
     /// Read a stored key for a provider call inside the backend. The value
@@ -162,10 +198,12 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
     pub fn base_url(&self, provider: &str) -> Result<String, ProviderError> {
         let spec =
             find_spec(provider).ok_or_else(|| ProviderError::Unsupported(provider.to_string()))?;
-        self.state_for(provider)
-            .base_url
-            .or_else(|| spec.default_base_url.map(str::to_string))
-            .ok_or_else(|| ProviderError::Unsupported("no base URL configured".into()))
+        self.resolve_base_url(
+            provider,
+            self.state_for(provider).base_url,
+            spec.default_base_url,
+        )
+        .ok_or_else(|| ProviderError::Unsupported("no base URL configured".into()))
     }
 
     pub fn catalog(&self, provider: &str) -> Option<ModelCatalog> {
@@ -190,9 +228,11 @@ impl<S: SecretStore, T: Transport> ProviderService<S, T> {
             .get_key(provider)?
             .ok_or(ProviderError::NotConfigured)?;
         let base = self
-            .state_for(provider)
-            .base_url
-            .or_else(|| spec.default_base_url.map(str::to_string))
+            .resolve_base_url(
+                provider,
+                self.state_for(provider).base_url,
+                spec.default_base_url,
+            )
             .ok_or_else(|| ProviderError::Unsupported("no base URL configured".into()))?;
 
         let result = fetch_models(&self.transport, &spec, &base, &key);

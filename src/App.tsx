@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { BackendBadge, TopBar } from "./components/TopBar";
 import { Composer } from "./components/Composer";
 import { AuraLayer, UltraTransition, type Origin } from "./components/Aura";
-import { useAuraPointer } from "./data/aura";
 import { StateRail } from "./components/StateRail";
 import { DesktopOnly, isDesktopRuntime } from "./components/DesktopOnly";
 import { SessionView } from "./components/SessionView";
@@ -55,6 +54,7 @@ import {
 } from "./data/installedAgentRun";
 import { loadInstalledAgentOptions } from "./components/ModelStatus";
 import { OperatorModeChip, OperatorModeGate } from "./components/OperatorModeGate";
+import { Ambient, runPhase } from "./components/Fx";
 import { loadOperatorMode, saveOperatorMode, type OperatorMode } from "./data/operatorMode";
 import { SetupChecklist } from "./components/SetupChecklist";
 import type { InstalledAgentId } from "./data/backend";
@@ -96,8 +96,6 @@ export default function App() {
   const ultraPoll = useRef<number | null>(null);
   const [ultraPulse, setUltraPulse] = useState(0);
   const [ultraOrigin, setUltraOrigin] = useState<Origin | null>(null);
-  const shellRef = useRef<HTMLDivElement>(null);
-  useAuraPointer(shellRef);
   const [fast, setFast] = useState(false);
   const [fastPulse, setFastPulse] = useState(0);
   const [fastPhase, setFastPhase] = useState<"idle" | "engaging" | "disengaging">("idle");
@@ -151,6 +149,9 @@ export default function App() {
   const [planMode, setPlanMode] = useState(false);
   // Opt-in per run: each history summary is an extra model call.
   const [summarizeHistory, setSummarizeHistory] = useState(false);
+  // Lean prompt: null follows the provider (on for the free-tier presets), an
+  // explicit true/false is the person's own choice and is kept across runs.
+  const [lean, setLean] = useState<boolean | null>(null);
   const [planDeciding, setPlanDeciding] = useState(false);
   const livePoll = useRef<number | null>(null);
   const [installedRun, setInstalledRun] = useState<InstalledRunSnapshot | null>(null);
@@ -506,7 +507,7 @@ export default function App() {
       const summarize = summarizeHistory;
       setPlanMode(false);
       setSummarizeHistory(false);
-      custodyBegin(label, mode, summarize)
+      custodyBegin(label, mode, summarize, lean ?? undefined)
         .then((view) => {
           setCustody({ grantId: view.grant_id, phase: view.phase, operator: view.operator });
           setLiveRun(view.snapshot);
@@ -670,14 +671,26 @@ export default function App() {
 
   if (operatorMode === null) {
     return (
-      <div className="harness-shell min-h-full">
+      <div className={`harness-shell min-h-full motion-${motion} ${reduced ? "reduced-fx" : ""}`} data-motion={motion} data-run="idle">
+        <Ambient reduced={reduced} />
         <OperatorModeGate onChoose={chooseOperatorMode} />
       </div>
     );
   }
 
+  // One word for what the run is doing, whichever engine drives it; the
+  // backdrop tints and breathes to match. Presentation only.
+  const phase = runPhase({
+    agentStatus: liveRun?.status,
+    installedStatus: installedRun?.status,
+    ultraActive: !!ultraRun,
+    ultraTerminalKind: ultraRun?.terminal?.kind,
+    mockState: state,
+  });
+
   return (
-    <div ref={shellRef} className={`harness-shell min-h-full motion-${motion} ${ultra ? "ultra-on" : ""} ${fast ? "fast-on" : ""} ${fastPhase !== "idle" ? `fast-${fastPhase}` : ""} ${reduced ? "reduced-fx" : ""}`} data-motion={motion} data-ultra={ultra ? "on" : "off"}>
+    <div className={`harness-shell min-h-full motion-${motion} ${ultra ? "ultra-on" : ""} ${fast ? "fast-on" : ""} ${fastPhase !== "idle" ? `fast-${fastPhase}` : ""} ${reduced ? "reduced-fx" : ""}`} data-motion={motion} data-ultra={ultra ? "on" : "off"} data-run={phase}>
+      <Ambient reduced={reduced} />
       {ultraPulse > 0 && <UltraTransition key={ultraPulse} engaged={ultra} origin={ultraOrigin} />}
       {fastPhase !== "idle" && (
         <div className="fast-transition" key={fastPulse} aria-hidden="true">
@@ -691,7 +704,7 @@ export default function App() {
       <AuraLayer />
       <TopBar view={view} onView={setView} ultra={ultra} onUltra={(origin) => { setUltraOrigin(origin); setUltra((v) => !v); setUltraPulse((v) => v + 1); }} fast={fast} onFast={toggleFast} />
       <div className="ultra-status" role="status" aria-live="polite"><span>ULTRA</span><b>{ultra ? "Verification tier engaged" : "Verification tier offline"}</b><small>{ultra ? "Contract, adversary and clean-room judge active" : "No extra capabilities are active"}</small></div>
-      <div className="mx-auto w-full max-w-[820px] px-5 pt-3 sm:px-8">
+      <div className="status-wrap mx-auto w-full max-w-[820px] px-5 pt-3 sm:px-8">
         <div className="status-row">
           <OperatorModeChip mode={operatorMode} onSwitch={chooseOperatorMode} />
           <BackendBadge live={liveCapable} />
@@ -744,6 +757,8 @@ export default function App() {
                       setPlanMode={setPlanMode}
                       summarizeHistory={summarizeHistory}
                       setSummarizeHistory={setSummarizeHistory}
+                      lean={lean}
+                      setLean={setLean}
                       fableGate={fableGate}
                       setFableGate={toggleFableGate}
                       executionPath={executionPath}

@@ -692,6 +692,7 @@ fn custody_begin(
     model: Option<String>,
     plan_mode: Option<bool>,
     summarize_history: Option<bool>,
+    lean: Option<bool>,
 ) -> Result<rex_providers::CustodiedRunView, String> {
     let task_id = format!("task-ui-{:x}", now_ms_u128());
     // The custodied workspace sits under the agent runs root: the run
@@ -709,6 +710,8 @@ fn custody_begin(
     );
     // Opt-in; off unless the UI asks, because each summary spends tokens.
     req.summarize_history = summarize_history.unwrap_or(false);
+    // Opt-in too: the lean profile gives up web access, skills and memory.
+    req.lean = lean.unwrap_or(false);
     let run = custody_runs.begin_managed_task(req)?;
     Ok(custody_runs.view_of(&run))
 }

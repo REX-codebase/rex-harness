@@ -14,7 +14,8 @@ import { useState, type CSSProperties } from "react";
 // to Ultra so it types itself again, timed to land as the transition clears.
 
 export const WORDMARK = "REX";
-export const FIRST_TYPE_DELAY_MS = 140;
+// The top bar lockup fades in over ~760ms (motion-ui.css); start typing once it is mostly there.
+export const FIRST_TYPE_DELAY_MS = 380;
 export const RETYPE_DELAY_MS = 560;
 export const TYPE_STEP_MS = 120;
 

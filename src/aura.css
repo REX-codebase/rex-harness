@@ -9,6 +9,10 @@
  * the light is the same colour as the surface it falls on. Silver and violet
  * in the standard tier, champagne in Ultra. Everything here is decoration:
  * it never carries state, claims a capability, or blocks input.
+ *
+ * Loaded after motion-ui.css. The motion layer owns the backdrop, the field
+ * spotlight and focus sweep, the cursor halo, grain and the Run button; this
+ * file owns the typed wordmark, its light, and the Ultra tier change.
  * ------------------------------------------------------------------ */
 
 :root{--font-display:"Orbitron",ui-sans-serif,system-ui,sans-serif}
@@ -18,7 +22,6 @@
 @property --rex-top{syntax:"<color>";inherits:true;initial-value:#f9f9fa}
 @property --rex-bot{syntax:"<color>";inherits:true;initial-value:#d9d8df}
 @property --rex-glow{syntax:"<color>";inherits:true;initial-value:rgba(169,154,247,.6)}
-@property --aura-a{syntax:"<angle>";inherits:false;initial-value:0deg}
 
 .harness-shell{
   --rex-top:#f9f9fa;--rex-bot:#d9d8df;--rex-glow:rgba(169,154,247,.6);
@@ -51,46 +54,32 @@
 .ultra-on .brand-name{color:#cbbf9f;letter-spacing:.34em;font-size:11px;text-transform:uppercase}
 @keyframes rex-reveal{to{clip-path:inset(-4px 0 -4px 0)}}
 .brand-frame{transition:transform .7s cubic-bezier(.2,.85,.2,1)}
+.rex-glyphs{transition:filter .45s ease}
+.brand-frame:hover .rex-glyphs{filter:drop-shadow(0 0 .45em var(--rex-glow)) drop-shadow(0 0 .08em rgba(255,255,255,.3))}
 .ultra-on .brand-frame{transform:scale(1.04)}
 
 /* The same metal, set inline in the headline. */
 .rex-inline{display:inline-block;margin:0 .06em;font-family:var(--font-display);font-weight:900;font-size:.8em;letter-spacing:.06em;font-kerning:none;transform:skewX(-10deg);color:transparent;-webkit-text-fill-color:transparent;background:linear-gradient(180deg,var(--rex-top) 0 53%,var(--rex-bot) 53% 100%);-webkit-background-clip:text;background-clip:text;filter:drop-shadow(0 0 .35em var(--rex-glow))}
 
-/* ---------- Ambient aura ---------- */
-.aura{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;contain:strict}
-.aura::after{content:"";position:absolute;inset:0;opacity:.06;mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
-.aura-set{position:absolute;inset:0;transition:opacity 1.2s ease}
-.aura-gold{opacity:0}.ultra-on .aura-gold{opacity:1}.ultra-on .aura-violet{opacity:0}
+/* ---------- The wordmark's light, bleeding into the page ---------- */
+/* Two blobs on the motion layer's colour variables: the first takes the
+   wordmark's own glow (silver-violet, champagne in Ultra, gliding between);
+   the second takes --amb, the run-state tint the backdrop already uses. */
+.aura{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;contain:strict;--amb:var(--color-accent);transition:--amb 1100ms ease}
+.harness-shell[data-run="waiting"] .aura,.harness-shell[data-run="blocked"] .aura{--amb:var(--color-blocked)}
 .aura-blob{position:absolute;border-radius:50%;mix-blend-mode:screen;will-change:transform}
-/* The first blob sits behind the wordmark: the mark's light bleeds into the page. */
-.aura-a{left:-20vmax;top:-30vmax;width:66vmax;height:66vmax;animation:aura-a 30s ease-in-out infinite alternate}
-.aura-b{right:-26vmax;top:4vmax;width:60vmax;height:60vmax;animation:aura-b 38s ease-in-out infinite alternate}
-.aura-c{left:18vmax;bottom:-40vmax;width:74vmax;height:74vmax;animation:aura-c 44s ease-in-out infinite alternate}
-.aura-violet .aura-a{background:radial-gradient(closest-side,rgba(169,154,247,.24),rgba(169,154,247,.07) 58%,transparent 74%)}
-.aura-violet .aura-b{background:radial-gradient(closest-side,rgba(92,116,255,.15),transparent 72%)}
-.aura-violet .aura-c{background:radial-gradient(closest-side,rgba(214,120,226,.09),transparent 72%)}
-.aura-gold .aura-a{background:radial-gradient(closest-side,rgba(236,205,140,.2),rgba(236,205,140,.06) 58%,transparent 74%)}
-.aura-gold .aura-b{background:radial-gradient(closest-side,rgba(190,140,70,.13),transparent 72%)}
-.aura-gold .aura-c{background:radial-gradient(closest-side,rgba(255,240,205,.07),transparent 72%)}
-.aura-cursor{position:absolute;left:0;top:0;width:560px;height:560px;margin:-280px 0 0 -280px;border-radius:50%;background:radial-gradient(closest-side,color-mix(in srgb,var(--color-accent) 15%,transparent),transparent 72%);transform:translate3d(var(--mx,50vw),var(--my,30vh),0);opacity:var(--mo,0);transition:transform .38s cubic-bezier(.2,.7,.2,1),opacity .5s ease}
+.aura-a{left:-20vmax;top:-30vmax;width:66vmax;height:66vmax;background:radial-gradient(closest-side,color-mix(in srgb,var(--rex-glow) 42%,transparent),color-mix(in srgb,var(--rex-glow) 12%,transparent) 58%,transparent 74%);animation:aura-a 30s ease-in-out infinite alternate}
+.aura-b{right:-26vmax;top:4vmax;width:60vmax;height:60vmax;background:radial-gradient(closest-side,color-mix(in srgb,var(--amb) 13%,transparent),transparent 72%);animation:aura-b 38s ease-in-out infinite alternate}
 @keyframes aura-a{from{transform:translate3d(0,0,0) scale(1)}to{transform:translate3d(7vmax,5vmax,0) scale(1.1)}}
 @keyframes aura-b{from{transform:translate3d(0,0,0) scale(1)}to{transform:translate3d(-6vmax,8vmax,0) scale(1.14)}}
-@keyframes aura-c{from{transform:translate3d(0,0,0) scale(1)}to{transform:translate3d(8vmax,-5vmax,0) scale(1.08)}}
+@media(forced-colors:active){.aura{display:none}}
 
-/* ---------- Surfaces that catch the light ---------- */
-.task-field,.followup-field{position:relative;isolation:isolate}
-.task-field::before,.followup-field::before{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;opacity:0;transition:opacity .35s ease;background:radial-gradient(380px circle at var(--px,50%) var(--py,0%),color-mix(in srgb,var(--color-accent) 17%,transparent),transparent 62%)}
-.task-field:hover::before,.task-field:focus-within::before,.followup-field:hover::before,.followup-field:focus-within::before{opacity:1}
-/* While you type, a thread of light travels the edge. */
-.task-field::after,.followup-field::after{content:"";position:absolute;inset:-1px;z-index:2;border-radius:inherit;padding:1px;pointer-events:none;opacity:0;transition:opacity .4s ease;background:conic-gradient(from var(--aura-a),transparent 0 52%,color-mix(in srgb,var(--color-accent) 85%,transparent) 70%,#fff 80%,color-mix(in srgb,var(--color-accent) 85%,transparent) 90%,transparent 100%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0);animation:aura-spin 5s linear infinite}
-.task-field:focus-within::after,.followup-field:focus-within::after{opacity:.95}
-@keyframes aura-spin{to{--aura-a:360deg}}
-
-.run-button:not(:disabled){background:linear-gradient(180deg,color-mix(in srgb,var(--color-accent) 82%,#fff),var(--color-accent));box-shadow:inset 0 1px 0 rgba(255,255,255,.28),0 8px 26px -8px color-mix(in srgb,var(--color-accent) 70%,transparent);transition:background 160ms ease,transform 160ms ease,box-shadow 260ms ease}
-.run-button:hover:not(:disabled){box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 10px 32px -6px color-mix(in srgb,var(--color-accent) 85%,transparent)}
+/* The Ultra control warms when hovered and holds a soft glow while on. Static on purpose:
+   the motion layer gives this control an entrance animation, and swapping it for a looping
+   one would replay that entrance every time Ultra is turned off. */
+.ultra-control{transition:width .45s ease,border-color .35s ease,background .35s ease,color .35s ease,box-shadow .5s ease}
 .ultra-control:hover{box-shadow:0 0 0 1px rgba(231,204,152,.16),0 0 26px -6px rgba(231,204,152,.38)}
-.ultra-control.is-on{animation:ultra-glow 4.2s ease-in-out infinite}
-@keyframes ultra-glow{0%,100%{box-shadow:inset 0 0 0 1px rgba(255,228,178,.06),0 8px 28px rgba(0,0,0,.3),0 0 0 rgba(231,204,152,0)}50%{box-shadow:inset 0 0 0 1px rgba(255,228,178,.1),0 8px 28px rgba(0,0,0,.3),0 0 26px -4px rgba(231,204,152,.34)}}
+.ultra-control.is-on{box-shadow:inset 0 0 0 1px rgba(255,228,178,.1),0 8px 28px rgba(0,0,0,.3),0 0 26px -6px rgba(231,204,152,.34)}
 
 /* ---------- The Ultra transition ---------- */
 .ultra-transition{--ux:calc(100vw - 150px);--uy:56px;--ut-edge:rgba(246,226,184,.95);--ut-glow:rgba(231,204,152,.3);--ut-flash:rgba(255,238,200,.5);--ut-top:#fff4d9;--ut-bot:#cdb27a;position:fixed;inset:0;z-index:20;pointer-events:none;overflow:hidden;animation:ut-dismiss 2.05s both}
@@ -127,11 +116,10 @@
 @media(max-width:560px){.rex-wordmark{font-size:21px}.brand-name{letter-spacing:.26em}.ut-word small{letter-spacing:.24em;margin-right:-.24em;font-size:9px}}
 
 /* ---------- Reduced motion: keep the look, lose the movement ---------- */
-.reduced-fx .rex-glyph,.reduced-fx .rex-glyph::after,.reduced-fx .rex-glyphs::after,.reduced-fx .rex-halo,.reduced-fx .brand-name,.reduced-fx .rex-rail,.reduced-fx .aura-blob,.reduced-fx .task-field::after,.reduced-fx .followup-field::after,.reduced-fx .ultra-control.is-on{animation:none!important}
+/* The motion layer already zeroes durations and delays under .reduced-fx; these also stop the loops. */
+.reduced-fx .rex-glyph,.reduced-fx .rex-glyph::after,.reduced-fx .rex-glyphs::after,.reduced-fx .rex-halo,.reduced-fx .brand-name,.reduced-fx .rex-rail,.reduced-fx .aura-blob{animation:none!important}
 .reduced-fx .rex-glyph::after,.reduced-fx .rex-glyphs::after{display:none}
 .reduced-fx .brand-name{clip-path:none}
 .reduced-fx .rex-rail{transform:none}
 .reduced-fx .rex-halo{opacity:.55}
-.reduced-fx .aura-cursor{display:none}
-.reduced-fx .aura-set,.reduced-fx .brand-frame{transition:none}
-.reduced-fx .task-field::before,.reduced-fx .followup-field::before{transition:none}
+.reduced-fx .brand-frame,.reduced-fx .rex-glyphs{transition:none}

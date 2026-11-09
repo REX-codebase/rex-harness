@@ -34,6 +34,7 @@ REX never uses, and will never accept a contribution that adds:
 | Zhipu GLM | **Offered** - Z.AI open platform key | **Not offered** - GLM Coding Plan is limited to Z.AI's tool list |
 | Qwen (Alibaba) | **Offered** - ModelStudio key | **Not offered** - free OAuth discontinued; Coding Plan is Qwen Code-scoped |
 | GitHub Copilot | - | **Not offered** - third-party use is partner-gated (e.g. OpenCode) |
+| NVIDIA NIM, Groq, OpenRouter | **Offered** - your own account's key (added 2026-11-08; **not** re-verified against each provider's official terms) | None. Their free tiers are for development and evaluation; do not use one key to serve other people, and read the provider's current terms first |
 
 ## Offered subscription hook
 

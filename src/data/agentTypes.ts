@@ -133,6 +133,31 @@ export function terminalActive(snap: AgentSnapshot | null): boolean {
   return snap?.terminal_reason != null;
 }
 
+// The backend keeps provider failures as a redacted record, "provider HTTP
+// 429: {...}", holding only numbers and identifiers. Say what it means and
+// what to do instead of showing raw JSON. Anything unrecognised is returned
+// unchanged so no information is lost.
+export function humanizeProviderDetail(detail: string): string {
+  const m = /^provider HTTP (\d{3}): (\{.*\})$/s.exec(detail);
+  if (!m) return detail;
+  const status = Number(m[1]);
+  let rec: { retry_after_secs?: number; provider_error_code?: string } = {};
+  try {
+    rec = JSON.parse(m[2]);
+  } catch {
+    return detail;
+  }
+  if (status === 429) {
+    const s = rec.retry_after_secs;
+    const when = s === undefined ? "" : s >= 5400 ? `, retry in about ${Math.round(s / 3600)} h` : s >= 90 ? `, retry in about ${Math.round(s / 60)} min` : `, retry in about ${Math.ceil(s)} s`;
+    return `the provider's rate limit was reached (HTTP 429)${when}. A smaller model or the lean prompt uses fewer tokens`;
+  }
+  if (status === 401 || status === 403) return `the provider rejected the API key (HTTP ${status}). Check the key in the model menu`;
+  if (status === 404) return "the provider does not offer this model or endpoint to your account (HTTP 404). Pick another model";
+  const code = rec.provider_error_code ? ` · ${rec.provider_error_code}` : "";
+  return `the provider returned an error (HTTP ${status}${code})`;
+}
+
 export function terminalLabel(reason: TerminalReason): string {
   switch (reason.kind) {
     case "completed":
@@ -160,7 +185,7 @@ export function terminalLabel(reason: TerminalReason): string {
     case "approval_timeout":
       return "Blocked - approval wait timed out";
     case "provider_error":
-      return `Failed - ${reason.detail}`;
+      return `Failed - ${humanizeProviderDetail(reason.detail)}`;
     case "model_stalled":
       return "Stopped - model stopped calling tools";
   }

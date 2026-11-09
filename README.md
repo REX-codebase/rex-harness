@@ -95,6 +95,15 @@ npm run tauri dev
 npm run tauri build
 ```
 
+## Using a free model key
+
+NVIDIA NIM, Groq and OpenRouter are built-in presets (model menu, Connect API);
+bring your own key. The backend waits out rate limits, and the lean prompt
+(on by default for these presets) roughly halves each request so small free
+quotas go further. Limits, caveats and measurements are in
+[docs/execution-core.md](docs/execution-core.md). The dev sidecar needs no
+`--store-file` for keys to reach agent runs.
+
 ## Test
 
 ```bash

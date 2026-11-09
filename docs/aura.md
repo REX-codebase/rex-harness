@@ -26,14 +26,20 @@ letters every few seconds and a halo breathes behind them.
 
 ## Ambient light
 
-- `AuraLayer`: two sets of soft blobs (violet, champagne) that crossfade with
-  `.ultra-on`, a pointer-following glow and fine grain. The first blob sits
-  behind the wordmark so the mark's light bleeds into the page.
-- `useAuraPointer` writes `--mx/--my/--mo` on the shell and `--px/--py` on the
-  surface under the cursor (`GLOW_SELECTOR`), one write per animation frame, as
-  CSS variables only (no React state). Touch is ignored.
-- Composer and follow-up fields get a spotlight on hover or focus and, while
-  focused, a thread of light travelling the border.
+The motion layer (`docs/motion.md`, `Fx.tsx`, `motion-ui.css`) owns the
+backdrop, the cursor halo, the field spotlight and focus sweep, grain and the
+Run button. The aura does not duplicate any of it. `AuraLayer` adds only two
+soft blobs on top of that backdrop:
+
+- one takes the wordmark's own glow colour (`--rex-glow`: silver-violet,
+  champagne in Ultra, gliding between), anchored behind the mark so its light
+  bleeds into the page;
+- one takes `--amb`, the run-state tint the backdrop already uses, so a run
+  that is waiting or blocked tints it amber like the rest.
+
+The Ultra control warms on hover and holds a static glow while on. It is
+static on purpose: the motion layer gives that control an entrance animation,
+and a looping glow would replay the entrance each time Ultra turns off.
 
 ## Ultra transition
 
@@ -47,5 +53,6 @@ way out). The state flips at t=0; the slats hide the change. Total ~2s.
 
 Under `.reduced-fx` (Settings > Motion > Reduce, or System with the OS
 preference) the look stays and the movement goes: glyphs are fully drawn, no
-caret, sheen, halo breathing, drifting blobs, cursor glow, travelling border
-or transition overlay. See `docs/motion.md`.
+caret, sheen, halo breathing, drifting blobs or transition overlay. The
+motion layer's own reduce rules (zeroed durations and delays) apply on top.
+See `docs/motion.md`.

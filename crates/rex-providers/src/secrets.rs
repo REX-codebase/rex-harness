@@ -16,6 +16,25 @@ pub trait SecretStore: Send + Sync {
     }
 }
 
+/// A shared handle to a store is itself a store. The dev sidecar builds one
+/// provider service per subsystem (UI, runs, agent); with an in-memory store
+/// each used to get its own empty copy, so a key saved in the UI never
+/// reached the agent. Cloning one `Arc` gives them all the same store.
+impl<S: SecretStore + ?Sized> SecretStore for std::sync::Arc<S> {
+    fn get_key(&self, provider: &str) -> Result<Option<String>, ProviderError> {
+        (**self).get_key(provider)
+    }
+    fn set_key(&self, provider: &str, key: &str) -> Result<(), ProviderError> {
+        (**self).set_key(provider, key)
+    }
+    fn clear_key(&self, provider: &str) -> Result<(), ProviderError> {
+        (**self).clear_key(provider)
+    }
+    fn has_key(&self, provider: &str) -> bool {
+        (**self).has_key(provider)
+    }
+}
+
 /// In-memory store. Used by tests and by the dev sidecar when no config
 /// directory is available. Keys vanish when the process exits.
 #[derive(Default)]

@@ -1,15 +1,15 @@
 import type { CSSProperties } from "react";
 
-// The ambient light behind the whole interface. Two sets of soft blobs
-// (violet for the standard tier, champagne for Ultra) that crossfade when the
-// shell flips to `.ultra-on`, plus a pointer-following glow and fine grain.
+// Soft light behind the top-left wordmark, so the mark's glow bleeds into the
+// page. It rides on the motion layer's backdrop (<Ambient>, Fx.tsx) rather than
+// replacing it: one blob takes the wordmark's own glow colour (silver-violet,
+// champagne in Ultra) and one takes the run-state tint the backdrop uses.
 // Purely decorative: no content, no pointer events, hidden from assistive tech.
 export function AuraLayer() {
   return (
     <div className="aura" aria-hidden="true">
-      <div className="aura-set aura-violet"><span className="aura-blob aura-a" /><span className="aura-blob aura-b" /><span className="aura-blob aura-c" /></div>
-      <div className="aura-set aura-gold"><span className="aura-blob aura-a" /><span className="aura-blob aura-b" /><span className="aura-blob aura-c" /></div>
-      <span className="aura-cursor" />
+      <span className="aura-blob aura-a" />
+      <span className="aura-blob aura-b" />
     </div>
   );
 }

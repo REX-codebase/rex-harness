@@ -1,9 +1,11 @@
 import { useEffect, useRef } from "react";
 import { BrandName, RexWordmark } from "./RexWordmark";
 import { originOf } from "../data/aura";
+import { useSlideIndicator } from "./Fx";
 
 export function TopBar({ view, onView, ultra, onUltra, fast, onFast }: { view: "task" | "settings" | "terminal" | "editor" | "git"; onView: (v: "task" | "settings" | "terminal" | "editor" | "git") => void; ultra: boolean; onUltra: (origin: { x: number; y: number }) => void; fast: boolean; onFast: () => void }) {
   const tabsRef = useRef<HTMLElement>(null);
+  useSlideIndicator(tabsRef, view, ".is-current");
   // In a narrow window the tab strip scrolls; keep the current tab visible
   // when the view changes from a shortcut or a link, not just a click.
   // Only the strip scrolls sideways; the page itself never moves.

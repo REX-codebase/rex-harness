@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { Session, Turn } from "../data/mock";
 
 function fmt(ms: number) {
@@ -17,13 +17,13 @@ function TurnBlock({ turn, receipt, engine, expanded }: { turn: Turn; receipt: s
       </p>
       <div className="flex items-baseline justify-between gap-4">
         <p className="eyebrow">{turn.state === "blocked" ? "Stopped" : turn.kind === "follow-up" ? "Updated result" : "Result"}</p>
-        <span className="font-mono text-[11px] text-faint">
+        <span className="receipt-seal font-mono text-[11px] text-faint">
           {receipt}
           {turn.kind === "follow-up" ? ` · ${turn.id.toUpperCase()}` : ""} · SAMPLE
         </span>
       </div>
       {finished ? (
-        <p className="mt-4 max-w-[62ch] text-[17px] leading-[1.65] tracking-[-0.01em] text-text">{turn.summary}</p>
+        <p className="reveal-wipe mt-4 max-w-[62ch] text-[17px] leading-[1.65] tracking-[-0.01em] text-text">{turn.summary}</p>
       ) : (
         <p className="mt-4 text-[16px] text-muted">
           {turn.kind === "follow-up" ? "Working through the follow-up with the earlier context kept." : "Working through the task. Evidence appears as it lands."}
@@ -41,8 +41,8 @@ function TurnBlock({ turn, receipt, engine, expanded }: { turn: Turn; receipt: s
       )}
       {(expanded || open) && (
         <ol className="tl-list session-evidence" aria-label="Evidence">
-          {turn.steps.map((s) => (
-            <li key={s.id} className="tl-row">
+          {turn.steps.map((s, i) => (
+            <li key={s.id} className="tl-row" style={{ "--r": i } as CSSProperties}>
               <div className="tl-head">
                 <span className={`tl-mark ${s.ok ? "is-ok" : "is-err"}`} aria-hidden="true">
                   {s.ok ? (
@@ -103,7 +103,7 @@ function FollowUpComposer({ busy, onFollowUp, focusWhenReady }: { busy: boolean;
     setText("");
   };
   return (
-    <div className="followup-field composer-arrive" aria-label="Follow up on this run">
+    <div className={`followup-field composer-arrive ${busy ? "is-busy" : ""}`} data-glow aria-label="Follow up on this run">
       <textarea
         ref={areaRef}
         rows={2}
@@ -119,7 +119,7 @@ function FollowUpComposer({ busy, onFollowUp, focusWhenReady }: { busy: boolean;
       />
       <div className="followup-controls">
         <span className="composer-meta-keys hidden text-[11px] text-faint md:inline-flex"><kbd>Ctrl</kbd><kbd>Enter</kbd> send</span>
-        <button type="button" onClick={send} disabled={!canSend} title={!text.trim() ? "Describe the change first" : busy ? "A turn is in progress" : "Send the follow-up"} className="run-button" aria-label={busy ? "Follow-up in progress" : "Send follow-up"}>
+        <button type="button" onClick={send} disabled={!canSend} title={!text.trim() ? "Describe the change first" : busy ? "A turn is in progress" : "Send the follow-up"} className="run-button" data-busy={busy ? "" : undefined} aria-label={busy ? "Follow-up in progress" : "Send follow-up"}>
           <span>{busy ? "Working" : "Follow up"}</span>
           <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9m-3.5-3.5L12.5 8 9 11.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button>

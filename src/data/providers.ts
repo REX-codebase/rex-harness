@@ -22,6 +22,12 @@ export type ProviderPreset = {
   baseUrlLocked?: boolean;
   modelDiscovery: "native" | "openai-models" | "manual";
   examples?: string;
+  /** A practical, honest note shown in the Connect dialog (limits, quirks). */
+  note?: string;
+  /** Turn the lean prompt on automatically: this provider's free tier has
+   *  small per-minute or per-request token budgets. The person can switch it
+   *  off in Run options. */
+  leanByDefault?: boolean;
   access: AccessLine[];
 };
 
@@ -225,12 +231,67 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     ],
   },
   {
+    id: "nvidia",
+    name: "NVIDIA NIM",
+    protocol: "openai-compatible",
+    summary: "Hosted open models on NVIDIA's NIM endpoints; a free developer key.",
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    modelDiscovery: "openai-models",
+    note: "The free tier is for development and evaluation and is rate limited (community reports say about 40 requests a minute). Many listed models are slow or not callable for a free account; pick one that answers in a few seconds.",
+    leanByDefault: true,
+    access: [
+      {
+        kind: "api-key",
+        status: "supported",
+        label: "NVIDIA NIM API key",
+        detail: "A key from your own build.nvidia.com account. The free tier is meant for development and evaluation, not for serving other people.",
+      },
+    ],
+  },
+  {
+    id: "groq",
+    name: "Groq",
+    protocol: "openai-compatible",
+    summary: "Very fast hosted open models; the free tier needs no card.",
+    baseUrl: "https://api.groq.com/openai/v1",
+    modelDiscovery: "openai-models",
+    note: "The free tier caps tokens per minute (8,000 on the models we measured). REX waits out the limit and its lean prompt keeps each request small, but long tasks will be slow.",
+    leanByDefault: true,
+    access: [
+      {
+        kind: "api-key",
+        status: "supported",
+        label: "Groq API key",
+        detail: "A key from your own Groq account. Read Groq's current terms before sharing a key with anyone else.",
+      },
+    ],
+  },
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    protocol: "openai-compatible",
+    summary: "One key for many hosted models, including some free ones.",
+    baseUrl: "https://openrouter.ai/api/v1",
+    modelDiscovery: "openai-models",
+    note: "Models whose id ends in :free have small daily request limits (about 50 a day without credits, per OpenRouter) and failed requests count against them.",
+    leanByDefault: true,
+    access: [
+      {
+        kind: "api-key",
+        status: "supported",
+        label: "OpenRouter API key",
+        detail: "A key from your own OpenRouter account.",
+      },
+    ],
+  },
+  {
     id: "local",
     name: "Local server",
     protocol: "openai-compatible",
     summary: "Ollama, LM Studio, vLLM, or another local compatible server.",
     baseUrl: "http://127.0.0.1:11434/v1",
     modelDiscovery: "openai-models",
+    note: "Ollama and LM Studio ignore the key, but REX needs one saved: type any placeholder such as ollama.",
     access: [
       {
         kind: "api-key",
@@ -258,6 +319,10 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     ],
   },
 ];
+
+/** Whether the lean prompt starts on for this provider (see leanByDefault). */
+export const defaultLean = (providerId: string): boolean =>
+  PROVIDER_PRESETS.find((p) => p.id === providerId)?.leanByDefault === true;
 
 // Wire-shape labels, not vendor claims: Kimi for Coding legitimately speaks
 // the Anthropic shape without being Anthropic.
