@@ -116,9 +116,16 @@ const MAX_OUTPUT_BYTES: usize = 512 * 1024;
 /// Address-space cap (`RLIMIT_AS`) for a spawned command. It counts reserved
 /// virtual memory, not memory in use, so a linker or compiler needs far more
 /// than it touches: at 1 GiB, linking crashed in 5 of 5 clean builds and in 3
-/// of 4 `cargo test` runs; at 4 GiB every one passed.
-#[cfg(unix)]
-const COMMAND_ADDRESS_SPACE_BYTES: libc::rlim_t = 4 * 1024 * 1024 * 1024;
+/// of 4 `cargo test` runs; at 4 GiB every one passed. Enforced on Unix only.
+pub const COMMAND_ADDRESS_SPACE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// CPU seconds (`RLIMIT_CPU`) and open files (`RLIMIT_NOFILE`) a spawned
+/// command gets on Unix. Public with the other limits so the prompt tells the
+/// model the numbers the runtime actually enforces.
+pub const COMMAND_CPU_SECONDS: u64 = 120;
+pub const COMMAND_OPEN_FILES: u64 = 256;
+/// Output kept from one command; the rest is cut and flagged `output_truncated`.
+pub const COMMAND_OUTPUT_BYTES: usize = MAX_OUTPUT_BYTES;
 /// Longest a model-requested command may run; larger requests are cut to it.
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
 const MAX_PENDING: usize = 256;
@@ -1839,16 +1846,16 @@ impl ToolRuntime {
                     }
                 }
                 let cpu = libc::rlimit {
-                    rlim_cur: 120,
-                    rlim_max: 120,
+                    rlim_cur: COMMAND_CPU_SECONDS as libc::rlim_t,
+                    rlim_max: COMMAND_CPU_SECONDS as libc::rlim_t,
                 };
                 let mem = libc::rlimit {
-                    rlim_cur: COMMAND_ADDRESS_SPACE_BYTES,
-                    rlim_max: COMMAND_ADDRESS_SPACE_BYTES,
+                    rlim_cur: COMMAND_ADDRESS_SPACE_BYTES as libc::rlim_t,
+                    rlim_max: COMMAND_ADDRESS_SPACE_BYTES as libc::rlim_t,
                 };
                 let files = libc::rlimit {
-                    rlim_cur: 256,
-                    rlim_max: 256,
+                    rlim_cur: COMMAND_OPEN_FILES as libc::rlim_t,
+                    rlim_max: COMMAND_OPEN_FILES as libc::rlim_t,
                 };
                 if libc::setrlimit(libc::RLIMIT_CPU, &cpu) != 0
                     || libc::setrlimit(libc::RLIMIT_AS, &mem) != 0

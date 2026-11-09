@@ -2168,11 +2168,13 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
             None => Vec::new(),
         };
         let plan_now = current_plan(&ctx.handle);
+        let environment = observe_environment(&ctx.workspace);
         let inputs = StateInputs {
             project: project.as_ref(),
             user_rules: user_rules.as_ref(),
             skills: &skills,
             notes: &notes,
+            environment: &environment,
         };
         let link = ProviderLink {
             protocol,
@@ -2217,6 +2219,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
                     inputs.user_rules,
                     inputs.skills,
                     inputs.notes,
+                    inputs.environment,
                     ctx.brief.lean,
                 ),
                 cp.last_pair
@@ -2567,6 +2570,21 @@ fn current_plan(handle: &Arc<RunHandle>) -> Vec<PlanItem> {
         .unwrap_or_default()
 }
 
+/// The environment this run works in, with the limits the command runner
+/// really enforces (the same constants it applies, so the prompt cannot drift
+/// from the runtime).
+fn observe_environment(workspace: &Path) -> rex_prompt::environment::Environment {
+    rex_prompt::environment::probe(
+        workspace,
+        rex_prompt::environment::CommandLimits {
+            timeout_secs: rex_tools::MAX_TIMEOUT_MS / 1000,
+            output_kib: (rex_tools::COMMAND_OUTPUT_BYTES / 1024) as u64,
+            memory_gib: cfg!(unix).then_some(rex_tools::COMMAND_ADDRESS_SPACE_BYTES >> 30),
+            open_files: cfg!(unix).then_some(rex_tools::COMMAND_OPEN_FILES),
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_state_message(
     brief: &TaskBrief,
@@ -2577,11 +2595,21 @@ fn build_state_message(
     user_rules: Option<&rex_prompt::project::ProjectInstructions>,
     skills: &[rex_prompt::skills::SkillInfo],
     notes: &[String],
+    environment: &rex_prompt::environment::Environment,
     lean: bool,
 ) -> String {
     render_state(
         &state_payload(
-            brief, cp, budgets, plan, project, user_rules, skills, notes, lean,
+            brief,
+            cp,
+            budgets,
+            plan,
+            project,
+            user_rules,
+            skills,
+            notes,
+            environment,
+            lean,
         ),
         lean,
     )
@@ -2606,6 +2634,7 @@ fn state_payload(
     user_rules: Option<&rex_prompt::project::ProjectInstructions>,
     skills: &[rex_prompt::skills::SkillInfo],
     notes: &[String],
+    environment: &rex_prompt::environment::Environment,
     lean: bool,
 ) -> Value {
     let digest: Vec<&DigestEntry> = cp.digest.iter().rev().take(DIGEST_WINDOW).collect();
@@ -2629,6 +2658,7 @@ fn state_payload(
             "tools": ["update_plan", "read_file", "create_file", "edit_file", "search_files", "glob_files", "apply_patch", "run_command", "web_search", "web_fetch", "read_output", "past_runs", "remember", "load_skill", "explore", "ask_user", "complete_task"],
         },
         "brief": {"task": brief.task, "created_at_ms": brief.created_at_ms},
+        "environment": environment.to_value(lean),
         "project_instructions": project.map(|p| json!({
             "source": p.source,
             "sha256": p.sha256,
@@ -6176,6 +6206,9 @@ struct StateInputs<'a> {
     user_rules: Option<&'a rex_prompt::project::ProjectInstructions>,
     skills: &'a [rex_prompt::skills::SkillInfo],
     notes: &'a [String],
+    /// The host, command rules and project files this run works in (see
+    /// `rex_prompt::environment`), observed fresh each turn.
+    environment: &'a rex_prompt::environment::Environment,
 }
 
 /// Words that say what the run is working on now, for proactive recall: the
@@ -6209,6 +6242,7 @@ fn windowed_state_message(
         inputs.user_rules,
         inputs.skills,
         inputs.notes,
+        inputs.environment,
         brief.lean,
     );
     if let Some(obj) = payload.as_object_mut() {
@@ -9623,6 +9657,121 @@ mod tests {
         assert!(worker_allow.is_none());
     }
 
+    fn test_environment() -> rex_prompt::environment::Environment {
+        observe_environment(Path::new("."))
+    }
+
+    fn brief_for_environment_tests(lean: bool) -> TaskBrief {
+        TaskBrief {
+            id: "env".into(),
+            task: "t".into(),
+            provider: "gemini".into(),
+            budgets: Budgets::default(),
+            created_at_ms: 1,
+            prompt_version: legacy_prompt_marker(),
+            prompt_hash: legacy_prompt_marker(),
+            role: None,
+            allowed_tools: None,
+            plan_mode: false,
+            summarize_history: false,
+            lean,
+            windowed_context: false,
+            context_window: None,
+            name: None,
+            continued_from: None,
+        }
+    }
+
+    #[test]
+    fn the_state_carries_the_environment_the_run_is_in() {
+        let ws = tempfile::tempdir().unwrap();
+        fs::write(ws.path().join("Cargo.toml"), "").unwrap();
+        let env = observe_environment(ws.path());
+        for lean in [false, true] {
+            let msg = build_state_message(
+                &brief_for_environment_tests(lean),
+                &Checkpoint::default(),
+                Budgets::default(),
+                vec![],
+                None,
+                None,
+                &[],
+                &[],
+                &env,
+                lean,
+            );
+            let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+            assert_eq!(v["environment"]["os"], std::env::consts::OS, "lean={lean}");
+            assert_eq!(v["environment"]["workspace_files"][0], "Cargo.toml");
+            assert!(v["environment"]["programs_on_path"].is_array());
+        }
+        // the numbers are the ones the command runner enforces
+        let full = env.to_value(false);
+        assert_eq!(
+            full["command_limits"]["timeout_secs"],
+            rex_tools::MAX_TIMEOUT_MS / 1000
+        );
+        assert_eq!(
+            full["command_limits"]["output_kib"],
+            rex_tools::COMMAND_OUTPUT_BYTES / 1024
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            full["command_limits"]["memory_gib"],
+            rex_tools::COMMAND_ADDRESS_SPACE_BYTES >> 30
+        );
+    }
+
+    #[test]
+    fn environment_examples_match_the_command_policy() {
+        // The block names programs as blocked and as available; the runtime
+        // is the authority, so check every name against its real policy.
+        let ws = tempfile::tempdir().unwrap();
+        let tools = ToolRuntime::new(ws.path()).unwrap();
+        let risk = |program: &str| {
+            tools
+                .prepare(rex_tools::ToolRequest::RunCommand {
+                    argv: vec![program.to_string()],
+                    cwd: None,
+                    timeout_ms: None,
+                })
+                .unwrap()
+                .risk
+        };
+        for (kind, names) in rex_prompt::environment::BLOCKED_EXAMPLES {
+            for name in *names {
+                assert_eq!(
+                    risk(name),
+                    rex_tools::RiskClass::Denied,
+                    "{name} ({kind}) is listed as blocked but the runtime allows it"
+                );
+            }
+        }
+        for name in rex_prompt::environment::PROBED_PROGRAMS {
+            assert_ne!(
+                risk(name),
+                rex_tools::RiskClass::Denied,
+                "{name} is listed as available but the runtime blocks it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_worker_contract_with_its_environment_rules_fits_its_budget() {
+        let (system, _, _) = assemble_run_prompt(Role::Worker, &offered_tool_specs());
+        assert!(
+            !system.contains("module truncated to its"),
+            "a module overflowed its budget and was cut"
+        );
+        assert!(system.contains("`environment` block"));
+        assert!(system.contains("no shell"));
+        // a read-only role keeps the general rule and gets no command rule
+        let (scoped, _) = scoped_tools_for(Role::Adversary);
+        let (ro, _, _) = assemble_run_prompt(Role::Adversary, &scoped);
+        assert!(ro.contains("`environment` block"));
+        assert!(!ro.contains("no shell"));
+    }
+
     #[test]
     fn state_message_carries_repo_instructions_below_the_contract() {
         let tmp = tempfile::tempdir().unwrap();
@@ -9660,6 +9809,7 @@ mod tests {
             None,
             &[],
             &[],
+            &test_environment(),
             false,
         );
         let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
@@ -9682,6 +9832,7 @@ mod tests {
             None,
             &[],
             &[],
+            &test_environment(),
             false,
         );
         let v: serde_json::Value = serde_json::from_str(&none).unwrap();
@@ -9707,6 +9858,7 @@ mod tests {
             user.as_ref(),
             &[],
             &[],
+            &test_environment(),
             false,
         );
         let v: serde_json::Value = serde_json::from_str(&both).unwrap();
@@ -13620,7 +13772,9 @@ mod tests {
                 turn: 1,
                 actions: vec![],
             });
+            let environment = test_environment();
             let inputs = StateInputs {
+                environment: &environment,
                 project: None,
                 user_rules: None,
                 skills: &[],

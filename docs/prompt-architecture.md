@@ -1,4 +1,4 @@
-# REX prompt architecture (rex-prompt v1.0.0)
+# REX prompt architecture (rex-prompt v1.1.0)
 
 Every REX model call assembles its system prompt from versioned modules in
 `crates/rex-prompt` instead of ad-hoc strings. This document is the map.
@@ -20,6 +20,35 @@ Assembly (`Assembler`) is deterministic (canonical order regardless of
 insertion order), budgeted per module with a visible truncation marker, and
 hashed: sha256 per module, one `prompt_hash` over version + module hashes,
 identity string `rex-prompt/<version>#<hash12>`.
+
+## The environment the model works in
+
+The model is told the facts of the machine it runs on, so it does not learn
+them by failing. `environment.rs` observes them for each turn and the autonomous
+loop puts them in the per-turn state as `environment` (never in the system
+prompt, so they cannot change the prompt identity):
+
+- the operating system, architecture, family (`unix` or `windows`) and path
+  separator;
+- the limits a command is held to (`command_limits`: timeout, output size, and
+  on Unix the address-space and open-file caps), taken from the constants
+  `rex-tools` enforces, and the kinds of program that are blocked
+  (`blocked_commands`: shells, interpreters, launchers, network clients,
+  destructive or privileged commands);
+- which of the programs it may reasonably run (`cargo`, `npm`, `make`, `git`,
+  `pytest` ...) are on `PATH` and which are not, looked up the way the command
+  runner looks them up (including `PATHEXT` on Windows);
+- the project files at the workspace root (`Cargo.toml`, `package.json`,
+  `go.mod` ...), re-read each turn so a file the run creates shows up.
+
+Small-context (`lean`) runs get a compact form (OS, programs, project files).
+What is the same on every machine is stated once in the system prompt instead of
+being re-sent each turn: the tool contract tells the model to work to
+`environment` and, when the call can run commands, how commands work (an argv
+list with no shell, no network, a clean environment) and what to use instead of
+a blocked program. A read-only role gets the general rule and no command rule. A
+test in `rex-providers` checks every program the block names as blocked or
+available against the runtime's real command policy, so the two cannot drift.
 
 Untrusted text (task content, tool output) goes through `untrusted_block`,
 which brackets it in delimiters the constitution defines as data and

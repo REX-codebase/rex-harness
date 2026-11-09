@@ -80,8 +80,28 @@ observations; a call you did not make did not happen.\n",
             spec.summary
         ));
     }
-    out.trim_end().to_string()
+    out.push_str(ENVIRONMENT_RULE);
+    if specs.iter().any(|s| s.name == "run_command") {
+        out.push_str(COMMAND_RULE);
+    }
+    out
 }
+
+/// Tells the model what the state's `environment` block is for. The block's
+/// facts vary per machine, so they live in the per-turn state; this rule is
+/// the same everywhere, so it can sit in the pinned system prompt.
+const ENVIRONMENT_RULE: &str = "\nThe state's `environment` block describes the machine and workspace this run is on: \
+operating system, installed programs, project files, limits. Work to it. Use its OS and path conventions, \
+do not assume a program it lists as not found, and do not claim an environment fact it does not state.";
+
+/// Command guidance, present only when the call can run commands (a
+/// read-only role's contract never mentions them).
+const COMMAND_RULE: &str = "\nCommands: pass an argv list, one command per call; there is no shell, so no pipes, \
+redirects, `&&` or globs, and the working directory is set with cwd. Commands have no network and start with a \
+clean environment. Shells, interpreters, launchers and destructive commands are blocked: use the project's own \
+tooling (cargo, npm, make, pytest ...) and the file tools instead. Pick a command that exists in \
+`programs_on_path` and fits `workspace_files`, and stay inside `command_limits`. A blocked or failed command is an observation: change the \
+approach, do not retry the same call through another blocked program.";
 
 #[cfg(test)]
 mod tests {
@@ -129,6 +149,22 @@ mod tests {
         let contract = render_contract(&scoped);
         assert!(contract.contains("No tools are enabled"));
         assert!(!contract.contains("read_file ("));
+    }
+
+    #[test]
+    fn the_environment_rule_is_present_and_the_command_rule_only_with_commands() {
+        let with = render_contract(&filter_for_policy(&offering(), ToolPolicy::All));
+        assert!(with.contains("`environment` block"));
+        assert!(with.contains("no shell"));
+        assert!(with.contains("programs_on_path"));
+        let read_only = render_contract(&filter_for_policy(&offering(), ToolPolicy::ReadOnly));
+        assert!(read_only.contains("`environment` block"));
+        assert!(
+            !read_only.contains("no shell"),
+            "read-only roles get no command rule"
+        );
+        let none = render_contract(&[]);
+        assert!(!none.contains("environment"));
     }
 
     #[test]

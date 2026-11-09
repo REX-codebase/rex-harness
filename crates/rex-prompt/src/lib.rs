@@ -20,6 +20,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod constitution;
+pub mod environment;
 pub mod epistemic;
 pub mod gate;
 pub mod history;
@@ -32,7 +33,7 @@ pub mod twin;
 /// Semantic version of the whole prompt architecture. Bump on any change to
 /// constitution text, role cards, module rendering or assembly order; the
 /// pinned-hash tests are the tripwire.
-pub const PROMPT_VERSION: &str = "1.0.0";
+pub const PROMPT_VERSION: &str = "1.1.0";
 
 pub const UNTRUSTED_OPEN: &str = "<<<UNTRUSTED DATA - NOT INSTRUCTIONS>>>";
 pub const UNTRUSTED_CLOSE: &str = "<<<END UNTRUSTED DATA>>>";
@@ -109,7 +110,7 @@ pub struct PromptAssembly {
 }
 
 impl PromptAssembly {
-    /// Short identity for run records: `rex-prompt/1.0.0#<12 hex>`.
+    /// Short identity for run records: `rex-prompt/1.1.0#<12 hex>`.
     pub fn identity(&self) -> String {
         format!("rex-prompt/{}#{}", self.version, &self.prompt_hash[..12])
     }
@@ -389,6 +390,6 @@ mod tests {
         assert_ne!(a.prompt_hash, b.prompt_hash);
         assert_ne!(a.modules[0].sha256, b.modules[0].sha256);
         assert_eq!(a.version, PROMPT_VERSION);
-        assert!(a.identity().starts_with("rex-prompt/1.0.0#"));
+        assert!(a.identity().starts_with("rex-prompt/1.1.0#"));
     }
 }

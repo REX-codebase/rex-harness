@@ -44,6 +44,18 @@ everything below is newer than it.
   architecture, security model, data and storage, troubleshooting,
   CONTRIBUTING and SECURITY.
 
+- **The AI is told the environment it works in.** The per-turn state now carries
+  an `environment` block: the operating system and architecture, the limits a
+  command is held to, which kinds of program are blocked, which build tools are
+  on `PATH` (with `PATHEXT` on Windows), and the project files at the workspace
+  root. The tool contract tells the model to work to it and, when it can run
+  commands, how commands work (an argv list, no shell, no network, a clean
+  environment) and what to use instead of a blocked program. Small
+  context windows get a compact form. This is prompt version `1.1.0`: a run
+  started under an earlier prompt version cannot be resumed (REX refuses to mix
+  prompt versions mid-run), and benchmark records from before count as a
+  different prompt identity. See [docs/prompt-architecture.md](docs/prompt-architecture.md).
+
 ### Fixed since the first 0.1.0 installer
 - **Commands crashed while linking.** A command run through the tool runtime was
   capped at 1 GiB of address space; linking crashed in 5 of 5 clean builds and in
