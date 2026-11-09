@@ -10,7 +10,7 @@ test('package exposes the npx launcher', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.equal(manifest.bin['rex-mcp'], 'bin/rex-mcp.cjs');
   assert.equal(manifest.engines.node, '>=18');
-  assert.equal(manifest.license, 'UNLICENSED');
+  assert.equal(manifest.license, 'MIT OR Apache-2.0');
 });
 
 test('launcher covers the release build matrix', () => {
