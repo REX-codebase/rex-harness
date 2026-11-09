@@ -1,0 +1,250 @@
+{
+  "passed": 24,
+  "total": 24,
+  "results": [
+    {
+      "name": "disabled Run is a dimmed primary, not a grey slab (tinted text, 1px edge, not-allowed)",
+      "pass": true,
+      "detail": {
+        "backgroundColor": "color(srgb 0.135725 0.122275 0.179843)",
+        "borderTopWidth": "1px",
+        "color": "color(srgb 0.564706 0.523529 0.735294)",
+        "cursor": "not-allowed",
+        "boxShadow": "none"
+      }
+    },
+    {
+      "name": "enabled Run is lit: gradient face, ink text, pointer, at least 42px tall",
+      "pass": true,
+      "detail": {
+        "backgroundImage": "linear-gradient(color(srgb 0.736941 0.691059 0.975529), rgb(169, 154, 247) 55%, color(srgb 0.596471 0.543529 0.871765))",
+        "color": "rgb(10, 9, 13)",
+        "cursor": "pointer",
+        "minHeight": "42px"
+      }
+    },
+    {
+      "name": "the disabled and enabled Run differ in face, so typing visibly arms it",
+      "pass": true
+    },
+    {
+      "name": "setup primary shares the primary face",
+      "pass": true,
+      "detail": {
+        "backgroundImage": "linear-gradient(color(srgb 0.736941 0.691059 0.975529), rgb(169, 154, 247) 55%, color(srgb 0.596471 0.543529 0.871765))"
+      }
+    },
+    {
+      "name": "secondary (options) has an edge, a raised face and a 40px square target",
+      "pass": true,
+      "detail": {
+        "borderTopWidth": "1px",
+        "borderTopColor": "color(srgb 0.290196 0.271922 0.311725)",
+        "color": "rgb(240, 237, 243)",
+        "backgroundImage": "linear-gradient(color(srgb 0.162272 0.150507 0.184855 / 0.87), rgb(24, 21, 30))",
+        "width": "40px",
+        "height": "40px"
+      }
+    },
+    {
+      "name": "\"Connect a model\" is a bordered 44px control, not a bare label",
+      "pass": true,
+      "detail": {
+        "borderTopWidth": "1px",
+        "height": "44px",
+        "cursor": "pointer"
+      }
+    },
+    {
+      "name": "with no model connected it asks for attention (amber edge)",
+      "pass": true,
+      "detail": "color(srgb 0.537255 0.424538 0.333977)"
+    },
+    {
+      "name": "inactive tabs meet 4.5:1 contrast against their track",
+      "pass": true,
+      "detail": {
+        "text": "rgb(170, 163, 178)",
+        "track": "color(srgb 0.0511373 0.0457255 0.062902)",
+        "ratio": 7.98
+      }
+    },
+    {
+      "name": "hover lifts a secondary button 1px",
+      "pass": true,
+      "detail": {
+        "transform": "matrix(1, 0, 0, 1, 0, -1)"
+      }
+    },
+    {
+      "name": "active presses it in (scaled down, no lift)",
+      "pass": true,
+      "detail": {
+        "transform": "matrix(0.975, 0, 0, 0.975, 0, 0)"
+      }
+    },
+    {
+      "name": "the options button keeps the motion layer's tilt on hover (rotate -8deg)",
+      "pass": true,
+      "detail": {
+        "transform": "matrix(0.990268, -0.139173, 0.139173, 0.990268, 0, -1)"
+      }
+    },
+    {
+      "name": "Reduce: hover does not move secondary buttons or switches",
+      "pass": true,
+      "detail": {
+        ".model-trigger": "none",
+        ".options-button": "none",
+        ".fast-control": "none"
+      }
+    },
+    {
+      "name": "touch: (hover: none) matches and no lift sticks",
+      "pass": true,
+      "detail": {
+        "noHover": true,
+        "transform": "none"
+      }
+    },
+    {
+      "name": "both switches carry a lamp (corner, 5px, absolutely placed)",
+      "pass": true,
+      "detail": {
+        "fastOff": {
+          "content": "\"\"",
+          "width": "5px",
+          "backgroundColor": "color(srgb 0.466667 0.443137 0.501961 / 0.65)",
+          "position": "absolute"
+        },
+        "ultraOff": {
+          "content": "\"\"",
+          "width": "5px",
+          "backgroundColor": "color(srgb 0.466667 0.443137 0.501961 / 0.65)",
+          "position": "absolute"
+        }
+      }
+    },
+    {
+      "name": "Fast lights its lamp",
+      "pass": true,
+      "detail": {
+        "off": "color(srgb 0.466667 0.443137 0.501961 / 0.65)",
+        "on": "rgb(169, 154, 247)"
+      }
+    },
+    {
+      "name": "Ultra lights its lamp",
+      "pass": true,
+      "detail": {
+        "off": "color(srgb 0.466667 0.443137 0.501961 / 0.65)",
+        "on": "rgb(241, 223, 181)"
+      }
+    },
+    {
+      "name": "radius follows the tier: 10px standard, 7px Fast, 4px Ultra",
+      "pass": true,
+      "detail": {
+        "std": "10px",
+        "fast": "7px",
+        "ultra": "4px"
+      }
+    },
+    {
+      "name": "Ultra glyph is a star in every state (all three bars share one pivot, never a menu)",
+      "pass": true,
+      "detail": [
+        "6px",
+        "6px",
+        "6px"
+      ]
+    },
+    {
+      "name": "top bar fits at 1280px, Ultra off and on (no clip, no overlap, no page overflow)",
+      "pass": true,
+      "detail": {
+        "off": {
+          "clipped": false,
+          "overlap": false,
+          "pageOverflow": 0,
+          "barOverflow": 0
+        },
+        "on": {
+          "clipped": false,
+          "overlap": false,
+          "pageOverflow": 0,
+          "barOverflow": 0
+        }
+      }
+    },
+    {
+      "name": "top bar fits at 820px, Ultra off and on (no clip, no overlap, no page overflow)",
+      "pass": true,
+      "detail": {
+        "off": {
+          "clipped": false,
+          "overlap": false,
+          "pageOverflow": 0,
+          "barOverflow": 0
+        },
+        "on": {
+          "clipped": false,
+          "overlap": false,
+          "pageOverflow": 0,
+          "barOverflow": 0
+        }
+      }
+    },
+    {
+      "name": "top bar fits at 640px, Ultra off and on (no clip, no overlap, no page overflow)",
+      "pass": true,
+      "detail": {
+        "off": {
+          "clipped": false,
+          "overlap": false,
+          "pageOverflow": 0,
+          "barOverflow": 0
+        },
+        "on": {
+          "clipped": false,
+          "overlap": false,
+          "pageOverflow": 0,
+          "barOverflow": 0
+        }
+      }
+    },
+    {
+      "name": "top bar fits at 390px, Ultra off and on (no clip, no overlap, no page overflow)",
+      "pass": true,
+      "detail": {
+        "off": {
+          "clipped": false,
+          "overlap": false,
+          "pageOverflow": 0,
+          "barOverflow": 0
+        },
+        "on": {
+          "clipped": false,
+          "overlap": false,
+          "pageOverflow": 0,
+          "barOverflow": 0
+        }
+      }
+    },
+    {
+      "name": "a focused button shows a 2px solid ring offset from its edge",
+      "pass": true,
+      "detail": {
+        "cls": "model-trigger",
+        "style": "solid",
+        "width": "2px",
+        "offset": "2px"
+      }
+    },
+    {
+      "name": "no uncaught page errors",
+      "pass": true,
+      "detail": []
+    }
+  ]
+}

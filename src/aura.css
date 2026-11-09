@@ -113,6 +113,8 @@
 @keyframes ut-scrim{0%{opacity:0}22%,78%{opacity:1}100%{opacity:0}}
 @keyframes ut-word-out{to{opacity:0;filter:blur(8px)}}
 
+/* Between the wrapped phone layout and the full bar there is room for the mark but not its caption: drop the caption rather than show it clipped. */
+@media(min-width:561px) and (max-width:720px){.harness-shell .brand-name{display:none}}
 @media(max-width:560px){.rex-wordmark{font-size:21px}.brand-name{letter-spacing:.26em}.ut-word small{letter-spacing:.24em;margin-right:-.24em;font-size:9px}}
 
 /* ---------- Reduced motion: keep the look, lose the movement ---------- */

@@ -1,0 +1,326 @@
+/* ==========================================================================
+   Buttons
+
+   One system for every button, loaded last. Before this, each button class
+   styled itself: a different radius (pill, 7px, 8px, 9px, 10px), a different
+   border, text in the dimmest grey, and a disabled state that looked broken.
+   Controls read as labels, and the most important ones (Run, Connect a model,
+   Fast, Ultra) read as the least clickable.
+
+   Three roles, one set of states:
+     primary    the one thing to do next. Lit: accent face, top highlight, glow.
+     secondary  everything else you can press. A raised face with a visible
+                edge and full-contrast text. Lifts on hover, presses on active.
+     quiet      links and text toggles. Left alone.
+   States: hover (brighter, lifts), active (presses in), focus-visible (ring
+   outside the edge), disabled. A disabled primary stays recognisably the
+   primary, dimmed toward its own colour, instead of collapsing to a grey slab.
+
+   Everything reads tokens on the shell, so Ultra and Fast keep their squarer
+   corners (--btn-r) and champagne accent without a second set of rules. Motion
+   behaviour (entrances, ripples, spring transforms) stays in motion-ui.css; this
+   file only owns how a button looks at rest and in each state.
+   ========================================================================== */
+
+.harness-shell {
+  --btn-r: 10px;
+  --btn-accent: var(--color-accent);
+  --btn-ink: var(--color-ink);
+  --btn-edge: color-mix(in srgb, var(--color-text) 17%, var(--color-line));
+  --btn-edge-hot: color-mix(in srgb, var(--color-text) 34%, var(--color-line));
+  --btn-face: linear-gradient(180deg, color-mix(in srgb, var(--color-lift) 80%, var(--color-text) 7%), var(--color-lift));
+  --btn-face-hot: linear-gradient(180deg, color-mix(in srgb, var(--color-lift) 62%, var(--color-text) 16%), color-mix(in srgb, var(--color-lift) 88%, var(--color-text) 7%));
+  --btn-lit: inset 0 1px 0 color-mix(in srgb, var(--color-text) 9%, transparent);
+  --btn-drop: 0 1px 2px rgb(0 0 0 / .4);
+  --btn-lift: 0 8px 18px -8px rgb(0 0 0 / .7);
+}
+.fast-on { --btn-r: 7px; }
+.ultra-on { --btn-r: 4px; }
+
+/* Approval cards carry their own accent: amber for a command, blue for a plan. */
+.tool-approval { --btn-accent: #f0a43b; --btn-ink: #15120d; }
+.plan-approval { --btn-accent: #6aa8ff; --btn-ink: #0d1526; }
+
+/* --------------------------------------------------------------------------
+   Primary
+   -------------------------------------------------------------------------- */
+.harness-shell :is(.run-button, .setup-btn.primary, .stage-button, .approval-allow, .tool-approval-actions .approve, .allow-btn, .dialog-primary.is-active) {
+  --_a: var(--btn-accent);
+  border: 1px solid color-mix(in srgb, var(--_a) 55%, white);
+  border-radius: var(--btn-r);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--_a) 78%, white), var(--_a) 55%, color-mix(in srgb, var(--_a) 90%, black));
+  color: var(--btn-ink);
+  font-weight: 650;
+  text-shadow: 0 1px 0 rgb(255 255 255 / .2);
+  cursor: pointer;
+}
+.harness-shell :is(.run-button, .setup-btn.primary, .stage-button, .approval-allow, .tool-approval-actions .approve, .allow-btn, .dialog-primary.is-active):hover:not(:disabled) {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--_a) 66%, white), color-mix(in srgb, var(--_a) 94%, white) 55%, var(--_a));
+  border-color: color-mix(in srgb, var(--_a) 40%, white);
+}
+/* Dimmed toward its own colour: it is waiting for input, not dead. */
+.harness-shell :is(.run-button, .setup-btn.primary, .stage-button, .approval-allow, .tool-approval-actions .approve, .allow-btn, .dialog-primary.is-active):disabled {
+  background: color-mix(in srgb, var(--_a) 11%, var(--color-surface));
+  border-color: color-mix(in srgb, var(--_a) 26%, transparent);
+  color: color-mix(in srgb, var(--_a) 50%, var(--color-faint));
+  box-shadow: none;
+  text-shadow: none;
+  cursor: not-allowed;
+}
+.harness-shell .dialog-primary:disabled {
+  --_a: var(--btn-accent);
+  background: color-mix(in srgb, var(--_a) 11%, var(--color-surface));
+  border: 1px solid color-mix(in srgb, var(--_a) 26%, transparent);
+  color: color-mix(in srgb, var(--_a) 50%, var(--color-faint));
+  border-radius: var(--btn-r);
+  cursor: not-allowed;
+}
+/* The Run button is the one thing to do: give it room, and let its arrow lead. */
+.harness-shell .run-button { min-height: 42px; padding: 0 18px; font-size: 13.5px; letter-spacing: .005em; }
+.harness-shell .run-button:disabled svg { opacity: .55; }
+.harness-shell :is(.approval-allow, .tool-approval-actions .approve) { min-height: 40px; padding: 0 18px; font-size: 13px; }
+.harness-shell .stage-button { min-height: 40px; padding: 0 16px; font-size: 12px; }
+.harness-shell .setup-btn.primary { min-height: 40px; padding: 0 18px; font-size: 13px; }
+
+/* --------------------------------------------------------------------------
+   Secondary
+   -------------------------------------------------------------------------- */
+.harness-shell :is(.reset-button, .newtask-button, .test-button, .setup-btn:not(.primary), .deny-btn, .approval-deny, .tool-approval-actions .deny, .target-btn, .takeover-btn, .agent-cancel, .live-cancel, .rex-close, .agent-undo button, .handover-banner button, .options-button, .dialog-close, .model-trigger) {
+  border: 1px solid var(--btn-edge);
+  border-radius: var(--btn-r);
+  background: var(--btn-face);
+  color: var(--color-text);
+  box-shadow: var(--btn-lit), var(--btn-drop);
+  font-weight: 550;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 240ms ease, color 160ms ease, transform 260ms var(--spring-snappy, ease);
+}
+.harness-shell :is(.reset-button, .newtask-button, .test-button, .setup-btn:not(.primary), .deny-btn, .approval-deny, .tool-approval-actions .deny, .target-btn, .takeover-btn, .agent-cancel, .live-cancel, .rex-close, .agent-undo button, .handover-banner button, .options-button, .dialog-close, .model-trigger):hover:not(:disabled) {
+  background: var(--btn-face-hot);
+  border-color: var(--btn-edge-hot);
+  color: var(--color-text);
+  box-shadow: var(--btn-lit), var(--btn-lift);
+  transform: translateY(-1px);
+}
+.harness-shell :is(.reset-button, .newtask-button, .test-button, .setup-btn:not(.primary), .deny-btn, .approval-deny, .tool-approval-actions .deny, .target-btn, .takeover-btn, .agent-cancel, .live-cancel, .rex-close, .agent-undo button, .handover-banner button, .options-button, .dialog-close, .model-trigger):active:not(:disabled) {
+  transform: translateY(0) scale(.975);
+  box-shadow: var(--btn-lit);
+  background: var(--btn-face);
+}
+.harness-shell :is(.reset-button, .newtask-button, .test-button, .setup-btn:not(.primary), .deny-btn, .approval-deny, .tool-approval-actions .deny, .target-btn, .takeover-btn, .agent-cancel, .live-cancel, .rex-close, .agent-undo button, .handover-banner button, .options-button, .dialog-close, .model-trigger):disabled {
+  opacity: .5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* Sizes: md is the default. Dense contexts get sm. */
+.harness-shell :is(.reset-button, .test-button, .setup-btn:not(.primary)) { min-height: 38px; padding: 0 15px; font-size: 12.5px; }
+.harness-shell :is(.newtask-button, .agent-cancel, .live-cancel, .target-btn, .takeover-btn) { min-height: 34px; padding: 0 14px; font-size: 12.5px; }
+.harness-shell :is(.rex-close, .agent-undo button, .handover-banner button) { min-height: 30px; padding: 0 12px; font-size: 12px; }
+.harness-shell :is(.approval-deny, .tool-approval-actions .deny, .deny-btn) { min-height: 40px; padding: 0 16px; font-size: 13px; }
+.harness-shell .deny-btn { min-height: 34px; }
+.harness-shell :is(.approval-allow, .approval-deny, .tool-approval-actions button):focus-visible { outline-offset: 3px; }
+
+/* Cancel stops something: its hover says so. */
+.harness-shell :is(.agent-cancel, .live-cancel):hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-danger) 60%, var(--btn-edge));
+  color: color-mix(in srgb, var(--color-danger) 70%, var(--color-text));
+}
+
+/* The options button keeps the motion layer's playful tilt (motion-ui.css), now composed with the lift. */
+/* Doubled class: it must outrank the group hover/active rules above, which carry :is() lists. */
+.harness-shell .options-button.options-button:hover:not(:disabled) { transform: translateY(-1px) rotate(-8deg); }
+.harness-shell .options-button.options-button:active:not(:disabled) { transform: scale(.92); }
+
+/* Icon buttons: square, same edge and radius as everything else. */
+.harness-shell .options-button { width: 40px; height: 40px; border-radius: var(--btn-r); }
+.harness-shell .options-button.is-open { border-color: color-mix(in srgb, var(--color-accent) 55%, var(--btn-edge)); background: color-mix(in srgb, var(--color-accent) 12%, var(--color-lift)); }
+.harness-shell .options-count { top: -5px; right: -5px; }
+.harness-shell .dialog-close { color: var(--color-muted); font-weight: 300; }
+
+/* "Connect a model" was a bare label with a chevron. It is the first thing a new
+   person has to press, so it is a real control, and it asks for attention while
+   no model is connected. */
+.harness-shell .model-trigger { height: 44px; padding: 0 12px 0 13px; min-width: 164px; }
+.harness-shell .model-trigger b { color: var(--color-text); font-weight: 550; }
+.harness-shell .model-trigger svg { color: var(--color-muted); }
+.harness-shell .model-trigger:has(.model-mark:not(.is-live)) {
+  border-color: color-mix(in srgb, var(--color-blocked) 42%, var(--btn-edge));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--color-blocked) 9%, var(--color-lift)), var(--color-lift));
+}
+.harness-shell .model-trigger:has(.model-mark:not(.is-live)):hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-blocked) 68%, var(--btn-edge));
+}
+.harness-shell .model-trigger[aria-expanded="true"] { border-color: color-mix(in srgb, var(--color-accent) 55%, var(--btn-edge)); }
+
+/* --------------------------------------------------------------------------
+   Chips you choose between (question answers)
+   -------------------------------------------------------------------------- */
+.harness-shell .question-choices button {
+  min-height: 34px;
+  padding: 0 15px;
+  border: 1px solid var(--btn-edge);
+  border-radius: 999px;
+  background: var(--btn-face);
+  color: var(--color-text);
+  box-shadow: var(--btn-lit), var(--btn-drop);
+  font-weight: 550;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 240ms ease, color 160ms ease, transform 260ms var(--spring-snappy, ease);
+}
+.harness-shell .question-choices button:hover:not(:disabled) {
+  background: var(--btn-face-hot);
+  border-color: color-mix(in srgb, var(--btn-accent) 55%, var(--btn-edge-hot));
+  transform: translateY(-1px);
+  box-shadow: var(--btn-lit), var(--btn-lift);
+}
+.harness-shell .question-choices button:active:not(:disabled) { transform: translateY(0) scale(.97); }
+.harness-shell .question-choices button[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 16%, var(--color-lift));
+  color: var(--color-text);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 45%, transparent), 0 0 18px -6px var(--color-accent);
+}
+
+/* --------------------------------------------------------------------------
+   Mode switches: Fast and Ultra
+   They looked like two outlined labels, and Ultra's three-line glyph read as a
+   menu. They are switches, so they say on or off: a lamp at the end lights, the
+   face warms, and the glyph is always a star that locks in when engaged.
+   -------------------------------------------------------------------------- */
+.harness-shell :is(.fast-control, .ultra-control) {
+  height: 38px;
+  gap: 8px;
+  padding: 0 12px 0 10px;
+  border: 1px solid var(--btn-edge);
+  border-radius: var(--btn-r);
+  background: var(--btn-face);
+  color: var(--color-text);
+  box-shadow: var(--btn-lit), var(--btn-drop);
+  cursor: pointer;
+  transition: border-color 200ms ease, background 260ms ease, box-shadow 320ms ease, color 200ms ease, transform 260ms var(--spring-snappy, ease), width 450ms ease;
+}
+/* Ultra's tier label ("Verified runs") is zero-width while off but still takes a flex gap; space it by margin instead so the off state is as compact as Fast. */
+.harness-shell .ultra-control { gap: 0; }
+.harness-shell .ultra-glyph { margin-right: 7px; }
+.harness-shell .ultra-tier { transition: max-width 450ms ease, opacity 350ms ease, margin-left 450ms ease; }
+.harness-shell .ultra-control.is-on .ultra-tier { margin-left: 7px; }
+.harness-shell :is(.fast-control, .ultra-control):hover {
+  background: var(--btn-face-hot);
+  border-color: var(--btn-edge-hot);
+  box-shadow: var(--btn-lit), var(--btn-lift);
+  transform: translateY(-1px);
+}
+.harness-shell :is(.fast-control, .ultra-control):active { transform: translateY(0) scale(.975); box-shadow: var(--btn-lit); }
+/* The lamp sits in the corner so it costs no width: the top bar is already tight. */
+.harness-shell :is(.fast-control, .ultra-control)::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  right: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-faint) 65%, transparent);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / .1);
+  transition: background 320ms ease, box-shadow 420ms ease;
+}
+.harness-shell .fast-copy b { font-size: 12px; font-weight: 600; }
+.harness-shell .fast-copy small { color: var(--color-muted); }
+.harness-shell .ultra-label { font-size: 11px; letter-spacing: .1em; }
+
+.harness-shell .fast-control.is-on {
+  border-color: color-mix(in srgb, var(--color-accent) 62%, var(--btn-edge));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--color-accent) 20%, var(--color-lift)), color-mix(in srgb, var(--color-accent) 8%, var(--color-lift)));
+  box-shadow: var(--btn-lit), 0 0 22px -8px var(--color-accent);
+}
+.harness-shell .fast-control.is-on::after {
+  background: var(--color-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 26%, transparent), 0 0 10px var(--color-accent);
+}
+
+.harness-shell .ultra-control:hover { box-shadow: var(--btn-lit), 0 0 26px -6px rgba(231, 204, 152, .4); border-color: #6c6353; }
+.harness-shell .ultra-control.is-on {
+  border-color: #a09070;
+  background: linear-gradient(180deg, #25221b, #17150f);
+  color: #fff6e8;
+  box-shadow: inset 0 1px 0 rgba(255, 236, 200, .1), 0 0 26px -6px rgba(231, 204, 152, .4);
+}
+.harness-shell .ultra-control.is-on::after {
+  background: #f1dfb5;
+  box-shadow: 0 0 0 2px rgba(241, 223, 181, .22), 0 0 10px rgba(241, 223, 181, .8);
+}
+/* Always a star: off it sits dim and a quarter-turn out of true, on it locks in. */
+.harness-shell .ultra-glyph { opacity: .65; transition: opacity 320ms ease; }
+.harness-shell .ultra-control.is-on .ultra-glyph { opacity: 1; }
+.harness-shell .ultra-glyph i:nth-child(1) { top: 6px; transform: rotate(90deg); }
+.harness-shell .ultra-glyph i:nth-child(2) { top: 6px; transform: rotate(-30deg); }
+.harness-shell .ultra-glyph i:nth-child(3) { top: 6px; transform: rotate(210deg); }
+.harness-shell .ultra-control.is-on .ultra-glyph i:nth-child(1) { top: 6px; transform: rotate(60deg); }
+.harness-shell .ultra-control.is-on .ultra-glyph i:nth-child(2) { top: 6px; transform: rotate(-60deg); }
+.harness-shell .ultra-control.is-on .ultra-glyph i:nth-child(3) { top: 6px; transform: rotate(180deg); }
+
+/* --------------------------------------------------------------------------
+   Segmented controls and tabs
+   An inset track, and inactive options in readable text, not the faintest grey.
+   -------------------------------------------------------------------------- */
+.harness-shell :is(.view-tabs, .mode-seg, .seg-control) {
+  border-radius: calc(var(--btn-r) + 2px);
+  border-color: color-mix(in srgb, var(--color-text) 11%, var(--color-line));
+  background: color-mix(in srgb, var(--color-canvas) 62%, var(--color-surface));
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / .35);
+}
+.harness-shell .mode-seg { height: 40px; padding: 3px; }
+.harness-shell .mode-seg button { height: 32px; padding: 0 14px; font-size: 12.5px; border-radius: calc(var(--btn-r) - 2px); }
+.harness-shell .view-tabs button { border-radius: calc(var(--btn-r) - 2px); }
+.harness-shell .seg-option { border-radius: calc(var(--btn-r) - 2px); }
+.harness-shell .view-tabs button:not(.is-current),
+.harness-shell .seg-option:not(.is-on),
+.harness-shell .mode-seg button:not(.is-on) { color: var(--color-muted); }
+.harness-shell .view-tabs button:not(.is-current):hover,
+.harness-shell .seg-option:not(.is-on):hover,
+.harness-shell .mode-seg button:not(.is-on):not(:disabled):hover { color: var(--color-text); }
+/* Weight stays at 500: only 400/500/600 are bundled, so 550 would snap to 600 and widen the strip. */
+.harness-shell .view-tabs button { font-weight: 500; }
+/* The sliding pill (motion-ui.css) gets a real edge so the active option is unmistakable. */
+.harness-shell :is(.view-tabs, .mode-seg, .seg-control)[data-ind]::before {
+  border-radius: calc(var(--btn-r) - 2px);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-text) 16%, transparent), inset 0 1px 0 color-mix(in srgb, var(--color-text) 12%, transparent), 0 6px 14px -8px rgb(0 0 0 / .8);
+}
+.harness-shell .mode-seg[data-ind]::before { border-radius: calc(var(--btn-r) - 2px); }
+
+/* --------------------------------------------------------------------------
+   Smaller things
+   -------------------------------------------------------------------------- */
+.harness-shell .operator-chip { background: var(--btn-face); border-color: var(--btn-edge); color: var(--color-text); box-shadow: var(--btn-lit), var(--btn-drop); }
+.harness-shell .operator-chip:hover { background: var(--btn-face-hot); border-color: var(--btn-edge-hot); }
+.harness-shell .nav-btn { color: var(--color-muted); border-radius: calc(var(--btn-r) - 2px); }
+.harness-shell .nav-btn:hover:not(:disabled) { background: var(--btn-face-hot); box-shadow: var(--btn-lit); }
+
+/* Keyboard focus: a ring outside the edge, in the accent, on every button. */
+.harness-shell button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 85%, white);
+  outline-offset: 2px;
+}
+
+/* Touch: no hover lift on devices that cannot hover (it would stick after a tap).
+   Same specificity as the hover rules and later in the file, so it wins. */
+@media (hover: none) {
+  .harness-shell :is(.reset-button, .newtask-button, .test-button, .setup-btn:not(.primary), .deny-btn, .approval-deny, .tool-approval-actions .deny, .target-btn, .takeover-btn, .agent-cancel, .live-cancel, .rex-close, .agent-undo button, .handover-banner button, .options-button, .dialog-close, .model-trigger, .fast-control, .ultra-control, .question-choices button):hover:not(:disabled) { transform: none; }
+}
+@media (min-width: 721px) {
+  .harness-shell .top-actions { gap: 8px; }
+}
+@media (max-width: 720px) {
+  .harness-shell :is(.fast-control, .ultra-control) { padding: 0 11px 0 8px; }
+  .harness-shell .fast-control { gap: 7px; }
+}
+@media (max-width: 470px) {
+  .harness-shell :is(.fast-control, .ultra-control) { padding: 0 10px 0 7px; }
+  .harness-shell .model-trigger { min-width: 0; }
+}
+
+/* Reduced motion: keep the faces and states, drop the lift and the spring.
+   Matches the hover rules' specificity and comes after them. */
+.reduced-fx :is(.reset-button, .newtask-button, .test-button, .setup-btn:not(.primary), .deny-btn, .approval-deny, .tool-approval-actions .deny, .target-btn, .takeover-btn, .agent-cancel, .live-cancel, .rex-close, .agent-undo button, .handover-banner button, .options-button, .dialog-close, .model-trigger, .fast-control, .ultra-control, .question-choices button):hover:not(:disabled) { transform: none; }
+.reduced-fx :is(.reset-button, .newtask-button, .test-button, .setup-btn:not(.primary), .deny-btn, .approval-deny, .tool-approval-actions .deny, .target-btn, .takeover-btn, .agent-cancel, .live-cancel, .rex-close, .agent-undo button, .handover-banner button, .options-button, .dialog-close, .model-trigger, .fast-control, .ultra-control, .question-choices button):active:not(:disabled) { transform: none; }
