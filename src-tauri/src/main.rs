@@ -21,7 +21,8 @@ use rex_preview::{
 use rex_providers::{
     AgentSnapshot, AutonomousRunService, Budgets, FileSecretStore, LiveRunService, ModelCatalog,
     ProviderError, ProviderService, ProviderSummary, RunSnapshot, SearchProvider,
-    SearchProviderSummary, SearchRouter, UreqTransport,
+    SearchProviderSummary, SearchRouter, SignInSessions, SignInState, SignInTicket, SignOutReport,
+    UreqTransport, CHATGPT_SIGN_IN_TIMEOUT,
 };
 use rex_search::{IndexHit, IndexedDocument, LocalIndex, SearchRequest, SearchResponse};
 use rex_tools::{CallState, PreparedCall, ToolRequest, ToolResult, ToolRuntime};
@@ -159,6 +160,46 @@ fn provider_refresh(
 #[tauri::command]
 fn provider_catalog(service: State<'_, Arc<Service>>, provider: String) -> Option<ModelCatalog> {
     service.catalog(&provider)
+}
+
+/// Start "Continue with ChatGPT": open the system browser on the one-shot
+/// loopback launch link and wait for the sign-in in the background. Refused
+/// with a reason until REX is released as open source. The ticket and every
+/// later state carry no credential.
+#[tauri::command]
+fn chatgpt_sign_in_start(
+    service: State<'_, Arc<Service>>,
+    sessions: State<'_, Arc<SignInSessions>>,
+    force_consent: Option<bool>,
+) -> Result<SignInTicket, ProviderError> {
+    let force = force_consent.unwrap_or(false);
+    let begin = Arc::clone(service.inner());
+    let finish = Arc::clone(service.inner());
+    sessions.start(
+        move || begin.chatgpt_begin_sign_in(force),
+        move |signin, cancel| finish.chatgpt_complete(signin, CHATGPT_SIGN_IN_TIMEOUT, cancel),
+        CHATGPT_SIGN_IN_TIMEOUT,
+        true,
+    )
+}
+
+#[tauri::command]
+fn chatgpt_sign_in_poll(
+    sessions: State<'_, Arc<SignInSessions>>,
+    attempt: String,
+) -> Option<SignInState> {
+    sessions.poll(&attempt)
+}
+
+#[tauri::command]
+fn chatgpt_sign_in_cancel(sessions: State<'_, Arc<SignInSessions>>, attempt: String) -> bool {
+    sessions.cancel(&attempt)
+}
+
+/// Revoke the renewable session at OpenAI and clear the tokens here.
+#[tauri::command]
+fn chatgpt_sign_out(service: State<'_, Arc<Service>>) -> Result<SignOutReport, ProviderError> {
+    service.chatgpt_sign_out()
 }
 
 /// Run a bounded, robots-aware live evidence search over explicit public seeds.
@@ -1476,6 +1517,7 @@ fn main() {
     // tauri_plugin_updater once TAURI_SIGNING_PRIVATE_KEY exists.
     tauri::Builder::default()
         .manage(service)
+        .manage(Arc::new(SignInSessions::new()))
         .manage(search_service)
         .manage(tools)
         .manage(preview)
@@ -1506,6 +1548,10 @@ fn main() {
             provider_clear_key,
             provider_refresh,
             provider_catalog,
+            chatgpt_sign_in_start,
+            chatgpt_sign_in_poll,
+            chatgpt_sign_in_cancel,
+            chatgpt_sign_out,
             search_live,
             search_provider_summaries,
             search_provider_set_key,

@@ -437,6 +437,12 @@ fn explore_tool_definitions(protocol: ProviderProtocol, kind: ExplorerKind) -> V
                 .map(|d| json!({"type":"function","function":{"name": d["name"], "description": d["description"], "parameters": lowercase_schema(d["parameters"].clone())}}))
                 .collect(),
         ),
+        ProviderProtocol::OpenAiResponses => crate::responses::namespace_tools(
+            decls
+                .into_iter()
+                .map(|d| json!({"name": d["name"], "description": d["description"], "parameters": lowercase_schema(d["parameters"].clone())}))
+                .collect(),
+        ),
     }
 }
 
@@ -499,6 +505,23 @@ fn build_explore_request(
                 "tool_choice":"auto","temperature":0.2,"max_tokens":4096})
             .to_string()
         }
+        // history is the replayed output items, each turn's results after them
+        ProviderProtocol::OpenAiResponses => {
+            let mut input = vec![crate::responses::user_item(&opening)];
+            for pair in pairs {
+                input.extend(pair.model_parts.iter().cloned());
+                input.extend(pair.response_parts.iter().cloned());
+            }
+            if !note.is_empty() {
+                input.push(crate::responses::user_item(note));
+            }
+            crate::responses::request(
+                model,
+                kind.system(),
+                &input,
+                Some(explore_tool_definitions(protocol, kind)),
+            )
+        }
     }
 }
 
@@ -511,6 +534,8 @@ fn fallback_part(protocol: ProviderProtocol, name: &str, id: &str, args: &Value)
         ProviderProtocol::OpenAiCompatible => {
             json!({"id": id,"type":"function","function":{"name": name,"arguments": args.to_string()}})
         }
+        ProviderProtocol::OpenAiResponses => json!({"type":"function_call","call_id": id,
+            "name": name,"namespace": crate::responses::NAMESPACE,"arguments": args.to_string()}),
     }
 }
 
@@ -580,6 +605,8 @@ pub(super) fn run_explore<T: Transport, A: Fn(&PreparedCall) -> ChildApproval>(
             break;
         }
         let mut pair = TurnPair::default();
+        // Responses: the reasoning (and message) items the calls followed
+        pair.model_parts.extend(decoded.lead.iter().cloned());
         let mut first = true;
         for (call, raw) in decoded.calls {
             let (name, id, args, content, ok): (String, String, Value, String, bool) = match call {

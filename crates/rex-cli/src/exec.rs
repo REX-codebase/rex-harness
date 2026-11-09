@@ -40,7 +40,18 @@ impl<S: SecretStore> EnvSecretStore<S> {
 }
 
 impl<S: SecretStore> SecretStore for EnvSecretStore<S> {
+    fn lock_dir(&self) -> Option<PathBuf> {
+        self.inner.lock_dir()
+    }
+
     fn get_key(&self, provider: &str) -> Result<Option<String>, ProviderError> {
+        // Internal records (`<provider>#base_url`, `openai-chatgpt#oauth`) are
+        // not API keys: an environment variable must never stand in for one.
+        // Without this, `REX_API_KEY` would be read back as a saved sign-in or
+        // a base URL.
+        if provider.contains('#') {
+            return self.inner.get_key(provider);
+        }
         let name = Self::env_name(provider);
         if let Ok(v) = std::env::var(&name) {
             let v = v.trim().to_string();
@@ -483,6 +494,10 @@ pub fn execute(mut opts: ExecOptions) -> Result<ExecOutput, ExecError> {
             opts.provider
         )));
     }
+    if opts.provider == "openai-chatgpt" {
+        // refuse before staging a workspace or starting anything
+        rex_providers::policy::chatgpt_plan_route().map_err(ExecError::usage)?;
+    }
 
     // Proof contract: load `.rex/policy.json` from the source workspace
     // before anything else, and fail closed on a malformed contract.
@@ -699,6 +714,12 @@ pub fn execute(mut opts: ExecOptions) -> Result<ExecOutput, ExecError> {
                 opts.provider
             ),
             None => eprintln!("rex: run {run_id} started (provider {})", opts.provider),
+        }
+        if opts.provider == "openai-chatgpt" {
+            eprintln!(
+                "rex: using your ChatGPT plan; review or limit usage at {}",
+                rex_providers::CHATGPT_USAGE_URL
+            );
         }
     }
     // `rex serve` registers the live run here.

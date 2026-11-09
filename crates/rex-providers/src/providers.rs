@@ -7,6 +7,11 @@ pub enum ProviderProtocol {
     Gemini,
     Anthropic,
     OpenAiCompatible,
+    /// OpenAI's Responses API, as served to a ChatGPT-plan OAuth token:
+    /// `POST /responses` with `store: false` and `stream: true`, the whole
+    /// history replayed in `input`, and the reply read from the stream's
+    /// terminal event.
+    OpenAiResponses,
 }
 
 /// How the backend can learn the provider's model list.
@@ -17,6 +22,10 @@ pub enum ModelDiscovery {
     Native,
     /// OpenAI-compatible `GET /models`.
     OpenAiModels,
+    /// `GET /models` as a ChatGPT-plan token sees it: a `models` array of
+    /// `{slug, display_name, visibility}`, of which `visibility: "list"` are
+    /// meant for display.
+    ChatGptPlanModels,
     /// No listing API; the user must type a model ID.
     Manual,
 }
@@ -55,6 +64,17 @@ pub fn registry() -> Vec<ProviderSpec> {
             protocol: ProviderProtocol::OpenAiCompatible,
             default_base_url: Some("https://api.openai.com/v1"),
             discovery: ModelDiscovery::OpenAiModels,
+        },
+        // Your ChatGPT plan, through OpenAI's own "Sign in with ChatGPT" OAuth
+        // for open-source clients. Credentials come only from that sign-in
+        // (`chatgpt_oauth`), never from a pasted key, and the route is gated
+        // by `policy::OPEN_SOURCE_RELEASE`.
+        ProviderSpec {
+            id: "openai-chatgpt",
+            name: "OpenAI (ChatGPT plan)",
+            protocol: ProviderProtocol::OpenAiResponses,
+            default_base_url: Some("https://api.openai.com/v1"),
+            discovery: ModelDiscovery::ChatGptPlanModels,
         },
         ProviderSpec {
             id: "xai",

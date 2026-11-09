@@ -16,7 +16,10 @@ export type ProviderErrorShape =
   | { kind: "unsupported"; detail: string }
   | { kind: "empty_catalog" }
   | { kind: "invalid_response"; detail: string }
-  | { kind: "store"; detail: string };
+  | { kind: "store"; detail: string }
+  // A credential that cannot be used, with the words to act on (sign in
+  // again, enable plan usage, the route is not open yet). Never a secret.
+  | { kind: "credential"; detail: string };
 
 export interface ModelInfo {
   id: string;
@@ -34,7 +37,7 @@ export interface ModelCatalog {
 // Access policy verdict mirrored from the Rust backend (policy.rs).
 export interface AccessPolicy {
   kind: "api-key" | "subscription-key" | "subscription-oauth";
-  status: "supported" | "tool-scoped" | "not-permitted" | "not-offered";
+  status: "supported" | "tool-scoped" | "not-permitted" | "not-offered" | "undocumented" | "partner-gated" | "open-source-only";
   label: string;
   detail: string;
   sources: string[];
@@ -44,14 +47,56 @@ export interface AccessPolicy {
 export interface ProviderSummary {
   id: string;
   name: string;
-  protocol: "gemini" | "anthropic" | "openai-compatible";
-  discovery: "native" | "openai-models" | "manual";
+  protocol: "gemini" | "anthropic" | "openai-compatible" | "open-ai-compatible" | "open-ai-responses";
+  discovery: "native" | "openai-models" | "open-ai-models" | "chat-gpt-plan-models" | "manual";
   access?: AccessPolicy[];
   base_url: string | null;
+  /** A stored key, or for the ChatGPT plan a sign-in that allows plan usage. */
   has_key: boolean;
+  /** The ChatGPT sign-in (no credential). Present only while that route is open. */
+  signin?: ChatGptStatus;
   catalog: ModelCatalog | null;
   last_error?: ProviderErrorShape;
 }
+
+// ---- Continue with ChatGPT (use your ChatGPT plan) --------------------------
+// The backend runs the whole OAuth flow; these only start it, ask how it went,
+// and sign out. Nothing here ever holds a token or the real authorization URL.
+
+export interface ChatGptStatus {
+  signed_in: boolean;
+  email: string | null;
+  plan_usage: boolean;
+  access_token_expires_at: number | null;
+}
+
+export interface SignInTicket {
+  attempt: string;
+  /** One-shot loopback link that redirects to OpenAI. Names no account. */
+  launch_url: string;
+  /** First sign-in on this machine: OpenAI asks the user to approve REX. */
+  registering: boolean;
+  timeout_secs: number;
+  /** The backend already opened the system browser. */
+  opened: boolean;
+}
+
+export type SignInState =
+  | { state: "waiting" }
+  | { state: "done"; email: string | null; plan_usage: boolean }
+  | { state: "failed"; error: ProviderErrorShape }
+  | { state: "cancelled" };
+
+export interface SignOutReport {
+  revoked: boolean;
+  note: string | null;
+}
+
+export type SignInStart = { ok: true; ticket: SignInTicket } | { ok: false; error: ProviderErrorShape };
+
+export const CHATGPT_PROVIDER = "openai-chatgpt";
+/** Where users review and limit what REX may spend of their ChatGPT plan. */
+export const CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage";
 
 export type RefreshResult = { ok: true; catalog: ModelCatalog } | { ok: false; error: ProviderErrorShape };
 export type WriteResult = { ok: true } | { ok: false; error: ProviderErrorShape };
@@ -74,6 +119,8 @@ export function describeError(error: ProviderErrorShape): string {
       return "Unexpected provider response";
     case "store":
       return "Credential store error";
+    case "credential":
+      return error.detail;
   }
 }
 
@@ -221,3 +268,50 @@ export interface ToolReceipt { started_at_ms:number; duration_ms:number; target:
 export interface ToolResult { call_id:string; ok:boolean; tool:string; state:"pending_approval"|"ready"|"denied"|"cancelled"|"executed"; output:string|null; error:{kind:string;detail:string}|null; receipt:ToolReceipt; }
 export async function resolveToolApproval(callId:string,approved:boolean):Promise<ToolResult>{const b=await backend();if(b.kind!=="tauri")throw new Error("desktop runtime required");await b.invoke!("tool_resolve_approval",{callId,approved});return b.invoke!<ToolResult>("tool_execute",{callId});}
 export async function cancelToolCall(callId:string):Promise<void>{const b=await backend();if(b.kind!=="tauri")return;await b.invoke!("tool_cancel",{callId});}
+
+export async function startChatGptSignIn(forceConsent = false): Promise<SignInStart> {
+  const b = await backend();
+  if (b.kind === "tauri") {
+    try {
+      const ticket = await b.invoke!<SignInTicket>("chatgpt_sign_in_start", { forceConsent });
+      return { ok: true, ticket };
+    } catch (error) {
+      return { ok: false, error: error as ProviderErrorShape };
+    }
+  }
+  return request<SignInStart>(`/api/providers/${CHATGPT_PROVIDER}/signin`, {
+    method: "POST",
+    body: JSON.stringify({ force_consent: forceConsent }),
+  });
+}
+
+export async function pollChatGptSignIn(attempt: string): Promise<SignInState | null> {
+  const b = await backend();
+  if (b.kind === "tauri") return b.invoke!<SignInState | null>("chatgpt_sign_in_poll", { attempt });
+  try {
+    return await request<SignInState>(`/api/providers/${CHATGPT_PROVIDER}/signin/${encodeURIComponent(attempt)}`);
+  } catch {
+    return null;
+  }
+}
+
+export async function cancelChatGptSignIn(attempt: string): Promise<void> {
+  const b = await backend();
+  if (b.kind === "tauri") {
+    await b.invoke!("chatgpt_sign_in_cancel", { attempt });
+    return;
+  }
+  await request(`/api/providers/${CHATGPT_PROVIDER}/signin/${encodeURIComponent(attempt)}`, { method: "DELETE" });
+}
+
+export async function signOutChatGpt(): Promise<{ ok: true; report: SignOutReport } | { ok: false; error: ProviderErrorShape }> {
+  const b = await backend();
+  if (b.kind === "tauri") {
+    try {
+      return { ok: true, report: await b.invoke!<SignOutReport>("chatgpt_sign_out") };
+    } catch (error) {
+      return { ok: false, error: error as ProviderErrorShape };
+    }
+  }
+  return request(`/api/providers/${CHATGPT_PROVIDER}/signout`, { method: "POST", body: "{}" });
+}

@@ -631,7 +631,7 @@ mod tests {
     use super::*;
     use limits::{LimitSource, ModelLimits, DEFAULT_MAX_OUTPUT};
     use wire::make_result;
-    use ProviderProtocol::{Anthropic, Gemini, OpenAiCompatible};
+    use ProviderProtocol::{Anthropic, Gemini, OpenAiCompatible, OpenAiResponses};
 
     fn policy(window: u64) -> ContextPolicy {
         ContextPolicy::for_limits(&ModelLimits {
@@ -674,6 +674,13 @@ mod tests {
             OpenAiCompatible => (
                 vec![
                     json!({"id":id,"type":"function","function":{"name":"read_file","arguments":json!({"path":format!("src/m{n}.rs")}).to_string()}}),
+                ],
+                vec![make_result(p, "read_file", &id, true, &body)],
+            ),
+            OpenAiResponses => (
+                vec![
+                    json!({"type":"reasoning","id":format!("rs_{n}"),"summary":[],"encrypted_content":"enc"}),
+                    json!({"type":"function_call","id":format!("fc_{n}"),"call_id":id,"name":"read_file","namespace":"rex","arguments":json!({"path":format!("src/m{n}.rs")}).to_string()}),
                 ],
                 vec![make_result(p, "read_file", &id, true, &body)],
             ),

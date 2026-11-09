@@ -236,12 +236,20 @@ transcript's replay after a simulated crash; pairing repair on all three wire
 shapes; BM25 ranking and staleness; and, through the real loop against a scripted
 transport, a stub-and-recall run, model summaries, the mechanical fallback,
 overflow recovery (and giving up), resume, and **forty-turn runs on the Gemini,
-Anthropic and OpenAI-compatible shapes whose every request is checked for the
-invariants those APIs enforce** (first message from the user, every call answered
-by its results, unique ids). A mutation check confirmed those tests fail when the
+Anthropic, OpenAI-compatible and OpenAI Responses (ChatGPT plan) shapes whose
+every request is checked for the invariants those APIs enforce** (first message
+from the user, every call answered by its results, unique ids; on the Responses
+route also `store: false`, `stream: true`, no system item, none of the fields the
+route rejects, tools in one namespace, reasoning replayed in front of its call).
+The Responses run also checks that a fresh access token is presented every turn. A mutation check confirmed those tests fail when the
 opening user message is removed.
 
 **Not verified:**
+
+* **The Responses (ChatGPT plan) shape has never met the live route**, which is
+  closed until REX is open-sourced (`docs/chatgpt-sign-in.md`). Its request and
+  stream handling follow OpenAI's preview documentation and are tested against a
+  scripted endpoint only.
 
 * **No live provider was called.** This was built in a sandbox with no provider
   keys. The Anthropic `cache_control` placement, Gemini replaying earlier turns

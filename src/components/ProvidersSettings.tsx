@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { PROVIDER_PRESETS, accessStatusLabel, protocolLabel, type ProviderDraft, type ProviderPreset } from "../data/providers";
-import { backendKind, describeError, listSummaries, refreshCatalog, type BackendKind, type ProviderSummary } from "../data/backend";
+import { CHATGPT_PROVIDER, backendKind, describeError, listSummaries, refreshCatalog, type BackendKind, type ProviderSummary } from "../data/backend";
+import { ChatGptSignIn } from "./ChatGptPlan";
 
 function makeDraft(preset: ProviderPreset): ProviderDraft {
   return {
@@ -43,8 +44,24 @@ export function ProvidersSettings() {
       [selected.id]: { ...current[selected.id], status: "draft", ...patch },
     }));
   const isCompatible = selected.protocol === "openai-compatible";
+  const isChatGptPlan = selected.id === CHATGPT_PROVIDER;
+  const reloadSummaries = async () => {
+    try {
+      const summaries = await listSummaries();
+      setLive(Object.fromEntries(summaries.map((s) => [s.id, s])));
+    } catch {
+      /* backend went away; keep what is shown */
+    }
+  };
   const liveState = live[selected.id];
-  const discoveryLabel = selected.modelDiscovery === "native" ? "Native model list" : selected.modelDiscovery === "openai-models" ? "Try GET /models" : "Manual model ID";
+  const discoveryLabel =
+    selected.modelDiscovery === "native"
+      ? "Native model list"
+      : selected.modelDiscovery === "openai-models"
+        ? "Try GET /models"
+        : selected.modelDiscovery === "chatgpt-plan-models"
+          ? "Models your ChatGPT plan can use"
+          : "Manual model ID";
   const statusLabel = draft.status === "draft" ? "Unsaved draft" : draft.status === "needs-runtime" ? "Draft · runtime needed" : "Not connected";
 
   return (
@@ -93,10 +110,23 @@ export function ProvidersSettings() {
               </div>
             ))}
             <p className="policy-note">
-              Verdicts come from each provider's official documentation, verified 2026-09-19. REX connects an account only where the
-              provider clearly permits third-party harness use. Full matrix: docs/subscription-policy.md.
+              Verdicts come from each provider's official documentation, verified 2026-09-19 (the OpenAI ChatGPT route, 2026-11-09). REX
+              connects an account only where the provider clearly permits third-party harness use. Full matrix: docs/subscription-policy.md.
             </p>
           </div>
+        )}
+
+        {isChatGptPlan && (
+          <ChatGptSignIn
+            summary={liveState}
+            onChange={async (change) => {
+              await reloadSummaries();
+              if (change === "signed-in") {
+                await refreshCatalog(CHATGPT_PROVIDER);
+                await reloadSummaries();
+              }
+            }}
+          />
         )}
 
         <div className="provider-form">
@@ -120,14 +150,14 @@ export function ProvidersSettings() {
               <small>Editable preset. Compatibility is checked per endpoint, not assumed.</small>
             </label>
           )}
-          <label>
+          {!isChatGptPlan && <label>
             <span>API key</span>
             <button type="button" className="locked-field" disabled>
               {backend ? (liveState?.has_key ? "Stored by Rust backend" : "Not stored") : "Desktop keychain"}{" "}
               <b>{backend ? (liveState?.has_key ? "Connected" : "Missing") : "Pending runtime"}</b>
             </button>
             <small>{backend ? "Keys live in the backend credential store, never in this interface. Add one from the model menu in the task box." : "No key is entered or stored in this frontend preview."}</small>
-          </label>
+          </label>}
           <label>
             <span>Model discovery</span>
             <button type="button" className="locked-field" disabled>

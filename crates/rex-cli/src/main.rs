@@ -10,6 +10,7 @@ mod config;
 mod deadman;
 mod exec;
 mod ledger;
+mod login;
 mod policy;
 mod provenance;
 mod ps;
@@ -53,13 +54,17 @@ pub(crate) fn usage() -> &'static str {
      \x20 rex ps [--all] [--json] [--prune] [--limit N]\n\
      \x20 rex config [get KEY | set KEY VALUE]\n\
      \x20 rex show RUN_ID [--json]\n\
+     \x20 rex login chatgpt [--no-browser] [--force-consent] [--json]\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20sign in so REX can use your ChatGPT plan\n\
+     \x20 rex logout chatgpt [--json]\n\
+     \x20 rex auth status [--json]\n\
      \x20 rex keygen [--force]\n\
      \x20 rex verify RECEIPT.json [--public-key BASE64]\n\
      \x20 rex --version\n\
      \n\
      options:\n\
      \x20 --task TEXT          task description (or pass as trailing words)\n\
-     \x20 --provider NAME      gemini|anthropic|openai|xai|deepseek|kimi|kimi-coding|qwen|glm|local\n\
+     \x20 --provider NAME      gemini|anthropic|openai|openai-chatgpt|xai|deepseek|kimi|kimi-coding|qwen|glm|local\n\
      \x20                      (default: $REX_PROVIDER or anthropic)\n\
      \x20 --model ID           model id (default: $REX_MODEL or provider default)\n\
      \x20 --workspace DIR      directory to copy into the run sandbox\n\
@@ -87,7 +92,8 @@ pub(crate) fn usage() -> &'static str {
      \n\
      credentials: $REX_<PROVIDER>_API_KEY wins, then $REX_API_KEY;\n\
      otherwise the file credential store under $REX_STATE_DIR\n\
-     (default ~/.rex/harness) is used.\n\
+     (default ~/.rex/harness) is used. `openai-chatgpt` uses your ChatGPT\n\
+     plan through `rex login chatgpt` (never a pasted key).\n\
      \n\
      exit codes: 0 completed · 2 usage/config/approval needed ·\n\
      \x203 run ended without completing · 1 internal error\n"
@@ -378,6 +384,9 @@ fn main() -> ExitCode {
         Some("ps") => crate::ps::run_ps(&args[1..]),
         Some("config") => crate::config::run_config(&args[1..]),
         Some("show") => run_show(&args[1..]),
+        Some("login") => crate::login::run_login(&args[1..]),
+        Some("logout") => crate::login::run_logout(&args[1..]),
+        Some("auth") => crate::login::run_auth(&args[1..]),
         Some("keygen") => run_keygen(&args[1..]).map(|_| 0),
         Some("verify") => run_verify(&args[1..]),
         Some(other) => Err(ExecError::usage(format!(

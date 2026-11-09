@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PROVIDER_PRESETS, accessStatusLabel, type AccessLine, type AccessStatus } from "../data/providers";
+import { PROVIDER_PRESETS, accessStatusFor, accessStatusLabel, type AccessLine, type AccessStatus } from "../data/providers";
+import { ChatGptSignIn, ManageUsageLink } from "./ChatGptPlan";
 import {
+  CHATGPT_PROVIDER,
   backendKind,
   clearProviderKey,
   describeError,
@@ -192,6 +194,31 @@ export function ModelStatus() {
     await reload();
   };
 
+  // The ChatGPT sign-in changed: pull the new state, and on a sign-in fetch the
+  // models the plan can use and pick the first one (the server's default) if
+  // nothing is chosen yet.
+  const onChatGptChange = async (change: "signed-in" | "signed-out") => {
+    if (change === "signed-out") {
+      if (selection?.provider === CHATGPT_PROVIDER) {
+        setSelection(null);
+        try {
+          window.localStorage.removeItem(SELECTION_KEY);
+        } catch {
+          /* ignore */
+        }
+      }
+      await reload();
+      return;
+    }
+    await reload();
+    const fetched = await refreshCatalog(CHATGPT_PROVIDER);
+    if (fetched.ok && !selection && fetched.catalog.models.length > 0) {
+      const first = fetched.catalog.models[0];
+      choose({ provider: CHATGPT_PROVIDER, id: first.id, label: first.label });
+    }
+    await reload();
+  };
+
   const totalModels = summaries.reduce((sum, s) => sum + (s.catalog?.models.length ?? 0), 0);
   const connected = summaries.filter((s) => s.has_key || s.catalog);
   const selectedPreset = PROVIDER_PRESETS.find((p) => p.id === provider)!;
@@ -222,6 +249,12 @@ export function ModelStatus() {
         </span>
         <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
       </button>
+      {selection?.provider === CHATGPT_PROVIDER && (
+        <span className="plan-chip">
+          <b>Using ChatGPT plan</b>
+          <ManageUsageLink />
+        </span>
+      )}
 
       {open && (
         <div role="menu" aria-label="Models and provider connections" className="model-menu provider-menu live">
@@ -349,8 +382,21 @@ export function ModelStatus() {
             {flow === "subscription" ? (
               <>
                 <p className="dialog-copy">Only plans whose provider officially allows third-party harness use can connect. REX refuses the rest - each row says why.</p>
-                <SubscriptionChoices onConnect={(id) => { setProvider(id); setFlow("api"); }} />
+                <SubscriptionChoices summaries={summaries} onConnect={(id) => { setProvider(id); setFlow("api"); }} />
                 <p className="dialog-truth"><span aria-hidden="true">i</span>Verdicts come from each provider's official documentation, verified 2026-09-19. Sources and reasoning: docs/subscription-policy.md.</p>
+              </>
+            ) : provider === CHATGPT_PROVIDER ? (
+              <>
+                <label className="provider-field-wide chatgpt-provider-pick">
+                  <span className="dialog-copy">Provider</span>
+                  <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+                    {PROVIDER_PRESETS.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                  </select>
+                </label>
+                <ChatGptSignIn summary={summaries.find((s) => s.id === CHATGPT_PROVIDER)} onChange={onChatGptChange} />
+                {selectedPreset.note && (
+                  <p className="dialog-truth"><span aria-hidden="true">i</span>{selectedPreset.note}</p>
+                )}
               </>
             ) : (
               <>
@@ -500,20 +546,26 @@ function PreviewPicker({ open, setOpen, flow, launch, setFlow, provider, setProv
 
 type SubscriptionRow = { providerId: string; line: AccessLine };
 
-function subscriptionRows(): SubscriptionRow[] {
-  const rank = (status: AccessStatus) => (status === "supported" ? 0 : status === "tool-scoped" ? 1 : status === "not-offered" ? 2 : 3);
+type Verdicts = Parameters<typeof accessStatusFor>[0];
+
+function subscriptionRows(summaries: Verdicts): SubscriptionRow[] {
+  const rank = (status: AccessStatus) =>
+    status === "supported" ? 0 : status === "open-source-only" ? 1 : status === "tool-scoped" ? 2 : status === "not-offered" ? 3 : 4;
   return PROVIDER_PRESETS.flatMap((preset) =>
-    preset.access.filter((line) => line.kind !== "api-key").map((line) => ({ providerId: preset.id, line }))
+    preset.access
+      .filter((line) => line.kind !== "api-key")
+      // the backend's verdict wins when it is running: a route that opens does so here too
+      .map((line) => ({ providerId: preset.id, line: { ...line, status: accessStatusFor(summaries, preset.id, line) } }))
   ).sort((a, b) => rank(a.line.status) - rank(b.line.status));
 }
 
 // Every consumer-subscription route REX evaluated, with its verdict. Only a
 // "supported" row is clickable, and it connects through the mechanism the
 // provider officially documents (for Kimi for Coding: its own API key).
-function SubscriptionChoices({ onConnect }: { onConnect: (providerId: string) => void }) {
+function SubscriptionChoices({ onConnect, summaries = [] }: { onConnect: (providerId: string) => void; summaries?: Verdicts }) {
   return (
     <div className="connect-choice-list is-scrollable" aria-label="Subscription verdicts">
-      {subscriptionRows().map(({ providerId, line }) => (
+      {subscriptionRows(summaries).map(({ providerId, line }) => (
         <button
           key={`${providerId}-${line.label}`}
           type="button"

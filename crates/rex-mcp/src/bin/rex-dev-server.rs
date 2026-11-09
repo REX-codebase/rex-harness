@@ -50,6 +50,19 @@ impl SecretStore for Store {
             Store::File(s) => s.clear_key(provider),
         }
     }
+    fn lock_dir(&self) -> Option<std::path::PathBuf> {
+        match self {
+            Store::Memory(s) => s.lock_dir(),
+            Store::File(s) => s.lock_dir(),
+        }
+    }
+}
+
+/// The ChatGPT sign-in that may be waiting for its browser. One per process.
+fn sign_ins() -> &'static rex_providers::SignInSessions {
+    static SESSIONS: std::sync::OnceLock<rex_providers::SignInSessions> =
+        std::sync::OnceLock::new();
+    SESSIONS.get_or_init(rex_providers::SignInSessions::new)
 }
 
 type Live = LiveRunService<Store, UreqTransport>;
@@ -344,6 +357,73 @@ fn route(
         ),
         ("GET", ["api", "providers"]) => {
             json_response(200, &serde_json::to_string(&service.summaries()).unwrap())
+        }
+        // ---- Continue with ChatGPT -------------------------------------------
+        // The sidecar answers any web page that can reach 127.0.0.1, so it never
+        // opens the browser itself: it hands back the one-shot launch link and
+        // the page opens it on a user click.
+        ("POST", ["api", "providers", "openai-chatgpt", "signin"]) => {
+            let parsed: serde_json::Value =
+                serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+            let force = parsed
+                .get("force_consent")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let (begin, finish) = (Arc::clone(live), Arc::clone(live));
+            match sign_ins().start(
+                move || begin.service().chatgpt_begin_sign_in(force),
+                move |signin, cancel| {
+                    finish.service().chatgpt_complete(
+                        signin,
+                        rex_providers::CHATGPT_SIGN_IN_TIMEOUT,
+                        cancel,
+                    )
+                },
+                rex_providers::CHATGPT_SIGN_IN_TIMEOUT,
+                false,
+            ) {
+                Ok(ticket) => json_response(
+                    200,
+                    &format!(
+                        "{{\"ok\":true,\"ticket\":{}}}",
+                        serde_json::to_string(&ticket).unwrap()
+                    ),
+                ),
+                Err(e) => json_response(
+                    200,
+                    &format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        serde_json::to_string(&e).unwrap()
+                    ),
+                ),
+            }
+        }
+        ("GET", ["api", "providers", "openai-chatgpt", "signin", attempt]) => {
+            match sign_ins().poll(attempt) {
+                Some(state) => json_response(200, &serde_json::to_string(&state).unwrap()),
+                None => json_response(404, "{\"error\":{\"kind\":\"unknown_attempt\"}}"),
+            }
+        }
+        ("DELETE", ["api", "providers", "openai-chatgpt", "signin", attempt]) => {
+            json_response(200, &format!("{{\"ok\":{}}}", sign_ins().cancel(attempt)))
+        }
+        ("POST", ["api", "providers", "openai-chatgpt", "signout"]) => {
+            match service.chatgpt_sign_out() {
+                Ok(report) => json_response(
+                    200,
+                    &format!(
+                        "{{\"ok\":true,\"report\":{}}}",
+                        serde_json::to_string(&report).unwrap()
+                    ),
+                ),
+                Err(e) => json_response(
+                    200,
+                    &format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        serde_json::to_string(&e).unwrap()
+                    ),
+                ),
+            }
         }
         ("POST", ["api", "providers", id, "key"]) => {
             let parsed: serde_json::Value =

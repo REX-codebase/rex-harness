@@ -453,21 +453,150 @@ fn supported_subscription_routes_are_grounded() {
 }
 
 #[test]
-fn subscription_oauth_is_never_offered() {
-    // No consumer-subscription OAuth/login flow is currently documented for
-    // third-party harnesses by any provider in the registry. If one ever is,
-    // this test forces an explicit, sourced review instead of a quiet add.
+fn subscription_oauth_is_offered_only_on_openais_documented_route() {
+    // Consumer-subscription sign-in is not documented for third-party
+    // harnesses by any provider except OpenAI, whose Sign in with ChatGPT is
+    // open to open-source, locally hosted apps. Any other route offered as
+    // supported would be a quiet add; this test forces a sourced review.
+    let mut openai_rows = 0;
     for spec in registry() {
         for policy in access_policies(spec.id) {
-            assert!(
-                !(policy.kind == AccessKind::SubscriptionOauth
-                    && policy.status == PolicyStatus::Supported),
-                "{} / {}: consumer-subscription OAuth must not be offered",
-                spec.id,
-                policy.label
-            );
+            if policy.kind != AccessKind::SubscriptionOauth {
+                continue;
+            }
+            let openai_route = spec.id == "openai" || spec.id == "openai-chatgpt";
+            if policy.status == PolicyStatus::Supported {
+                assert!(
+                    openai_route,
+                    "{} / {}: consumer-subscription OAuth must not be offered",
+                    spec.id, policy.label
+                );
+            }
+            if openai_route {
+                openai_rows += 1;
+                assert!(
+                    policy.sources.len() >= 2
+                        && policy
+                            .sources
+                            .iter()
+                            .any(|s| s.starts_with("https://developers.openai.com/siwc/")),
+                    "{} / {}: the OpenAI route must cite its Sign in with ChatGPT documentation",
+                    spec.id,
+                    policy.label
+                );
+                // Open only once REX is released as open source, and exactly then.
+                let expected = if OPEN_SOURCE_RELEASE {
+                    PolicyStatus::Supported
+                } else {
+                    PolicyStatus::OpenSourceOnly
+                };
+                assert_eq!(policy.status, expected, "{} / {}", spec.id, policy.label);
+            }
         }
     }
+    assert!(
+        openai_rows >= 2,
+        "both the OpenAI and the ChatGPT-plan providers describe the route"
+    );
+}
+
+#[test]
+fn the_release_switch_cannot_be_thrown_before_the_release() {
+    // `OPEN_SOURCE_RELEASE` is the claim the whole ChatGPT-plan route rests
+    // on: OpenAI offers it to open-source, locally hosted clients. While any
+    // crate still declares a proprietary licence, or the repository has no
+    // licence file, the claim is false and the switch must stay off.
+    if !OPEN_SOURCE_RELEASE {
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let has_licence_file = std::fs::read_dir(&root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| {
+            let name = e.file_name().to_string_lossy().to_ascii_uppercase();
+            name.starts_with("LICENSE") || name.starts_with("COPYING")
+        });
+    assert!(
+        has_licence_file,
+        "OPEN_SOURCE_RELEASE is true but the repository has no LICENSE file"
+    );
+    for entry in std::fs::read_dir(root.join("crates")).unwrap().flatten() {
+        let manifest = entry.path().join("Cargo.toml");
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        assert!(
+            !text.lines().any(|l| {
+                let l = l.replace(' ', "").to_ascii_lowercase();
+                l.starts_with("license=") && l.contains("proprietary")
+            }),
+            "OPEN_SOURCE_RELEASE is true but {} still declares a proprietary licence",
+            manifest.display()
+        );
+    }
+}
+
+#[test]
+fn the_chatgpt_plan_route_is_closed_until_release() {
+    // Before the release nothing may start a sign-in, hand out a token, or
+    // accept a pasted one; the provider shows as unconnected.
+    if OPEN_SOURCE_RELEASE {
+        return;
+    }
+    let svc = service_with(ScriptedTransport::new(vec![]));
+    assert!(matches!(
+        svc.chatgpt_begin_sign_in(false),
+        Err(ProviderError::Credential(m)) if m.contains("not available yet")
+    ));
+    assert!(matches!(
+        svc.get_key("openai-chatgpt"),
+        Err(ProviderError::Credential(_))
+    ));
+    assert!(matches!(
+        svc.chatgpt_status(),
+        Err(ProviderError::Credential(_))
+    ));
+    let summary = svc
+        .summaries()
+        .into_iter()
+        .find(|s| s.id == "openai-chatgpt")
+        .expect("the ChatGPT plan provider is in the registry");
+    assert!(!summary.has_key);
+    assert!(summary.signin.is_none());
+    assert!(svc.transport().seen_urls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_pasted_key_is_never_accepted_for_the_chatgpt_plan() {
+    // Whatever the release state: the only credential for this provider is
+    // the one a sign-in issued.
+    let svc = service_with(ScriptedTransport::new(vec![]));
+    assert!(matches!(
+        svc.set_key("openai-chatgpt", "sk-pasted-token", None),
+        Err(ProviderError::Unsupported(_))
+    ));
+    assert!(
+        !svc.summaries()
+            .into_iter()
+            .find(|s| s.id == "openai-chatgpt")
+            .unwrap()
+            .has_key
+    );
+}
+
+#[test]
+fn after_release_the_chatgpt_plan_asks_for_a_sign_in_not_a_key() {
+    if !OPEN_SOURCE_RELEASE {
+        return;
+    }
+    let svc = service_with(ScriptedTransport::new(vec![]));
+    let err = svc.get_key("openai-chatgpt").unwrap_err();
+    assert!(
+        matches!(&err, ProviderError::Credential(m) if m.contains("not signed in")),
+        "{err}"
+    );
+    assert!(svc.chatgpt_status().is_ok());
 }
 
 #[test]
@@ -495,12 +624,19 @@ fn verified_dates_are_real_dates() {
             })
     };
     assert!(valid(VERIFIED_ON));
+    assert!(valid(OPENAI_SIWC_VERIFIED_ON));
+    assert!(OPENAI_SIWC_VERIFIED_ON >= VERIFIED_ON);
     for spec in registry() {
         for policy in access_policies(spec.id) {
             assert!(valid(policy.verified_on));
-            assert_eq!(
-                policy.verified_on, VERIFIED_ON,
-                "policy dates and the crate constant move together"
+            // a row re-verified later than the matrix carries its own date,
+            // and only the dates this crate knows are allowed
+            assert!(
+                policy.verified_on == VERIFIED_ON || policy.verified_on == OPENAI_SIWC_VERIFIED_ON,
+                "{} / {}: unknown verification date {}",
+                spec.id,
+                policy.label,
+                policy.verified_on
             );
         }
     }

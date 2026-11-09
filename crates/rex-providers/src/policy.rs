@@ -10,8 +10,44 @@
 
 use serde::Serialize;
 
-/// Day the sources behind every verdict were last checked (YYYY-MM-DD).
+/// Day the sources behind the verdict matrix were last checked (YYYY-MM-DD).
+/// A row checked more recently carries its own, later date.
 pub const VERIFIED_ON: &str = "2026-09-19";
+
+/// Day OpenAI's "Sign in with ChatGPT" contract was read from its own
+/// documentation (developers.openai.com/siwc). Only the OpenAI ChatGPT-plan
+/// rows were re-verified that day; no other row's date moves with it.
+pub const OPENAI_SIWC_VERIFIED_ON: &str = "2026-11-09";
+
+/// **The release switch for using a ChatGPT plan.**
+///
+/// OpenAI offers ChatGPT plan usage through Sign in with ChatGPT to
+/// open-source, locally hosted clients, and to selected partners and private
+/// clients on request: "ChatGPT plan usage is available to all open-source
+/// partners and selected private clients." REX is going to be open source but
+/// is not released yet, so this is `false` and the route is closed everywhere:
+/// sign-in, token use and runs all refuse.
+///
+/// Flip it to `true` in the commit that publishes REX under an open-source
+/// licence. A test refuses a `true` here while any crate still declares
+/// `license = "Proprietary"` or the repository has no LICENSE file, so the
+/// switch cannot be thrown before the release it stands for.
+pub const OPEN_SOURCE_RELEASE: bool = false;
+
+/// Whether a ChatGPT-plan sign-in may start or its token be used. Unit tests
+/// inside this crate run with the route open so the flow can be exercised;
+/// everything else follows [`OPEN_SOURCE_RELEASE`].
+pub fn chatgpt_plan_route() -> Result<(), String> {
+    gate(OPEN_SOURCE_RELEASE || cfg!(test))
+}
+
+fn gate(open: bool) -> Result<(), String> {
+    if open {
+        Ok(())
+    } else {
+        Err("Using a ChatGPT plan is not available yet. OpenAI offers it to open-source, locally hosted apps, and REX has not been released as open source. Use an OpenAI API key for now (docs/subscription-policy.md).".to_string())
+    }
+}
 
 /// How a provider account would be connected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -44,6 +80,11 @@ pub enum PolicyStatus {
     /// Provider officially supports named third-party integrations but has not
     /// published general self-service client registration; REX needs approval.
     PartnerGated,
+    /// The provider documents the route for open-source, locally hosted
+    /// clients, with self-service registration. REX qualifies once it is
+    /// released as open source (`OPEN_SOURCE_RELEASE`); until then the route
+    /// is closed, and it becomes `Supported` the moment the switch flips.
+    OpenSourceOnly,
     /// Route is not offered for another documented reason.
     NotOffered,
 }
@@ -94,6 +135,46 @@ const fn policy(
     }
 }
 
+const fn policy_on(
+    verified_on: &'static str,
+    kind: AccessKind,
+    status: PolicyStatus,
+    label: &'static str,
+    detail: &'static str,
+    sources: &'static [&'static str],
+) -> AccessPolicy {
+    AccessPolicy {
+        kind,
+        status,
+        label,
+        detail,
+        sources,
+        verified_on,
+    }
+}
+
+/// OpenAI's ChatGPT-plan route: supported once REX is released as open
+/// source, and described as open-source-only until then.
+fn chatgpt_plan_policy() -> AccessPolicy {
+    policy_on(
+        OPENAI_SIWC_VERIFIED_ON,
+        AccessKind::SubscriptionOauth,
+        if OPEN_SOURCE_RELEASE {
+            PolicyStatus::Supported
+        } else {
+            PolicyStatus::OpenSourceOnly
+        },
+        "Continue with ChatGPT",
+        "OpenAI documents Sign in with ChatGPT for open-source, locally hosted apps: the app registers itself at first sign-in (no client secret, no copied client ID), the user consents to spending their ChatGPT plan, and requests go to the public Responses API. REX will qualify once it is released as open source; until then the route stays closed.",
+        &[
+            "https://developers.openai.com/siwc/quickstart",
+            "https://developers.openai.com/siwc/token-sharing-open-source",
+            "https://developers.openai.com/siwc/token-sharing-open-source/sign-in",
+            "https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations",
+        ],
+    )
+}
+
 /// The access routes evaluated for one registry provider. The frontend reads
 /// these through `ProviderSummary::access`; anything not marked
 /// `PolicyStatus::Supported` is not connectable in REX, only explained.
@@ -133,19 +214,11 @@ pub fn access_policies(provider: &str) -> Vec<AccessPolicy> {
                 "OpenAI documents API keys for programmatic access, billed through the Platform account at standard API rates.",
                 &["https://developers.openai.com/codex/auth"],
             ),
-            policy(
-                AccessKind::SubscriptionOauth,
-                PolicyStatus::Undocumented,
-                "ChatGPT sign-in",
-                "Pi implements Codex OAuth and OpenAI names Pi among tools OSS maintainers may prefer, but OpenAI publishes no reusable client-registration or auth contract for arbitrary harnesses. REX disables this as undocumented, not forbidden. The official Codex CLI remains available separately as an installed agent, where the CLI itself owns ChatGPT or API-key sign-in.",
-                &[
-                    "https://developers.openai.com/codex/auth",
-                    "https://developers.openai.com/community/codex-for-oss",
-                    "https://github.com/openai/codex/issues/36886",
-                    "https://github.com/earendil-works/pi/blob/36b60d2e8985899743c4cf5bd5f8929832a3f05d/packages/ai/src/auth/oauth/openai-codex.ts",
-                ],
-            ),
+            chatgpt_plan_policy(),
         ],
+        // ChatGPT plan usage: its own provider, because it speaks the
+        // Responses API and its credential comes only from the sign-in.
+        "openai-chatgpt" => vec![chatgpt_plan_policy()],
         "xai" => vec![
             api_key(
                 "xAI API key",

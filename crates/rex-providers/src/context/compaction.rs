@@ -191,6 +191,11 @@ pub fn request(
             "temperature": 0.1, "max_tokens": max_output_tokens
         })
         .to_string(),
+        // The ChatGPT-plan route accepts neither a token cap nor a
+        // temperature, so the length limit is the prompt's own.
+        ProviderProtocol::OpenAiResponses => {
+            crate::responses::request(model, system, &[crate::responses::user_item(user)], None)
+        }
     }
 }
 
@@ -434,6 +439,7 @@ pub fn reply_texts(protocol: ProviderProtocol, response: &str) -> Vec<String> {
             .and_then(Value::as_str)
             .map(|s| vec![s.to_string()])
             .unwrap_or_default(),
+        ProviderProtocol::OpenAiResponses => crate::responses::output_texts(&v),
     }
 }
 
@@ -442,7 +448,7 @@ mod tests {
     use super::*;
     use crate::context::transcript::Transcript;
     use crate::context::wire::make_result;
-    use ProviderProtocol::{Anthropic, Gemini, OpenAiCompatible};
+    use ProviderProtocol::{Anthropic, Gemini, OpenAiCompatible, OpenAiResponses};
 
     fn transcript(p: ProviderProtocol, n: usize, body: &str) -> Transcript {
         let mut t = Transcript::new(p);
@@ -464,6 +470,13 @@ mod tests {
                 OpenAiCompatible => (
                     vec![
                         json!({"id":id,"type":"function","function":{"name":"read_file","arguments":json!({"path":format!("src/f{i}.rs")}).to_string()}}),
+                    ],
+                    vec![make_result(p, "read_file", &id, true, body)],
+                ),
+                OpenAiResponses => (
+                    vec![
+                        json!({"type":"reasoning","id":format!("rs_{i}"),"summary":[],"encrypted_content":"enc"}),
+                        json!({"type":"function_call","id":format!("fc_{i}"),"call_id":id,"name":"read_file","namespace":"rex","arguments":json!({"path":format!("src/f{i}.rs")}).to_string()}),
                     ],
                     vec![make_result(p, "read_file", &id, true, body)],
                 ),

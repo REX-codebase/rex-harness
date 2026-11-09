@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ToolApproval } from "./ToolApproval";
 import { ActivityTimeline } from "./ActivityTimeline";
 import { RunMeters, runMeters } from "./RunMeters";
+import { UsageLimitNotice, isUsageLimit } from "./ChatGptPlan";
 import {
   agentAnswer,
   agentAnswerMany,
@@ -243,6 +244,7 @@ export function AgentRunView({
       {phase === "completed" && run.completion_summary && (
         <p className="agent-done-note" role="note"><span aria-hidden="true">✓</span>{run.completion_summary}</p>
       )}
+      {terminal && terminal.kind === "provider_error" && isUsageLimit(terminal.detail) && <UsageLimitNotice />}
       {terminal && terminal.kind === "gates_failed" && (
         <ul className="agent-gate-failures">
           {terminal.failures.map((f, i) => (

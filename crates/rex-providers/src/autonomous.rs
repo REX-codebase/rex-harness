@@ -29,6 +29,7 @@
 //! release its own write), repeated-failure and no-progress detection, and
 //! truthful terminal reasons.
 
+use crate::error::ProviderError;
 use crate::http::Transport;
 use crate::provider_failure::{
     describe_wait, plan_rate_limit_wait, structured_http_failure, RateWait,
@@ -1068,10 +1069,15 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
             ProviderProtocol::Gemini
                 | ProviderProtocol::Anthropic
                 | ProviderProtocol::OpenAiCompatible
+                | ProviderProtocol::OpenAiResponses
         ) {
             return Err(format!(
                 "provider {provider} has no documented autonomous protocol adapter"
             ));
+        }
+        if provider == crate::chatgpt_oauth::PROVIDER_ID {
+            // refuse at the start, with the reason, while the route is closed
+            crate::policy::chatgpt_plan_route()?;
         }
         let budgets = match budgets {
             Some(b) => b,
@@ -1846,6 +1852,17 @@ struct DriveOut {
 // The provider key is resolved through catalog refresh with several
 // diverging failure finishes; a single let-expression would hide them.
 #[allow(clippy::needless_late_init)]
+/// Why a run could not get its credential, in words the user can act on. A
+/// failed lookup carries the service's own message (it says whether to sign
+/// in again, enable plan usage, or wait for a network); a missing key keeps
+/// the plain wording.
+fn credential_detail(found: Result<Option<String>, ProviderError>) -> String {
+    match found {
+        Ok(Some(_)) | Ok(None) => "no API key stored for this provider".to_string(),
+        Err(e) => e.to_string(),
+    }
+}
+
 fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
     let started = Instant::now();
     let mut ledger = Ledger::open(&ctx.state_dir);
@@ -1879,7 +1896,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
     // Provider identity: catalog + key, resolved inside the backend. The key
     // is used for provider calls only and never enters state, ledger, or UI.
     let mut model = ctx.checkpoint.model.clone();
-    let key: String;
+    let mut key: String;
     if model.is_empty() {
         match ctx.service.refresh(&ctx.brief.provider) {
             Ok(catalog) => {
@@ -1920,12 +1937,12 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
     }
     match ctx.service.get_key(&ctx.brief.provider) {
         Ok(Some(k)) => key = k,
-        _ => {
+        other => {
             finish(
                 &ctx,
                 &mut ledger,
                 TerminalReason::ProviderError {
-                    detail: "no API key stored for this provider".into(),
+                    detail: credential_detail(other),
                 },
                 started,
                 &ctx.checkpoint,
@@ -1933,6 +1950,10 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
             return;
         }
     }
+    // A ChatGPT-plan sign-in hands out an access token that lives about an
+    // hour, so it is asked for again at every turn boundary (the service
+    // renews it when it is close to expiry). An API key never changes.
+    let renews_credential = ctx.brief.provider == crate::chatgpt_oauth::PROVIDER_ID;
     if let Ok(mut s) = ctx.handle.shared.lock() {
         s.model = model.clone();
         s.status = AgentStatus::Running;
@@ -2017,6 +2038,23 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
 
     let mut images_rejected = false;
     loop {
+        if renews_credential {
+            match ctx.service.get_key(&ctx.brief.provider) {
+                Ok(Some(fresh)) => key = fresh,
+                other => {
+                    finish(
+                        &ctx,
+                        &mut ledger,
+                        TerminalReason::ProviderError {
+                            detail: credential_detail(other),
+                        },
+                        started,
+                        &cp,
+                    );
+                    return;
+                }
+            }
+        }
         // ---- hard stops, checked at every turn boundary ------------------
         if ctx.handle.cancel.load(Ordering::SeqCst) {
             #[cfg(test)]
@@ -2442,6 +2480,7 @@ fn drive<S: SecretStore + 'static, T: Transport + 'static>(ctx: LoopCtx<S, T>) {
             },
             turn_calls,
             decoded.thought_signature,
+            decoded.lead,
             &mut cp,
             started,
             engine.as_ref(),
@@ -2878,16 +2917,16 @@ impl WireImage {
 /// `inlineData`, Anthropic base64 `image` blocks, OpenAI `image_url` data
 /// URLs (the same forms Hermes' adapters emit).
 fn user_content(protocol: ProviderProtocol, state_msg: &str, images: &[WireImage]) -> Value {
-    let mut parts = vec![match protocol {
-        ProviderProtocol::Gemini => json!({"text": state_msg}),
-        _ => json!({"type":"text","text": state_msg}),
-    }];
+    // Responses input names its text parts `input_text`
+    let text_part = |text: &str| match protocol {
+        ProviderProtocol::Gemini => json!({"text": text}),
+        ProviderProtocol::OpenAiResponses => json!({"type":"input_text","text": text}),
+        _ => json!({"type":"text","text": text}),
+    };
+    let mut parts = vec![text_part(state_msg)];
     for img in images {
         if !img.shown {
-            parts.push(match protocol {
-                ProviderProtocol::Gemini => json!({"text": img.label}),
-                _ => json!({"type":"text","text": img.label}),
-            });
+            parts.push(text_part(&img.label));
             continue;
         }
         match protocol {
@@ -2904,6 +2943,11 @@ fn user_content(protocol: ProviderProtocol, state_msg: &str, images: &[WireImage
                 parts.push(json!({"type":"text","text": img.label}));
                 parts.push(json!({"type":"image_url","image_url":{
                     "url": format!("data:{};base64,{}", img.mime, img.data)}}));
+            }
+            ProviderProtocol::OpenAiResponses => {
+                parts.push(text_part(&img.label));
+                parts.push(json!({"type":"input_image",
+                    "image_url": format!("data:{};base64,{}", img.mime, img.data)}));
             }
         }
     }
@@ -2985,6 +3029,23 @@ fn build_request_with_history(
                 "tool_choice":"auto","temperature":0.2,"max_tokens":8192})
             .to_string()
         }
+        // The system prompt is `instructions`; history is the replayed items;
+        // the state message is the last input item. No token cap and no
+        // temperature: the ChatGPT-plan route rejects both.
+        ProviderProtocol::OpenAiResponses => {
+            let mut input: Vec<Value> = history.to_vec();
+            input.push(json!({"role":"user","content": user}));
+            crate::responses::request(
+                model,
+                system,
+                &input,
+                Some(with_recall(
+                    protocol,
+                    responses_tool_definitions_with(mcp_tools),
+                    recall,
+                )),
+            )
+        }
     }
 }
 
@@ -3034,6 +3095,14 @@ fn with_recall(protocol: ProviderProtocol, mut defs: Value, recall: bool) -> Val
                     "name": d["name"], "description": d["description"],
                     "parameters": lowercase_schema(d["parameters"].clone())
                 }}));
+            }
+        }
+        ProviderProtocol::OpenAiResponses => {
+            if let Some(tools) = defs[0]["tools"].as_array_mut() {
+                tools.push(json!({"type": "function",
+                    "name": d["name"], "description": d["description"],
+                    "parameters": lowercase_schema(d["parameters"].clone())
+                }));
             }
         }
     }
@@ -3140,6 +3209,24 @@ fn openai_tool_definitions_with(mcp_tools: &[ExtTool]) -> Value {
     defs
 }
 
+/// Every declared tool, grouped in the one namespace the ChatGPT-plan route
+/// accepts. The declarations are the same ones the other protocols use.
+fn responses_tool_definitions_with(mcp_tools: &[ExtTool]) -> Value {
+    let declarations = gemini_tool_definitions_with(mcp_tools)[0]["functionDeclarations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    crate::responses::namespace_tools(
+        declarations
+            .into_iter()
+            .map(|d| {
+                json!({"name": d["name"], "description": d["description"],
+                    "parameters": lowercase_schema(d["parameters"].clone())})
+            })
+            .collect(),
+    )
+}
+
 fn lowercase_schema(mut value: Value) -> Value {
     match &mut value {
         Value::Object(map) => {
@@ -3192,7 +3279,7 @@ fn restrict_to_final_check(protocol: ProviderProtocol, body: &str) -> String {
             request["tool_choice"] = json!({"type":"any"});
         }
         // Left on `auto`: not every hosted model accepts "required".
-        ProviderProtocol::OpenAiCompatible => {}
+        ProviderProtocol::OpenAiCompatible | ProviderProtocol::OpenAiResponses => {}
     }
     request.to_string()
 }
@@ -3225,6 +3312,15 @@ fn retain_tools(protocol: ProviderProtocol, body: &str, keep: impl Fn(&str) -> b
                         .and_then(Value::as_str)
                         .is_some_and(&keep)
                 });
+            }
+        }
+        // the functions live inside the one namespace
+        ProviderProtocol::OpenAiResponses => {
+            if let Some(tools) = request
+                .pointer_mut("/tools/0/tools")
+                .and_then(Value::as_array_mut)
+            {
+                tools.retain(|t| t["name"].as_str().is_some_and(&keep));
             }
         }
     }
@@ -3350,6 +3446,14 @@ fn generate_with_retry<T: Transport>(
                 ("content-type".into(), "application/json".into()),
             ],
         ),
+        ProviderProtocol::OpenAiResponses => (
+            format!("{}/responses", base_url.trim_end_matches('/')),
+            vec![
+                ("authorization".into(), format!("Bearer {key}")),
+                ("content-type".into(), "application/json".into()),
+                ("accept".into(), "text/event-stream".into()),
+            ],
+        ),
     };
     let mut attempt = 0u32;
     // Rate limits are a different animal from outages: the provider usually
@@ -3363,6 +3467,14 @@ fn generate_with_retry<T: Transport>(
         }
         let result = transport.post(&url, &headers, body);
         if let Ok((429, text)) = &result {
+            // A ChatGPT-plan usage limit is not a window that reopens in a
+            // few seconds: OpenAI says to stop and point the user at their
+            // usage settings, and not to infer a reset time.
+            if protocol == ProviderProtocol::OpenAiResponses {
+                if let Some((line, false)) = crate::responses::http_failure(429, text) {
+                    return Err(line);
+                }
+            }
             match plan_rate_limit_wait(text, rate_waits, rate_waited) {
                 RateWait::Wait(secs) => {
                     rate_waits += 1;
@@ -3390,12 +3502,48 @@ fn generate_with_retry<T: Transport>(
         attempt += 1;
         let retryable = matches!(&result, Ok((500..=599, _)) | Err(_));
         match result {
-            Ok((status, text)) if status / 100 == 2 => return Ok(text),
+            Ok((status, text)) if status / 100 == 2 => {
+                if protocol != ProviderProtocol::OpenAiResponses {
+                    return Ok(text);
+                }
+                // The reply is an event stream. Inference succeeded only if
+                // `response.completed` arrived; the terminal event is the reply.
+                match crate::responses::normalize(&text) {
+                    Ok(response) => return Ok(response.to_string()),
+                    Err(failure) => {
+                        use crate::responses::StreamFailure;
+                        let may_retry = match &failure {
+                            StreamFailure::Failed { code } => {
+                                !crate::responses::is_terminal_code(code)
+                            }
+                            StreamFailure::Incomplete { .. } => false,
+                            StreamFailure::Interrupted => true,
+                        };
+                        let detail = failure.detail();
+                        if !may_retry || attempt >= PROVIDER_RETRIES {
+                            return Err(detail);
+                        }
+                        RunHandle::push_event(
+                            &handle.shared,
+                            AgentEvent::Retry {
+                                attempt,
+                                reason: detail,
+                            },
+                        );
+                    }
+                }
+            }
             Ok((status, text)) => {
                 let mut detail = format!(
                     "provider HTTP {status}: {}",
                     structured_http_failure(status, &text)
                 );
+                // A documented ChatGPT-plan code carries its own recovery.
+                if protocol == ProviderProtocol::OpenAiResponses {
+                    if let Some((line, _)) = crate::responses::http_failure(status, &text) {
+                        detail = line;
+                    }
+                }
                 // The raw body is only visible here (it is redacted from
                 // durable state), so say now whether the request was too long.
                 if crate::context::overflow::is_context_overflow(status, &text) {
@@ -3447,7 +3595,7 @@ fn usage_tokens(protocol: ProviderProtocol, response: &str) -> Option<u64> {
                     + n("/usage/cache_read_input_tokens"),
             )
         }
-        ProviderProtocol::OpenAiCompatible => {
+        ProviderProtocol::OpenAiCompatible | ProviderProtocol::OpenAiResponses => {
             value.pointer("/usage/total_tokens").and_then(Value::as_u64)
         }
     }
@@ -3469,6 +3617,7 @@ fn usage_prompt_tokens(protocol: ProviderProtocol, response: &str) -> Option<u64
             )
         }
         ProviderProtocol::OpenAiCompatible => n("/usage/prompt_tokens"),
+        ProviderProtocol::OpenAiResponses => n("/usage/input_tokens"),
     }
 }
 
@@ -3487,6 +3636,10 @@ struct DecodedCalls {
     repairs: Vec<String>,
     /// The provider stopped this response at the output token cap.
     cut_off: bool,
+    /// Output items to replay ahead of the turn's first call (Responses:
+    /// `reasoning` and `message` items). Replaying a call without the
+    /// reasoning it followed is refused when history is replayed statelessly.
+    lead: Vec<Value>,
 }
 
 fn decode_gemini_calls(response: &str) -> Result<DecodedCalls, String> {
@@ -3730,6 +3883,7 @@ fn decode_gemini_calls(response: &str) -> Result<DecodedCalls, String> {
         }
     }
     Ok(DecodedCalls {
+        lead: Vec::new(),
         texts,
         calls,
         thought_signature,
@@ -3746,6 +3900,7 @@ fn decode_provider_calls(
         ProviderProtocol::Gemini => decode_gemini_calls(response),
         ProviderProtocol::Anthropic => decode_anthropic_calls(response),
         ProviderProtocol::OpenAiCompatible => decode_openai_calls(response),
+        ProviderProtocol::OpenAiResponses => decode_responses_calls(response),
     }?;
     if hit_output_limit(protocol, response) {
         decoded.cut_off = true;
@@ -3776,6 +3931,8 @@ fn hit_output_limit(protocol: ProviderProtocol, response: &str) -> bool {
         ProviderProtocol::OpenAiCompatible => ("/choices/0/finish_reason", "length"),
         ProviderProtocol::Anthropic => ("/stop_reason", "max_tokens"),
         ProviderProtocol::Gemini => ("/candidates/0/finishReason", "MAX_TOKENS"),
+        // an incomplete Responses stream is an error before it is decoded
+        ProviderProtocol::OpenAiResponses => return false,
     };
     v.pointer(pointer).and_then(Value::as_str) == Some(cap)
 }
@@ -4051,10 +4208,68 @@ fn decode_anthropic_calls(response: &str) -> Result<DecodedCalls, String> {
         }
     }
     Ok(DecodedCalls {
+        lead: Vec::new(),
         texts,
         calls,
         thought_signature: None,
         repairs,
+        cut_off: false,
+    })
+}
+
+/// A Responses reply as `responses::normalize` leaves it. Tools are grouped
+/// in the `rex` namespace; a call names the tool in `name` and the group in
+/// `namespace`, and the whole item is replayed untouched.
+fn decode_responses_calls(response: &str) -> Result<DecodedCalls, String> {
+    let mut repairs = Vec::new();
+    let value: Value = serde_json::from_str(response).map_err(|e| format!("invalid JSON: {e}"))?;
+    if value.get("output").and_then(Value::as_array).is_none() {
+        return Err("missing output".into());
+    }
+    let texts: Vec<String> = crate::responses::output_texts(&value)
+        .into_iter()
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    let mut calls = Vec::new();
+    for c in crate::responses::function_calls(&value) {
+        // tolerate a namespace-qualified name; the item itself is untouched
+        let name = c
+            .name
+            .strip_prefix("rex.")
+            .or_else(|| c.name.strip_prefix("rex__"))
+            .unwrap_or(&c.name)
+            .to_string();
+        match parse_openai_arguments(&name, &c.arguments, &mut repairs) {
+            Ok(args) => calls.push(decode_named_call(
+                &name,
+                c.call_id.clone(),
+                args,
+                c.item.clone(),
+                &mut repairs,
+            )),
+            Err(error) => {
+                // As for chat completions: a call with broken JSON gets the
+                // parse error as its result; the replayed call carries `{}`.
+                let mut replay = c.item.clone();
+                replay["arguments"] = Value::String("{}".into());
+                calls.push((
+                    AgentCall::BadCall {
+                        name: canonical_call_name(&name),
+                        id: c.call_id.clone(),
+                        error,
+                    },
+                    Some(replay),
+                ));
+            }
+        }
+    }
+    Ok(DecodedCalls {
+        lead: crate::responses::leading_items(&value),
+        texts,
+        calls,
+        thought_signature: None,
+        repairs,
+        // an incomplete stream is refused before it gets here
         cut_off: false,
     })
 }
@@ -4120,6 +4335,7 @@ fn decode_openai_calls(response: &str) -> Result<DecodedCalls, String> {
         }
     }
     Ok(DecodedCalls {
+        lead: Vec::new(),
         texts,
         calls,
         thought_signature: None,
@@ -4170,6 +4386,7 @@ fn execute_turn<S: SecretStore + 'static, T: Transport + 'static>(
     link: &ProviderLink<'_>,
     calls: Vec<(AgentCall, Option<Value>)>,
     thought_signature: Option<String>,
+    lead: Vec<Value>,
     cp: &mut Checkpoint,
     started: Instant,
     engine: Option<&crate::context::ContextEngine>,
@@ -4188,8 +4405,14 @@ fn execute_turn<S: SecretStore + 'static, T: Transport + 'static>(
     let mut model_parts: Vec<Value> = Vec::new();
 
     let mut first_model_part = true;
+    // Output items the calls followed (Responses reasoning), replayed ahead
+    // of the turn's first call.
+    let mut lead = lead;
     let mut push_model_part =
         |model_parts: &mut Vec<Value>, raw: Option<Value>, fallback: Value| {
+            if first_model_part {
+                model_parts.extend(std::mem::take(&mut lead));
+            }
             let mut part = raw.unwrap_or(fallback);
             // Gemini 2.5 thinking models require the turn's thoughtSignature on
             // the first function call echoed back; carry it if the raw part
@@ -5495,6 +5718,9 @@ fn function_response(
         ProviderProtocol::OpenAiCompatible => {
             json!({"role":"tool","tool_call_id":id,"content":content})
         }
+        ProviderProtocol::OpenAiResponses => {
+            json!({"type":"function_call_output","call_id":id,"output":content})
+        }
     }
 }
 
@@ -5783,6 +6009,20 @@ fn build_plan_request(
                 "tools":tools,"tool_choice":"auto","temperature":0.2,"max_tokens":4096})
             .to_string()
         }
+        ProviderProtocol::OpenAiResponses => crate::responses::request(
+            model,
+            system,
+            &[crate::responses::user_item(state_msg)],
+            Some(crate::responses::namespace_tools(
+                decls
+                    .into_iter()
+                    .map(|d| {
+                        json!({"name": d["name"], "description": d["description"],
+                            "parameters": lowercase_schema(d["parameters"].clone())})
+                    })
+                    .collect(),
+            )),
+        ),
     }
 }
 
@@ -6556,6 +6796,7 @@ fn plan_gate<S: SecretStore + 'static, T: Transport + 'static>(
             },
             decoded.calls,
             decoded.thought_signature,
+            decoded.lead,
             cp,
             started,
             None,
@@ -6964,6 +7205,12 @@ mod tests {
         /// request bigger than this many bytes with a context-length 400.
         /// Zero turns it off.
         overflow_above_bytes: std::sync::atomic::AtomicUsize,
+        /// The `authorization` header and URL of every provider request, in
+        /// order, so a test can see which credential each turn presented.
+        bearers: Mutex<Vec<String>>,
+        urls: Mutex<Vec<String>>,
+        /// Token-endpoint calls served (see `post`).
+        refreshes: std::sync::atomic::AtomicUsize,
     }
 
     impl Script {
@@ -6981,6 +7228,9 @@ mod tests {
                 summary_calls: Default::default(),
                 shape: Mutex::new(ProviderProtocol::Gemini),
                 overflow_above_bytes: Default::default(),
+                bearers: Default::default(),
+                urls: Default::default(),
+                refreshes: Default::default(),
             }
         }
         fn failing(turns: Vec<String>, count: u32, status: u16) -> Self {
@@ -6997,6 +7247,9 @@ mod tests {
                 summary_calls: Default::default(),
                 shape: Mutex::new(ProviderProtocol::Gemini),
                 overflow_above_bytes: Default::default(),
+                bearers: Default::default(),
+                urls: Default::default(),
+                refreshes: Default::default(),
             }
         }
         /// A plain text reply in this transport's wire shape.
@@ -7005,6 +7258,11 @@ mod tests {
                 ProviderProtocol::Gemini => text_turn(text),
                 ProviderProtocol::Anthropic => json!({"content":[{"type":"text","text":text}],"stop_reason":"end_turn","usage":{"input_tokens":50,"output_tokens":20}}).to_string(),
                 ProviderProtocol::OpenAiCompatible => json!({"choices":[{"message":{"content":text},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":20,"total_tokens":70}}).to_string(),
+                ProviderProtocol::OpenAiResponses => sse_completed(
+                    vec![json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]})],
+                    50,
+                    20,
+                ),
             }
         }
         /// `count` rate-limit answers in the shape Groq really returns.
@@ -7030,10 +7288,28 @@ mod tests {
         }
         fn post(
             &self,
-            _url: &str,
-            _headers: &[(String, String)],
+            url: &str,
+            headers: &[(String, String)],
             body: &str,
         ) -> Result<(u16, String), ProviderError> {
+            // A ChatGPT-plan sign-in renews its access token at the token
+            // endpoint. It answers with a token that is already inside the
+            // renewal window, so every turn has to ask for a new one.
+            if url == crate::chatgpt_oauth::TOKEN_URL {
+                let n = self.refreshes.fetch_add(1, Ordering::SeqCst) + 1;
+                return Ok((
+                    200,
+                    json!({"access_token": format!("AT-{n}"),
+                        "refresh_token": format!("RT-{n}"), "token_type": "Bearer",
+                        "expires_in": 200,
+                        "scope": "chatgpt.tokens.use.direct email offline_access openid profile resource.invoke"})
+                    .to_string(),
+                ));
+            }
+            self.urls.lock().unwrap().push(url.to_string());
+            if let Some((_, v)) = headers.iter().find(|(k, _)| k == "authorization") {
+                self.bearers.lock().unwrap().push(v.clone());
+            }
             self.posts.lock().unwrap().push(body.to_string());
             let delay = self.post_delay_ms.load(Ordering::SeqCst);
             if delay > 0 {
@@ -7098,6 +7374,22 @@ mod tests {
                 None => Ok((200, self.text_reply("nothing more to do"))),
             }
         }
+    }
+
+    /// What the ChatGPT-plan route returns: an event stream whose terminal
+    /// event, `response.completed`, carries the whole response.
+    fn sse_completed(output: Vec<Value>, input_tokens: u64, output_tokens: u64) -> String {
+        let events = [
+            json!({"type":"response.created","response":{"id":"resp_test"}}),
+            json!({"type":"response.completed","response":{
+                "id":"resp_test","status":"completed","output": output,
+                "usage":{"input_tokens":input_tokens,"output_tokens":output_tokens,
+                         "total_tokens": input_tokens + output_tokens}}}),
+        ];
+        events
+            .iter()
+            .map(|e| format!("event: {}\ndata: {}\n\n", e["type"].as_str().unwrap(), e))
+            .collect()
     }
 
     fn text_turn(text: &str) -> String {
@@ -12532,7 +12824,12 @@ mod tests {
 
         fn service_for(root: &Path, script: Script, provider: &str) -> Svc {
             let store = MemorySecretStore::new();
-            store.set_key(provider, "test-key").unwrap();
+            if provider == crate::chatgpt_oauth::PROVIDER_ID {
+                // signed in, with a token already inside the renewal window
+                crate::chatgpt_oauth::seed_signed_in(&store, 200, 0);
+            } else {
+                store.set_key(provider, "test-key").unwrap();
+            }
             AutonomousRunService::new(ProviderService::new(store, script), None, root.join("runs"))
         }
 
@@ -12557,6 +12854,16 @@ mod tests {
                 ProviderProtocol::Gemini => {
                     call_turn(vec![json!({"functionCall": {"name": name, "args": input}})])
                 }
+                // a reasoning item first, as a reasoning model emits it
+                ProviderProtocol::OpenAiResponses => sse_completed(
+                    vec![
+                        json!({"type":"reasoning","id": format!("rs_{n}"),"summary":[],"encrypted_content":"ENC"}),
+                        json!({"type":"function_call","id": format!("fc_{n}"),"call_id": id,
+                            "name": name,"namespace":"rex","arguments": input.to_string()}),
+                    ],
+                    100,
+                    40,
+                ),
             }
         }
 
@@ -12805,12 +13112,218 @@ mod tests {
             assert!(done.context.unwrap().compactions >= 1);
         }
 
+        /// What the ChatGPT-plan route enforces on a stateless request:
+        /// `instructions` carry the system prompt (no system item), `store`
+        /// is false and `stream` true, none of the fields the route rejects
+        /// are present, tools are declared in one namespace, the input opens
+        /// with the user, ends with the user, every `function_call` is
+        /// answered by a `function_call_output` for exactly its `call_id`
+        /// later in the list, and a reasoning item is replayed directly in
+        /// front of the call it produced.
+        fn assert_valid_responses(body: &str) {
+            let v = parse(body);
+            assert!(
+                v["instructions"].as_str().is_some_and(|s| !s.is_empty()),
+                "instructions carry the system prompt"
+            );
+            assert_eq!(v["store"], false);
+            assert_eq!(v["stream"], true);
+            for banned in crate::responses::UNSUPPORTED_FIELDS {
+                assert!(v.get(*banned).is_none(), "{banned} is not accepted");
+            }
+            assert!(v.get("messages").is_none() && v.get("system").is_none());
+            if let Some(tools) = v.get("tools") {
+                let tools = tools.as_array().unwrap();
+                assert_eq!(tools.len(), 1, "one namespace holds every tool");
+                assert_eq!(tools[0]["type"], "namespace");
+                assert_eq!(tools[0]["name"], crate::responses::NAMESPACE);
+                assert!(!tools[0]["tools"].as_array().unwrap().is_empty());
+            }
+            let input = v["input"].as_array().unwrap();
+            assert_eq!(input[0]["role"], "user", "the input opens with the user");
+            assert_eq!(
+                input.last().unwrap()["role"],
+                "user",
+                "the input ends with the user"
+            );
+            assert!(
+                input.iter().all(|i| i["role"] != "system"),
+                "no system item in the input"
+            );
+            let mut calls: Vec<String> = Vec::new();
+            for (at, item) in input.iter().enumerate() {
+                match item["type"].as_str() {
+                    Some("function_call") => {
+                        let id = item["call_id"].as_str().unwrap().to_string();
+                        assert!(!calls.contains(&id), "call ids are unique");
+                        let answered = input[at + 1..].iter().any(|later| {
+                            later["type"] == "function_call_output" && later["call_id"] == id
+                        });
+                        assert!(answered, "call {id} has no output after it");
+                        calls.push(id);
+                    }
+                    Some("function_call_output") => {
+                        let id = item["call_id"].as_str().unwrap();
+                        assert!(
+                            calls.iter().any(|c| c == id),
+                            "an output for {id} with no call before it"
+                        );
+                    }
+                    Some("reasoning") => {
+                        assert_eq!(
+                            input[at + 1]["type"],
+                            "function_call",
+                            "reasoning is replayed in front of its call"
+                        );
+                        assert_eq!(item["encrypted_content"], "ENC");
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn every_file_under(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    every_file_under(&path, out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+
+        #[test]
+        fn a_long_chatgpt_plan_run_replays_valid_requests_and_asks_for_a_token_every_turn() {
+            let (tmp, svc, done) = run_shaped(
+                ProviderProtocol::OpenAiResponses,
+                "openai-chatgpt",
+                "gpt-test",
+            );
+            let transport = svc.service().transport();
+            let posts = transport.seen();
+            let main: Vec<(usize, &String)> = posts
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| !is_summarizer(b))
+                .collect();
+            assert!(main.len() >= 25, "{} requests", main.len());
+            for (_, body) in &main {
+                assert_valid_responses(body);
+            }
+            // the managed parts all happened on this wire format
+            assert!(main.iter().any(|(_, b)| b.contains("cleared from context")));
+            assert!(main
+                .iter()
+                .any(|(_, b)| b.contains("compacted_history") && b.contains(SUMMARY)));
+            assert!(main.last().unwrap().1.contains(WINDOWED_SEED));
+            assert!(!main[0].1.contains(WINDOWED_SEED), "no history, no seed");
+            // recall is declared, in the namespace
+            assert!(parse(main.last().unwrap().1)["tools"][0]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "recall"));
+            // the summarizer is a tool-free request on the same route
+            let sum = parse(posts.iter().find(|b| is_summarizer(b)).unwrap());
+            assert!(sum.get("tools").is_none());
+            assert_eq!(
+                (sum["store"].clone(), sum["stream"].clone()),
+                (json!(false), json!(true))
+            );
+            // every request went to the Responses route
+            assert!(transport
+                .urls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|u| u == "https://api.openai.com/v1/responses"));
+
+            // A plan token lives about an hour: each turn presents a freshly
+            // resolved one, never the one the run started with.
+            let bearers = transport.bearers.lock().unwrap().clone();
+            assert_eq!(bearers.len(), posts.len());
+            let main_tokens: Vec<&String> = main.iter().map(|(at, _)| &bearers[*at]).collect();
+            assert!(main_tokens.iter().all(|t| t.starts_with("Bearer AT-")));
+            assert!(
+                !main_tokens.iter().any(|t| t.as_str() == "Bearer AT-OLD"),
+                "the stored, expiring token was used as it was"
+            );
+            for pair in main_tokens.windows(2) {
+                assert_ne!(pair[0], pair[1], "two turns shared one token");
+            }
+            assert!(
+                transport.refreshes.load(Ordering::SeqCst) >= main.len(),
+                "a renewal per turn"
+            );
+
+            // No credential reaches anything the run keeps.
+            let mut files = Vec::new();
+            every_file_under(&tmp.path().join("runs"), &mut files);
+            assert!(!files.is_empty());
+            for f in files {
+                let Ok(text) = fs::read_to_string(&f) else {
+                    continue;
+                };
+                for secret in ["Bearer ", "AT-OLD", "RT-OLD", "AT-1\"", "ID-OLD"] {
+                    assert!(!text.contains(secret), "{} holds `{secret}`", f.display());
+                }
+            }
+            assert!(
+                !matches!(
+                    done.terminal_reason,
+                    Some(TerminalReason::ProviderError { .. })
+                ),
+                "{:?}",
+                done.terminal_reason
+            );
+            assert!(done.context.unwrap().compactions >= 1);
+        }
+
+        #[test]
+        fn a_run_whose_sign_in_has_gone_says_so_instead_of_asking_for_a_key() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ws = seed(tmp.path(), 2);
+            // no sign-in stored at all
+            let svc = Arc::new(AutonomousRunService::new(
+                ProviderService::new(MemorySecretStore::new(), Script::new(vec![])),
+                None,
+                tmp.path().join("runs"),
+            ));
+            let snap = svc
+                .begin_in_workspace_with_options(
+                    "read",
+                    "openai-chatgpt",
+                    Some("gpt-test"),
+                    Some(big_budgets()),
+                    Some(ws),
+                    Role::Worker,
+                    RunOptions::default(),
+                    SessionMeta::default(),
+                )
+                .unwrap();
+            let done = run_to_end(&svc, &snap.id);
+            match done.terminal_reason {
+                Some(TerminalReason::ProviderError { detail }) => {
+                    assert!(detail.contains("not signed in"), "{detail}");
+                    assert!(!detail.contains("API key"), "{detail}");
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(svc.service().transport().seen().is_empty());
+        }
+
         #[test]
         fn the_stateless_loop_is_not_given_the_seed_or_cache_markers() {
             // A default run on these wire formats must be exactly what it was.
             for (shape, provider, model) in [
                 (ProviderProtocol::Anthropic, "anthropic", "claude-test"),
                 (ProviderProtocol::OpenAiCompatible, "openai", "gpt-test"),
+                (
+                    ProviderProtocol::OpenAiResponses,
+                    "openai-chatgpt",
+                    "gpt-test",
+                ),
             ] {
                 let tmp = tempfile::tempdir().unwrap();
                 let ws = seed(tmp.path(), 6);

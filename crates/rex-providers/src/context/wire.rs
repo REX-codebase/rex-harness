@@ -12,8 +12,15 @@
 //! | Gemini | `{functionCall:{name,args}}` | `{functionResponse:{name,response:{ok,content}}}` |
 //! | Anthropic | `{type:tool_use,id,name,input}` | `{type:tool_result,tool_use_id,is_error,content}` |
 //! | OpenAI-compatible | `{id,type:function,function:{name,arguments}}` | `{role:tool,tool_call_id,content}` |
+//! | OpenAI Responses | `{type:function_call,call_id,name,arguments}` | `{type:function_call_output,call_id,output}` |
 //!
 //! Gemini results carry no id, so they pair with calls by position.
+//!
+//! The Responses shape differs in one way that matters here: a model turn is
+//! the list of *output items* (`reasoning`, `message`, `function_call`),
+//! replayed whole because the route runs with `store: false`. Reasoning items
+//! carry encrypted content and must stay beside the call they preceded, so
+//! they are kept as they came and only the calls are looked into.
 
 use crate::providers::ProviderProtocol;
 use serde_json::{json, Value};
@@ -83,6 +90,17 @@ pub fn calls(protocol: ProviderProtocol, parts: &[Value]) -> Vec<CallView> {
                     args: serde_json::from_str(raw).unwrap_or_else(|_| json!({})),
                 })
             }
+            ProviderProtocol::OpenAiResponses => {
+                if p.get("type").and_then(Value::as_str) != Some("function_call") {
+                    return None;
+                }
+                let raw = p.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                Some(CallView {
+                    id: p.get("call_id")?.as_str()?.to_string(),
+                    name: p.get("name")?.as_str()?.to_string(),
+                    args: serde_json::from_str(raw).unwrap_or_else(|_| json!({})),
+                })
+            }
         })
         .collect()
 }
@@ -124,6 +142,17 @@ pub fn results(protocol: ProviderProtocol, parts: &[Value]) -> Vec<ResultView> {
                     content: text_of(p.get("content").unwrap_or(&Value::Null)),
                 })
             }
+            ProviderProtocol::OpenAiResponses => {
+                if p.get("type").and_then(Value::as_str) != Some("function_call_output") {
+                    return None;
+                }
+                Some(ResultView {
+                    id: p.get("call_id")?.as_str()?.to_string(),
+                    name: String::new(),
+                    ok: None,
+                    content: text_of(p.get("output").unwrap_or(&Value::Null)),
+                })
+            }
         })
         .collect()
 }
@@ -146,6 +175,10 @@ pub fn make_result(
         ProviderProtocol::OpenAiCompatible => {
             json!({"role":"tool","tool_call_id":id,"content":content})
         }
+        // The Responses item has no success flag; the text carries the outcome.
+        ProviderProtocol::OpenAiResponses => {
+            json!({"type":"function_call_output","call_id":id,"output":content})
+        }
     }
 }
 
@@ -159,6 +192,9 @@ pub fn set_result_content(protocol: ProviderProtocol, part: &mut Value, content:
         }
         ProviderProtocol::Anthropic | ProviderProtocol::OpenAiCompatible => {
             part["content"] = json!(content);
+        }
+        ProviderProtocol::OpenAiResponses => {
+            part["output"] = json!(content);
         }
     }
 }
@@ -200,9 +236,16 @@ pub fn prune_call_args(protocol: ProviderProtocol, part: &mut Value, max: usize)
             .pointer_mut("/functionCall/args")
             .is_some_and(|a| prune_strings(a, max)),
         ProviderProtocol::Anthropic => part.get_mut("input").is_some_and(|a| prune_strings(a, max)),
-        ProviderProtocol::OpenAiCompatible => {
+        ProviderProtocol::OpenAiCompatible | ProviderProtocol::OpenAiResponses => {
+            // arguments are a JSON string, under `function` for chat
+            // completions and at the top of a Responses `function_call`
+            let responses = protocol == ProviderProtocol::OpenAiResponses;
             let Some(raw) = part
-                .pointer("/function/arguments")
+                .pointer(if responses {
+                    "/arguments"
+                } else {
+                    "/function/arguments"
+                })
                 .and_then(Value::as_str)
                 .map(str::to_string)
             else {
@@ -214,7 +257,11 @@ pub fn prune_call_args(protocol: ProviderProtocol, part: &mut Value, max: usize)
             if !prune_strings(&mut args, max) {
                 return false;
             }
-            part["function"]["arguments"] = json!(args.to_string());
+            if responses {
+                part["arguments"] = json!(args.to_string());
+            } else {
+                part["function"]["arguments"] = json!(args.to_string());
+            }
             true
         }
     }
@@ -229,8 +276,9 @@ pub fn prune_call_args(protocol: ProviderProtocol, part: &mut Value, max: usize)
 ///
 /// * a call with no result gets a placeholder result,
 /// * a result with no call is dropped,
-/// * (Anthropic, OpenAI) a model part that is not a call for this protocol
-///   is dropped.
+/// * (Anthropic, OpenAI chat) a model part that is not a call for this
+///   protocol is dropped. Responses turns keep every output item: reasoning
+///   and message items belong beside the calls they preceded.
 ///
 /// Returns the number of repairs made.
 pub fn repair_pairing(
@@ -239,7 +287,10 @@ pub fn repair_pairing(
     response_parts: &mut Vec<Value>,
 ) -> usize {
     let mut repairs = 0;
-    if protocol != ProviderProtocol::Gemini {
+    if !matches!(
+        protocol,
+        ProviderProtocol::Gemini | ProviderProtocol::OpenAiResponses
+    ) {
         let before = model_parts.len();
         let keep: Vec<bool> = model_parts
             .iter()
@@ -272,12 +323,15 @@ pub fn repair_pairing(
                 repairs += 1;
             }
         }
-        ProviderProtocol::Anthropic | ProviderProtocol::OpenAiCompatible => {
+        ProviderProtocol::Anthropic
+        | ProviderProtocol::OpenAiCompatible
+        | ProviderProtocol::OpenAiResponses => {
             let ids: Vec<&str> = call_list.iter().map(|c| c.id.as_str()).collect();
             let before = response_parts.len();
             response_parts.retain(|p| {
                 let id = match protocol {
                     ProviderProtocol::Anthropic => p.get("tool_use_id"),
+                    ProviderProtocol::OpenAiResponses => p.get("call_id"),
                     _ => p.get("tool_call_id"),
                 }
                 .and_then(Value::as_str);
@@ -338,6 +392,12 @@ pub fn messages(
             }
             out.extend(response_parts.iter().cloned());
         }
+        // Responses input is a flat list of items: the turn's output items,
+        // then the outputs of its calls.
+        ProviderProtocol::OpenAiResponses => {
+            out.extend(model_parts.iter().cloned());
+            out.extend(response_parts.iter().cloned());
+        }
     }
     out
 }
@@ -345,7 +405,7 @@ pub fn messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ProviderProtocol::{Anthropic, Gemini, OpenAiCompatible};
+    use ProviderProtocol::{Anthropic, Gemini, OpenAiCompatible, OpenAiResponses};
 
     fn gemini_pair() -> (Vec<Value>, Vec<Value>) {
         (
@@ -359,6 +419,21 @@ mod tests {
         (
             vec![json!({"type":"tool_use","id":"t1","name":"read_file","input":{"path":"a.rs"}})],
             vec![make_result(Anthropic, "read_file", "t1", true, "fn a() {}")],
+        )
+    }
+    fn responses_pair() -> (Vec<Value>, Vec<Value>) {
+        (
+            vec![
+                json!({"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"ENC"}),
+                json!({"type":"function_call","id":"fc_1","call_id":"c1","name":"read_file","namespace":"rex","arguments":"{\"path\":\"a.rs\"}"}),
+            ],
+            vec![make_result(
+                OpenAiResponses,
+                "read_file",
+                "c1",
+                true,
+                "fn a() {}",
+            )],
         )
     }
     fn openai_pair() -> (Vec<Value>, Vec<Value>) {
@@ -382,6 +457,7 @@ mod tests {
             (Gemini, gemini_pair()),
             (Anthropic, anthropic_pair()),
             (OpenAiCompatible, openai_pair()),
+            (OpenAiResponses, responses_pair()),
         ] {
             let c = calls(p, &m);
             assert_eq!(c.len(), 1, "{p:?}");
@@ -390,9 +466,11 @@ mod tests {
             let v = results(p, &r);
             assert_eq!(v.len(), 1);
             assert_eq!(v[0].content, "fn a() {}");
+            // chat-completion tool messages and Responses outputs carry no
+            // success flag; the text carries the outcome
             assert_eq!(
                 v[0].ok,
-                if p == OpenAiCompatible {
+                if matches!(p, OpenAiCompatible | OpenAiResponses) {
                     None
                 } else {
                     Some(true)
@@ -415,6 +493,7 @@ mod tests {
             (Gemini, gemini_pair()),
             (Anthropic, anthropic_pair()),
             (OpenAiCompatible, openai_pair()),
+            (OpenAiResponses, responses_pair()),
         ] {
             let before = results(p, &r)[0].clone();
             set_result_content(p, &mut r[0], "[cleared]");
@@ -515,6 +594,7 @@ mod tests {
             (Gemini, gemini_pair()),
             (Anthropic, anthropic_pair()),
             (OpenAiCompatible, openai_pair()),
+            (OpenAiResponses, responses_pair()),
         ] {
             assert_eq!(repair_pairing(p, &mut m, &mut r), 0, "{p:?}");
         }
@@ -536,5 +616,60 @@ mod tests {
         assert!(msgs[0]["content"].is_null());
         assert_eq!(msgs[1]["role"], "tool");
         assert!(messages(Gemini, &[], &[]).is_empty());
+    }
+    #[test]
+    fn a_responses_turn_keeps_its_reasoning_items_through_repair() {
+        // dropping a reasoning item while keeping the call it preceded is
+        // refused when history is replayed statelessly
+        let (mut m, mut r) = responses_pair();
+        assert_eq!(repair_pairing(OpenAiResponses, &mut m, &mut r), 0);
+        assert_eq!(m[0]["type"], "reasoning");
+        assert_eq!(m[0]["encrypted_content"], "ENC");
+        // a call with no output gets a placeholder; the reasoning stays
+        let (mut m, mut r) = responses_pair();
+        r.clear();
+        assert_eq!(repair_pairing(OpenAiResponses, &mut m, &mut r), 1);
+        assert_eq!(m.len(), 2);
+        assert_eq!(r[0]["type"], "function_call_output");
+        assert_eq!(r[0]["call_id"], "c1");
+        assert_eq!(r[0]["output"], MISSING_RESULT);
+        // an output with no call is dropped
+        let (mut m, mut r) = responses_pair();
+        r.push(make_result(OpenAiResponses, "x", "ghost", true, "orphan"));
+        assert_eq!(repair_pairing(OpenAiResponses, &mut m, &mut r), 1);
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn responses_history_is_a_flat_item_list() {
+        let (m, r) = responses_pair();
+        let items = messages(OpenAiResponses, &m, &r);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["type"], "reasoning");
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[2]["type"], "function_call_output");
+        // no role wrappers: every item is already an input item
+        assert!(items.iter().all(|i| i.get("role").is_none()));
+    }
+
+    #[test]
+    fn responses_arguments_are_pruned_at_the_top_of_the_call_item() {
+        let big = "q".repeat(4_000);
+        let mut call = json!({"type":"function_call","id":"fc_1","call_id":"c1","name":"create_file",
+            "namespace":"rex","arguments": json!({"path":"a","content":big}).to_string()});
+        assert!(prune_call_args(OpenAiResponses, &mut call, 400));
+        let args: Value = serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["path"], "a", "the arguments must remain valid JSON");
+        assert!(args["content"].as_str().unwrap().contains("left out"));
+        assert_eq!(call["call_id"], "c1");
+        assert_eq!(call["namespace"], "rex");
+    }
+
+    #[test]
+    fn a_stub_replaces_a_responses_output_in_place() {
+        let (_, mut r) = responses_pair();
+        set_result_content(OpenAiResponses, &mut r[0], "[cleared]");
+        assert_eq!(r[0]["output"], "[cleared]");
+        assert_eq!(r[0]["call_id"], "c1");
     }
 }

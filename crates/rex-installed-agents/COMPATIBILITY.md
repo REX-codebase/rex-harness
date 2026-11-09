@@ -28,7 +28,11 @@ the official client. REX's use stays inside the documented surface: the
 official binary, the user's own sign-in, the read-only sandbox, and no
 parallel or disguised traffic. OpenAI publishes no general third-party client
 registration for Codex; REX therefore does not implement Codex OAuth itself
-and this contract does not cover doing so.
+and this contract does not cover doing so. (REX's separate "Continue with
+ChatGPT" route uses OpenAI's own Sign in with ChatGPT contract for
+open-source apps, with REX's own dynamically registered client. It is not
+Codex OAuth, shares nothing with this route, and is covered by
+`docs/subscription-policy.md`.)
 
 ## Fail closed
 

@@ -63,6 +63,7 @@ fn usage_tokens(protocol: ProviderProtocol, body: &str) -> u64 {
             u["input_tokens"].as_u64().unwrap_or(0) + u["output_tokens"].as_u64().unwrap_or(0)
         }
         ProviderProtocol::OpenAiCompatible => v["usage"]["total_tokens"].as_u64().unwrap_or(0),
+        ProviderProtocol::OpenAiResponses => v["usage"]["total_tokens"].as_u64().unwrap_or(0),
     }
 }
 
@@ -108,6 +109,10 @@ pub fn complete_text<S: SecretStore, T: Transport>(
             ]
         })
         .to_string(),
+        // no token cap or temperature: the route rejects both
+        ProviderProtocol::OpenAiResponses => {
+            crate::responses::request(model, system, &[crate::responses::user_item(prompt)], None)
+        }
     };
     let (url, headers) = match protocol {
         ProviderProtocol::Gemini => (
@@ -135,6 +140,14 @@ pub fn complete_text<S: SecretStore, T: Transport>(
                 ("content-type".to_string(), "application/json".to_string()),
             ],
         ),
+        ProviderProtocol::OpenAiResponses => (
+            format!("{}/responses", base_url.trim_end_matches('/')),
+            vec![
+                ("authorization".to_string(), format!("Bearer {key}")),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("accept".to_string(), "text/event-stream".to_string()),
+            ],
+        ),
     };
 
     let mut attempt = 0u32;
@@ -144,6 +157,30 @@ pub fn complete_text<S: SecretStore, T: Transport>(
         let retryable = matches!(&result, Ok((429, _)) | Ok((500..=599, _)) | Err(_));
         match result {
             Ok((status, text)) if status / 100 == 2 => {
+                // a Responses reply is an event stream; the terminal event
+                // is the reply
+                let text = if protocol == ProviderProtocol::OpenAiResponses {
+                    match crate::responses::normalize(&text) {
+                        Ok(v) => v.to_string(),
+                        Err(f) => {
+                            let retry = match &f {
+                                crate::responses::StreamFailure::Failed { code } => {
+                                    !crate::responses::is_terminal_code(code)
+                                }
+                                _ => true,
+                            };
+                            if retry && attempt < RETRIES {
+                                std::thread::sleep(std::time::Duration::from_millis(
+                                    400 * attempt as u64,
+                                ));
+                                continue;
+                            }
+                            return Err(f.detail());
+                        }
+                    }
+                } else {
+                    text
+                };
                 let turn = decode_turn(protocol, &text)?;
                 let joined = turn.text.join("\n");
                 if joined.trim().is_empty() {
@@ -157,7 +194,20 @@ pub fn complete_text<S: SecretStore, T: Transport>(
                 });
             }
             Ok((status, text)) => {
+                // a documented ChatGPT-plan code says what to do about it, and
+                // whether asking again can help
+                let known = (protocol == ProviderProtocol::OpenAiResponses)
+                    .then(|| crate::responses::http_failure(status, &text))
+                    .flatten();
+                if let Some((line, may_retry)) = &known {
+                    if !may_retry {
+                        return Err(line.clone());
+                    }
+                }
                 if !retryable || attempt >= RETRIES {
+                    if let Some((line, _)) = known {
+                        return Err(line);
+                    }
                     let detail = structured_http_failure(status, &text);
                     return Err(format!("provider HTTP {status}: {detail}"));
                 }

@@ -591,7 +591,7 @@ impl Transcript {
 mod tests {
     use super::*;
     use crate::context::wire::make_result;
-    use ProviderProtocol::{Anthropic, Gemini, OpenAiCompatible};
+    use ProviderProtocol::{Anthropic, Gemini, OpenAiCompatible, OpenAiResponses};
 
     const OPTS: RenderOpts = RenderOpts {
         recall: true,
@@ -620,6 +620,13 @@ mod tests {
                 ],
                 vec![make_result(p, "read_file", &id, true, body)],
             ),
+            OpenAiResponses => (
+                vec![
+                    json!({"type":"reasoning","id":format!("rs_{n}"),"summary":[],"encrypted_content":"enc"}),
+                    json!({"type":"function_call","id":format!("fc_{n}"),"call_id":id,"name":"read_file","namespace":"rex","arguments":json!({"path":path}).to_string()}),
+                ],
+                vec![make_result(p, "read_file", &id, true, body)],
+            ),
         }
     }
 
@@ -639,7 +646,7 @@ mod tests {
 
     #[test]
     fn notes_are_read_back_from_the_parts_for_every_protocol() {
-        for p in [Gemini, Anthropic, OpenAiCompatible] {
+        for p in [Gemini, Anthropic, OpenAiCompatible, OpenAiResponses] {
             let t = filled(p, 2);
             let c = &t.turns()[1].calls[0];
             assert_eq!(c.name, "read_file", "{p:?}");
@@ -650,7 +657,7 @@ mod tests {
 
     #[test]
     fn stubbing_replaces_bulky_results_and_keeps_the_pair_valid() {
-        for p in [Gemini, Anthropic, OpenAiCompatible] {
+        for p in [Gemini, Anthropic, OpenAiCompatible, OpenAiResponses] {
             let mut t = filled(p, 4);
             let full = t.render(&OPTS);
             t.set_stub_watermark(2);
