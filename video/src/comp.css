@@ -47,7 +47,7 @@ body { font-family: var(--f-sans); color: var(--text); -webkit-font-smoothing: a
 /* ring lock: a slam word per ring */
 #slam { position: absolute; left: 0; right: 0; top: 548px; text-align: center; pointer-events: none; opacity: 0; }
 #slam b { display: block; font: 600 96px/1 var(--f-display); letter-spacing: 0.42em; margin-right: -0.42em; text-transform: uppercase; color: #fff; text-shadow: 0 0 40px var(--c, #a99af7), 0 0 90px var(--c, #a99af7); }
-#slam i { display: block; margin-top: 22px; font: 500 26px/1 var(--f-mono); font-style: normal; letter-spacing: 0.08em; color: var(--c, #cfc6ff); opacity: 0.9; }
+#slam i { display: block; margin-top: 26px; font: 500 32px/1 var(--f-mono); font-style: normal; letter-spacing: 0.08em; color: #fff; opacity: 0.95; text-shadow: 0 0 22px var(--c, #cfc6ff), 0 0 44px var(--c, #cfc6ff); }
 
 /* the HUD: small, mono, and only where the story needs a fact */
 #hud { position: absolute; inset: 0; pointer-events: none; font-family: var(--f-mono); }
