@@ -5,6 +5,12 @@
 //! checkpoint's workspace, label, and timestamp. Restore copies a checkpoint
 //! back over the workspace — but first it auto-snapshots the current state,
 //! so a restore is never destructive.
+//!
+//! A checkpoint covers the files a person would call "the project", not what a
+//! build tool regenerates: `node_modules`, `target`, `dist` and similar are
+//! neither copied nor, on restore, deleted. Symlinks are never followed (a
+//! restore must not be able to delete files outside the folder through one),
+//! and a folder too big to snapshot is refused instead of filling the disk.
 
 use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
@@ -14,6 +20,27 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Folders skipped when they are at the top of the workspace.
+const EXCLUDED_TOP: &[&str] = &[
+    ".git", "dist", "build", "target", ".next", ".nuxt", ".venv", "venv", ".cache", ".gradle",
+    ".idea", ".tox",
+];
+/// Folders skipped wherever they are.
+const EXCLUDED_ANYWHERE: &[&str] = &["node_modules", "__pycache__"];
+/// The most files, and bytes, a checkpoint will take.
+pub const MAX_FILES: u64 = 20_000;
+pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+fn is_excluded(rel: &Path) -> bool {
+    let mut parts = rel.components().filter_map(|c| c.as_os_str().to_str());
+    if let Some(first) = parts.next() {
+        if EXCLUDED_TOP.contains(&first) || EXCLUDED_ANYWHERE.contains(&first) {
+            return true;
+        }
+    }
+    parts.any(|c| EXCLUDED_ANYWHERE.contains(&c))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -68,35 +95,38 @@ impl CheckpointStore {
         let ws = workspace
             .canonicalize()
             .map_err(|e| format!("workspace not found: {e}"))?;
+        // A folder that holds REX's own data would snapshot its own snapshots.
+        if self
+            .dir
+            .canonicalize()
+            .map(|d| d.starts_with(&ws))
+            .unwrap_or(false)
+        {
+            return Err(
+                "this folder contains REX's own data, so it cannot be checkpointed".to_string(),
+            );
+        }
         Ok(ws)
     }
 
+    /// Copy what `scan(src)` finds into `dst`. Returns the number of files.
     fn copy_workspace(&self, src: &Path, dst: &Path) -> Result<u64, String> {
-        let mut count = 0u64;
+        let found = scan(src)?;
         std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
-        for entry in walkdir(src)? {
-            let rel = entry.strip_prefix(src).map_err(|e| e.to_string())?;
-            // Skip the checkpoint dir itself if nested, and .git.
-            if rel
-                .components()
-                .next()
-                .map(|c| c.as_os_str() == ".git")
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let target = dst.join(rel);
-            if entry.is_dir() {
-                std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-            } else if entry.is_file() {
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                }
-                std::fs::copy(&entry, &target).map_err(|e| e.to_string())?;
-                count += 1;
-            }
+        for dir in &found.dirs {
+            let rel = dir.strip_prefix(src).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(dst.join(rel)).map_err(|e| e.to_string())?;
         }
-        Ok(count)
+        for file in &found.files {
+            let rel = file.strip_prefix(src).map_err(|e| e.to_string())?;
+            let target = dst.join(rel);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::copy(file, &target)
+                .map_err(|e| format!("cannot copy {}: {e}", rel.display()))?;
+        }
+        Ok(found.files.len() as u64)
     }
 
     /// Create a checkpoint of the workspace.
@@ -168,46 +198,25 @@ impl CheckpointStore {
         }
         // Auto-snapshot current state before overwriting.
         let backup = self.create(&ws, "auto-backup before restore")?;
-        // Clear the workspace (but not .git) and copy the checkpoint back.
-        for entry in walkdir(&ws)? {
-            let rel = entry.strip_prefix(&ws).map_err(|e| e.to_string())?;
-            if rel.as_os_str().is_empty() {
-                continue;
-            }
-            if rel
-                .components()
-                .next()
-                .map(|c| c.as_os_str() == ".git")
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if entry.is_dir() {
-                // Remove dirs after files; walkdir gives us files too.
-                continue;
-            } else {
-                let _ = std::fs::remove_file(&entry);
-            }
+        // Clear what a checkpoint covers (never excluded folders, never through
+        // a symlink), then copy the checkpoint back.
+        let current = scan(&ws)?;
+        for file in &current.files {
+            let _ = std::fs::remove_file(file);
         }
-        // Remove now-empty dirs (deepest first).
-        let mut dirs: Vec<PathBuf> = walkdir(&ws)?.into_iter().filter(|p| p.is_dir()).collect();
+        // Remove now-empty folders, deepest first; a folder that still holds
+        // something (an excluded folder's contents) is left alone.
+        let mut dirs = current.dirs;
         dirs.sort_by_key(|a| Reverse(a.components().count()));
         for d in dirs {
-            if d == ws {
-                continue;
-            }
-            let rel = d.strip_prefix(&ws).map_err(|e| e.to_string())?;
-            if rel
-                .components()
-                .next()
-                .map(|c| c.as_os_str() == ".git")
-                .unwrap_or(false)
-            {
-                continue;
-            }
             let _ = std::fs::remove_dir(&d);
         }
-        let restored_count = self.copy_workspace(&src, &ws)?;
+        let restored_count = self.copy_workspace(&src, &ws).map_err(|e| {
+            format!(
+                "The restore stopped part-way ({e}). Your files from before it are saved as checkpoint \"{}\"; restore that one to undo.",
+                backup.id
+            )
+        })?;
         // Update the backup's file count to reflect what was there.
         {
             let mut ledger = self.inner.lock().map_err(|e| e.to_string())?;
@@ -220,32 +229,63 @@ impl CheckpointStore {
     }
 }
 
-fn walkdir(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
+/// What a checkpoint covers under `root`.
+#[derive(Debug)]
+struct Scan {
+    files: Vec<PathBuf>,
+    dirs: Vec<PathBuf>,
+}
+
+/// Walk `root`, skipping excluded folders and never following a symlink (a
+/// symlink is neither copied nor, on restore, removed). Refuses a folder over
+/// the limits rather than copying it.
+fn scan(root: &Path) -> Result<Scan, String> {
+    scan_within(root, MAX_FILES, MAX_BYTES)
+}
+
+fn scan_within(root: &Path, max_files: u64, max_bytes: u64) -> Result<Scan, String> {
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    let mut bytes = 0u64;
+    let mut stack = vec![root.to_path_buf()];
     while let Some(current) = stack.pop() {
         let entries = std::fs::read_dir(&current).map_err(|e| e.to_string())?;
         for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            out.push(path.clone());
-            if path.is_dir() {
-                // Don't descend into .git.
-                if path.file_name().map(|n| n == ".git").unwrap_or(false) {
-                    out.pop();
-                    continue;
-                }
+            let path = entry.map_err(|e| e.to_string())?.path();
+            let rel = path.strip_prefix(root).map_err(|e| e.to_string())?;
+            if is_excluded(rel) {
+                continue;
+            }
+            let meta = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                dirs.push(path.clone());
                 stack.push(path);
+            } else if meta.is_file() {
+                bytes += meta.len();
+                files.push(path);
+                if files.len() as u64 > max_files || bytes > max_bytes {
+                    return Err(format!(
+                        "This folder is too big to checkpoint (over {} files or {} MB). Open a smaller folder, or use git for history.",
+                        max_files,
+                        max_bytes / (1024 * 1024)
+                    ));
+                }
             }
         }
     }
-    Ok(out)
+    Ok(Scan { files, dirs })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    // The real limits are generous but finite; checked when this is compiled.
+    const _: () = assert!(MAX_FILES >= 1000 && MAX_BYTES >= 64 * 1024 * 1024);
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -283,5 +323,139 @@ mod tests {
         let backup_dir = config.join("checkpoints").join(&backup.id);
         let backup_content = std::fs::read_to_string(backup_dir.join("a.txt")).unwrap();
         assert_eq!(backup_content, "v2");
+    }
+
+    #[test]
+    fn build_output_is_neither_copied_nor_deleted_by_a_restore() {
+        let config = temp();
+        let ws = temp();
+        std::fs::write(ws.join("a.txt"), "v1").unwrap();
+        std::fs::create_dir_all(ws.join("node_modules/pkg")).unwrap();
+        std::fs::write(ws.join("node_modules/pkg/index.js"), "dep").unwrap();
+        std::fs::create_dir_all(ws.join("src/node_modules")).unwrap();
+        std::fs::write(ws.join("src/node_modules/x.js"), "nested dep").unwrap();
+        std::fs::create_dir_all(ws.join("target/debug")).unwrap();
+        std::fs::write(ws.join("target/debug/bin"), "built").unwrap();
+        std::fs::create_dir_all(ws.join("src/build")).unwrap();
+        std::fs::write(
+            ws.join("src/build/real_source.rs"),
+            "a source folder that happens to be called build",
+        )
+        .unwrap();
+
+        let store = CheckpointStore::new(&config).unwrap();
+        let cp = store.create(&ws, "t").unwrap();
+        assert_eq!(cp.file_count, 2, "a.txt and src/build/real_source.rs only");
+        assert!(!config
+            .join("checkpoints")
+            .join(&cp.id)
+            .join("node_modules")
+            .exists());
+
+        std::fs::write(ws.join("a.txt"), "v2").unwrap();
+        std::fs::write(ws.join("new.txt"), "made after").unwrap();
+        store.restore(&ws, &cp.id).unwrap();
+
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "v1");
+        assert!(
+            !ws.join("new.txt").exists(),
+            "a file made after the checkpoint is removed"
+        );
+        // the regenerable folders are exactly as they were
+        assert_eq!(
+            std::fs::read_to_string(ws.join("node_modules/pkg/index.js")).unwrap(),
+            "dep"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("src/node_modules/x.js")).unwrap(),
+            "nested dep"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("target/debug/bin")).unwrap(),
+            "built"
+        );
+        assert!(ws.join("src/build/real_source.rs").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_restore_never_deletes_through_a_symlink_out_of_the_folder() {
+        let config = temp();
+        let ws = temp();
+        let outside = temp();
+        std::fs::write(outside.join("precious.txt"), "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
+        std::fs::write(ws.join("a.txt"), "v1").unwrap();
+
+        let store = CheckpointStore::new(&config).unwrap();
+        let cp = store.create(&ws, "t").unwrap();
+        assert_eq!(
+            cp.file_count, 1,
+            "the symlink is not followed, so its target is not copied in"
+        );
+        store.restore(&ws, &cp.id).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(outside.join("precious.txt")).unwrap(),
+            "keep"
+        );
+        assert!(
+            ws.join("link")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself survives"
+        );
+    }
+
+    #[test]
+    fn a_folder_over_the_limit_is_refused_not_copied() {
+        let ws = temp();
+        for i in 0..5 {
+            std::fs::write(ws.join(format!("f{i}.txt")), "xxxx").unwrap();
+        }
+        assert_eq!(
+            scan_within(&ws, 5, 1024).unwrap().files.len(),
+            5,
+            "exactly at the limit is fine"
+        );
+        let by_count = scan_within(&ws, 4, 1024 * 1024).unwrap_err();
+        assert!(by_count.contains("too big"), "{by_count}");
+        let by_size = scan_within(&ws, 100, 10).unwrap_err();
+        assert!(by_size.contains("too big"), "{by_size}");
+    }
+
+    #[test]
+    fn a_folder_containing_the_checkpoint_store_is_refused() {
+        let config = temp();
+        std::fs::write(config.join("settings.json"), "{}").unwrap();
+        let store = CheckpointStore::new(&config).unwrap();
+        // the store lives in config/checkpoints, so config itself would snapshot its own snapshots
+        let err = store.create(&config, "self").unwrap_err();
+        assert!(err.contains("REX's own data"), "{err}");
+    }
+
+    #[test]
+    fn excluded_paths_are_recognised() {
+        for yes in [
+            "node_modules/x",
+            "src/node_modules/x",
+            "target/debug",
+            ".git/config",
+            "dist/a.js",
+            "pkg/__pycache__/m.pyc",
+        ] {
+            assert!(is_excluded(Path::new(yes)), "{yes}");
+        }
+        for no in [
+            "src/build/a.rs",
+            "src/target/a.rs",
+            "docs/dist.md",
+            "a.txt",
+            "build.rs",
+        ] {
+            assert!(!is_excluded(Path::new(no)), "{no}");
+        }
     }
 }

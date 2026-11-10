@@ -5,12 +5,16 @@ import {
   checkpointRestore,
   type Checkpoint,
 } from "../data/checkpoint";
-import { terminalDefaultWorkspace } from "../data/terminal";
+import { errorText } from "../data/runLifecycle";
+import { useWorkspace } from "../data/workspaceContext";
 
-// Checkpoint panel: list workspace snapshots and restore with one click.
-// Restore auto-snapshots the current state first, so it's reversible.
+// Checkpoint panel: list snapshots of the open folder and restore with one click.
+// Restore auto-snapshots the current state first, so it's reversible. A
+// snapshot covers the project's files, not regenerable folders such as
+// node_modules, target or dist, which are neither copied nor deleted.
 export function CheckpointPanel() {
-  const [workspace, setWorkspace] = useState<string | null>(null);
+  const ws = useWorkspace();
+  const workspace = ws.active?.path ?? null;
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [label, setLabel] = useState("");
   const [loading, setLoading] = useState(false);
@@ -18,33 +22,24 @@ export function CheckpointPanel() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const refresh = async (ws: string) => {
+  const refresh = async (folder: string) => {
     setLoading(true);
     setError(null);
     try {
-      setCheckpoints(await checkpointList(ws));
+      setCheckpoints(await checkpointList(folder));
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    let alive = true;
-    terminalDefaultWorkspace()
-      .then((ws) => {
-        if (!alive) return;
-        setWorkspace(ws);
-        refresh(ws);
-      })
-      .catch((e) => {
-        if (alive) setError(String(e));
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
+    setCheckpoints([]);
+    setNotice(null);
+    setError(null);
+    if (workspace) void refresh(workspace);
+  }, [workspace]);
 
   const create = async () => {
     if (!workspace || busy) return;
@@ -60,7 +55,7 @@ export function CheckpointPanel() {
       setNotice(`Saved “${cp.label}” (${cp.file_count} files).`);
       await refresh(workspace);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -70,7 +65,7 @@ export function CheckpointPanel() {
     if (!workspace || busy) return;
     if (
       !window.confirm(
-        "Restore this checkpoint? The current workspace will be auto-snapshotted first, so you can undo.",
+        "Restore this checkpoint? Files in this folder are replaced with the snapshot's (node_modules, target and similar folders are left alone). The current state is saved first, so you can undo.",
       )
     ) {
       return;
@@ -85,20 +80,14 @@ export function CheckpointPanel() {
       );
       await refresh(workspace);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
   };
 
-  if (!workspace) {
-    return (
-      <div className="checkpoint-panel" aria-label="Checkpoints">
-        <p className="eyebrow">Checkpoints</p>
-        {error ? <p role="alert">{error}</p> : <p>Loading…</p>}
-      </div>
-    );
-  }
+  // The Git tab already explains how to open a folder; nothing to add here.
+  if (!workspace) return null;
 
   return (
     <div className="checkpoint-panel" aria-label="Checkpoints">
@@ -167,8 +156,10 @@ export function CheckpointPanel() {
         </ul>
       )}
       <p className="settings-note">
-        Restoring auto-snapshots the current workspace first. Nothing is lost —
-        you can restore the backup to undo.
+        Restoring auto-snapshots the current folder first. Nothing is lost —
+        you can restore the backup to undo. A snapshot covers your project's
+        files, not node_modules, target or dist, and a folder over 20,000 files
+        or 256 MB is too big to snapshot.
       </p>
     </div>
   );

@@ -50,6 +50,10 @@ pub struct ManagedTaskRequest {
     /// Plan mode: the run proposes a plan and waits for trusted approval
     /// before any tool executes.
     pub plan_mode: bool,
+    /// Autonomous mode (see `autonomous::RunOptions::autonomous`): the human
+    /// operator chose not to be asked about each action. Only a human can make
+    /// that choice; a request from an agent operator that sets it is refused.
+    pub autonomous: bool,
     /// Opt-in model summary of tool results that drop out of working
     /// memory. Off unless the caller asks; each summary spends tokens.
     pub summarize_history: bool,
@@ -64,6 +68,14 @@ pub struct ManagedTaskRequest {
 }
 
 impl ManagedTaskRequest {
+    /// Start in autonomous mode: no approval prompts for calls the tool
+    /// runtime has already vetted. The grant, its budgets and its capability
+    /// set are unchanged; this only answers "ask me first?" ahead of time.
+    pub fn with_autonomous(mut self, autonomous: bool) -> Self {
+        self.autonomous = autonomous;
+        self
+    }
+
     /// Ask for windowed context management (see `autonomous::RunOptions::
     /// windowed_context`). Such a run re-sends its history every turn, so the
     /// grant's token ceiling is raised to what that needs; a grant is the
@@ -153,6 +165,7 @@ pub fn ui_managed_request(
             max_claim_attempts: 1,
         },
         plan_mode,
+        autonomous: false,
         summarize_history: false,
         lean: false,
         windowed_context: false,
@@ -231,6 +244,14 @@ impl<S: SecretStore + 'static, T: Transport + 'static> CustodyRunService<S, T> {
     /// (a protocol adapter or the human UI) presents the acceptance; the
     /// registry verifies it against the exact offer.
     pub fn begin_managed_task(&self, req: ManagedTaskRequest) -> Result<CustodiedRun, String> {
+        // Waiving the per-action approvals is the human's decision. An agent
+        // operator asking for it would be an agent approving its own work.
+        if req.autonomous && !matches!(req.operator, OperatorIdentity::Human) {
+            return Err("only a human operator can start an autonomous run".into());
+        }
+        if req.autonomous && req.plan_mode {
+            return Err("autonomous mode cannot be combined with plan approval".into());
+        }
         let now = now_ms();
         let worker = WorkerMode::ManagedModel {
             provider: req.provider.clone(),
@@ -287,6 +308,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> CustodyRunService<S, T> {
                 Role::Worker,
                 crate::autonomous::RunOptions {
                     plan_mode: req.plan_mode,
+                    autonomous: req.autonomous,
                     summarize_history: req.summarize_history,
                     lean: req.lean,
                     windowed_context: req.windowed_context,
@@ -597,6 +619,7 @@ mod tests {
             lease_terms: LeaseTerms::default(),
             contract,
             plan_mode: false,
+            autonomous: false,
             summarize_history: false,
             lean: false,
             windowed_context: false,
@@ -851,6 +874,54 @@ mod tests {
     }
 
     #[test]
+    fn only_a_human_operator_can_start_an_autonomous_run() {
+        let (_tmp, rig) = rig(vec![]);
+        let ws = rig.workspace.clone();
+        // An agent operator asking to waive approvals would be an agent
+        // approving its own work: refused before custody offers anything.
+        let by_agent = request(
+            "t-agent-auto",
+            ws.clone(),
+            CustodyBudgets {
+                max_steps: 8,
+                max_tool_calls: 8,
+                max_wall_ms: 60_000,
+                max_tokens: 50_000,
+            },
+            CompletionContract {
+                gates: vec![EvidenceGate::NoPendingApprovals],
+                max_claim_attempts: 1,
+            },
+        )
+        .with_autonomous(true);
+        let err = rig.service.begin_managed_task(by_agent).unwrap_err();
+        assert!(err.contains("only a human operator"), "{err}");
+        assert!(
+            rig.custody
+                .lock()
+                .unwrap()
+                .grant_for_task("t-agent-auto")
+                .is_none(),
+            "refused before any grant was offered"
+        );
+
+        // The human UI's request can carry it, and cannot also ask for a plan gate.
+        let human = ui_managed_request(
+            "task-ui-auto".into(),
+            "build a page".into(),
+            OperatorIdentity::Human,
+            "gemini".into(),
+            None,
+            ws,
+            true,
+        )
+        .with_autonomous(true);
+        assert!(human.autonomous);
+        let err = rig.service.begin_managed_task(human).unwrap_err();
+        assert!(err.contains("cannot be combined"), "{err}");
+    }
+
+    #[test]
     fn view_reports_operator_phase_and_never_serializes_token() {
         let (_tmp, rig) = rig(vec![]);
         let ws = rig.workspace.clone();
@@ -902,6 +973,8 @@ mod tests {
             completion_summary: None,
             error: None,
             context: None,
+            autonomous: false,
+            auto_approved: 0,
         };
         let run = CustodiedRun {
             grant,

@@ -244,6 +244,13 @@ pub enum AgentEvent {
         call_id: String,
         command: String,
     },
+    /// Autonomous mode: the person turned off approval prompts for this run
+    /// when they started it, so this call ran without one. Recorded for every
+    /// call so an autonomous run is as auditable as an approved one.
+    AutoApproved {
+        call_id: String,
+        command: String,
+    },
     /// Plan mode: the proposed plan is waiting on the trusted UI.
     PlanApprovalRequired {
         items: Vec<PlanItem>,
@@ -336,6 +343,12 @@ pub struct AgentSnapshot {
     /// Windowed-context statistics (see `crate::context`); `None` for a run
     /// that uses the default stateless loop.
     pub context: Option<crate::context::ContextStats>,
+    /// The run started in autonomous mode: calls the tool runtime has already
+    /// vetted run without an approval prompt (see `RunOptions::autonomous`).
+    pub autonomous: bool,
+    /// How many calls ran without a prompt. A count, not the event log,
+    /// because the log is a bounded window.
+    pub auto_approved: usize,
 }
 
 /// Immutable task brief. Written exactly once; `write_brief` refuses to
@@ -364,6 +377,11 @@ struct TaskBrief {
     /// before any tool executes. Legacy briefs (no field) run un-gated.
     #[serde(default)]
     plan_mode: bool,
+    /// Autonomous mode: approval prompts are off for this run. Written into
+    /// the immutable brief so a resumed run keeps the choice that was made,
+    /// and a legacy brief (no field) is never autonomous.
+    #[serde(default)]
+    autonomous: bool,
     /// Opt-in: fold tool results dropped from working memory into a
     /// model-written summary (see `history`). Off by default and for every
     /// legacy brief, because each summary spends tokens.
@@ -537,6 +555,8 @@ struct RunShared {
     /// Standing approvals for this run: exact command keys the user chose
     /// "allow for this run" on. In memory only; a resumed run starts empty.
     standing: Vec<String>,
+    /// Calls that ran under autonomous mode without a prompt.
+    auto_approved: usize,
     pending_question: Option<PendingQuestion>,
     /// Trusted UI reply to `pending_question`: `Some(None)` = declined.
     answer: Option<Option<String>>,
@@ -560,6 +580,9 @@ struct RunHandle {
     shared: Mutex<RunShared>,
     cond: Condvar,
     cancel: AtomicBool,
+    /// Fixed when the run is created, from the trusted UI's own request: the
+    /// model has no route to it, exactly as it has none to `decide`.
+    autonomous: bool,
     /// Test-only: stop the loop thread without writing a terminal state,
     /// exactly as a process kill would leave the run.
     #[cfg(test)]
@@ -823,6 +846,17 @@ fn parse_one_question(args: &Value) -> Result<(String, Vec<String>), String> {
 pub struct RunOptions {
     /// Park at a plan-approval gate before any tool runs.
     pub plan_mode: bool,
+    /// Autonomous mode: do not stop for permission. File writes, patches and
+    /// commands that the tool runtime has already accepted under its hard
+    /// rules (workspace confinement, blocked programs, no network, the
+    /// capability grant, the budgets) run without an approval prompt, each one
+    /// recorded as an `AutoApproved` event, and `ask_user` questions are
+    /// declined so the model decides for itself. It widens nothing: a call
+    /// the runtime refuses is still refused, a run still stops at its
+    /// budgets, and Cancel still works. Calls into external MCP servers are
+    /// the exception and still ask, because REX cannot see what they do.
+    /// Cannot be combined with `plan_mode`, whose whole point is a human gate.
+    pub autonomous: bool,
     /// Fold tool results that drop out of working memory into a
     /// model-written summary. Each summary is one extra model call.
     pub summarize_history: bool,
@@ -915,6 +949,8 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
             completion_summary: state.completion_summary.clone(),
             error: state.error.clone(),
             context: state.context.clone(),
+            autonomous: handle.autonomous,
+            auto_approved: state.auto_approved,
         }
     }
 
@@ -1050,11 +1086,19 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
     ) -> Result<AgentSnapshot, String> {
         let RunOptions {
             plan_mode,
+            autonomous,
             summarize_history,
             lean,
             windowed_context,
             context_window,
         } = opts;
+        if autonomous && plan_mode {
+            return Err(
+                "autonomous mode cannot be combined with plan approval: a plan gate is a \
+                 human decision, and autonomous mode is the choice not to make them"
+                    .into(),
+            );
+        }
         let context_window = context_window.or_else(crate::context::limits::env_override);
         let task = task.trim();
         if task.is_empty() {
@@ -1142,6 +1186,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
             role: Some(role.name().to_string()),
             allowed_tools,
             plan_mode,
+            autonomous,
             summarize_history,
             lean,
             windowed_context,
@@ -1161,6 +1206,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
                 pending_approval: None,
                 decision: None,
                 standing: Vec::new(),
+                auto_approved: 0,
                 pending_question: None,
                 answer: None,
                 queued_answers: VecDeque::new(),
@@ -1178,6 +1224,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
             }),
             cond: Condvar::new(),
             cancel: AtomicBool::new(false),
+            autonomous,
             #[cfg(test)]
             silent_cancel: AtomicBool::new(false),
         });
@@ -1545,6 +1592,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
                 pending_approval: None,
                 decision: None,
                 standing: Vec::new(),
+                auto_approved: 0,
                 pending_question: None,
                 answer: None,
                 queued_answers: VecDeque::new(),
@@ -1562,6 +1610,7 @@ impl<S: SecretStore + 'static, T: Transport + 'static> AutonomousRunService<S, T
             }),
             cond: Condvar::new(),
             cancel: AtomicBool::new(false),
+            autonomous: brief.autonomous,
             #[cfg(test)]
             silent_cancel: AtomicBool::new(false),
         });
@@ -5805,6 +5854,19 @@ enum Decision {
     Cancelled,
 }
 
+/// Which prepared calls autonomous mode may approve for itself. Decided from
+/// the call the runtime prepared (its tool and its risk class), never from
+/// anything the model wrote. A call the runtime denied never gets this far.
+fn autonomous_may_approve(call: &PreparedCall) -> bool {
+    call.tool != "mcp_call"
+        && matches!(
+            call.risk,
+            rex_tools::RiskClass::Read
+                | rex_tools::RiskClass::Write
+                | rex_tools::RiskClass::Execute
+        )
+}
+
 /// Park the loop thread until the trusted UI answers. The model cannot reach
 /// this state transition; only `AutonomousRunService::decide` can.
 fn wait_for_decision<S: SecretStore + 'static, T: Transport + 'static>(
@@ -5840,6 +5902,22 @@ fn wait_for_decision_on(handle: &RunHandle, call: &PreparedCall) -> Decision {
                 );
                 return Decision::Approved;
             }
+        }
+        // Autonomous mode: the person chose, when starting this run, not to be
+        // asked. The call reached this point only because the tool runtime
+        // already accepted it under its hard rules, so approving it here adds
+        // no authority. It is logged like any other approval. External MCP
+        // calls are the one exception: REX cannot vet what they do.
+        if handle.autonomous && autonomous_may_approve(call) {
+            s.auto_approved += 1;
+            push_locked(
+                &mut s,
+                AgentEvent::AutoApproved {
+                    call_id: call.call_id.clone(),
+                    command: call.summary.clone(),
+                },
+            );
+            return Decision::Approved;
         }
         s.status = AgentStatus::AwaitingApproval;
         s.pending_approval = Some(call.clone());
@@ -5897,6 +5975,25 @@ fn wait_for_answer<S: SecretStore + 'static, T: Transport + 'static>(
             Ok(s) => s,
             Err(_) => return UserAnswer::Cancelled,
         };
+        // Autonomous mode: nobody is there to answer. Decline at once, so the
+        // model proceeds on its own judgement and states its assumption, which
+        // is what a declined question already tells it to do.
+        if ctx.handle.autonomous {
+            push_locked(
+                &mut s,
+                AgentEvent::QuestionAsked {
+                    question: question.clone(),
+                },
+            );
+            push_locked(
+                &mut s,
+                AgentEvent::QuestionResolved {
+                    call_id: question.call_id.clone(),
+                    answered: false,
+                },
+            );
+            return UserAnswer::Declined;
+        }
         if let Some(queued) = s.queued_answers.pop_front() {
             // answered ahead of time on the batch form: no parking
             push_locked(
@@ -7624,6 +7721,7 @@ mod tests {
             role: None,
             allowed_tools: None,
             plan_mode: false,
+            autonomous: false,
             summarize_history: false,
             lean: false,
             windowed_context: false,
@@ -9674,6 +9772,7 @@ mod tests {
             role: None,
             allowed_tools: None,
             plan_mode: false,
+            autonomous: false,
             summarize_history: false,
             lean,
             windowed_context: false,
@@ -9793,6 +9892,7 @@ mod tests {
             role: None,
             allowed_tools: None,
             plan_mode: false,
+            autonomous: false,
             summarize_history: false,
             lean: false,
             windowed_context: false,
@@ -10343,6 +10443,232 @@ mod tests {
         assert_eq!(fs::read_to_string(ws.join("y.txt")).unwrap(), "SEED");
         // not waiting any more: the trusted route refuses
         assert!(svc.decide_always(&snap.id).is_err());
+    }
+
+    fn begin_autonomous(svc: &Arc<Svc>, task: &str) -> AgentSnapshot {
+        svc.begin_in_workspace_with_options(
+            task,
+            "gemini",
+            None,
+            Some(budgets()),
+            None,
+            Role::Worker,
+            RunOptions {
+                autonomous: true,
+                ..RunOptions::default()
+            },
+            SessionMeta::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_autonomous_run_finishes_with_nobody_answering_and_logs_every_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = Script::new(vec![
+            call_turn(vec![create_call("seed.txt", "SEED")]),
+            call_turn(vec![json!({"functionCall":{"name":"run_command","args":{
+                "argv":["cp","seed.txt","copy.txt"]}}})]),
+            call_turn(vec![
+                plan_call(vec![("1", "make and copy a file", "done")]),
+                complete_call("seed.txt was created and copied to copy.txt"),
+            ]),
+        ]);
+        let svc = Arc::new(service(tmp.path(), script));
+        let snap = begin_autonomous(&svc, "no prompts");
+        assert!(snap.autonomous);
+        // No thread decides anything: if a prompt were raised, this would sit
+        // in AwaitingApproval until the wait timed out and the run was blocked.
+        let done = wait_terminal(&svc, &snap.id, 30_000);
+        assert_eq!(
+            done.terminal_reason,
+            Some(TerminalReason::Completed),
+            "{:?}",
+            done.events
+        );
+        let prompts = done
+            .events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ApprovalRequired { .. }))
+            .count();
+        let auto: Vec<&AgentEvent> = done
+            .events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::AutoApproved { .. }))
+            .collect();
+        assert_eq!(prompts, 0);
+        assert_eq!(auto.len(), 2, "one per file write and one per command");
+        assert_eq!(done.auto_approved, 2);
+        assert!(done.autonomous);
+        // the work really happened, through the runtime's normal path
+        let ws = tmp.path().join("runs").join(&snap.id).join("workspace");
+        assert_eq!(fs::read_to_string(ws.join("copy.txt")).unwrap(), "SEED");
+        match auto[1] {
+            AgentEvent::AutoApproved { command, .. } => assert!(command.contains("copy.txt")),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn without_the_option_the_same_run_still_stops_to_ask() {
+        // The control for the test above: autonomy is a choice made at the
+        // start, and a run that was not given it parks at the first write.
+        let tmp = tempfile::tempdir().unwrap();
+        let script = Script::new(vec![call_turn(vec![create_call("seed.txt", "SEED")])]);
+        let svc = Arc::new(service(tmp.path(), script));
+        let snap = svc.begin("ask me", "gemini", Some(budgets())).unwrap();
+        assert!(!snap.autonomous);
+        let parked = wait_status(&svc, &snap.id, AgentStatus::AwaitingApproval);
+        assert_eq!(parked.auto_approved, 0);
+        assert!(parked.pending_approval.is_some());
+        let _ = svc.cancel(&snap.id);
+    }
+
+    #[test]
+    fn autonomous_mode_does_not_widen_what_the_tool_runtime_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A shell, and a write that climbs out of the workspace: both are
+        // refused by the runtime's own rules before any approval is asked.
+        let script = Script::new(vec![
+            call_turn(vec![json!({"functionCall":{"name":"run_command","args":{
+                "argv":["sh","-c","echo escaped > pwned.txt"]}}})]),
+            call_turn(vec![create_call("../outside.txt", "NO")]),
+            call_turn(vec![
+                plan_call(vec![("1", "stay inside the workspace", "done")]),
+                complete_call("both attempts were refused and nothing was written"),
+            ]),
+        ]);
+        let svc = Arc::new(service(tmp.path(), script));
+        let snap = begin_autonomous(&svc, "stay inside");
+        let done = wait_terminal(&svc, &snap.id, 30_000);
+        assert_eq!(done.auto_approved, 0, "{:?}", done.events);
+        assert!(!done
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AutoApproved { .. })));
+        // The shell was refused by the runtime, not approved by anyone.
+        assert!(
+            done.events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolFinished { result }
+                    if !result.ok
+                        && result.error.as_ref().is_some_and(|err| err.detail.contains("'sh' is blocked"))
+            )),
+            "{:?}",
+            done.events
+        );
+        // With every attempt refused, no tool did any work, so the run cannot
+        // claim completion: autonomy did not turn refusals into successes.
+        assert!(
+            !matches!(done.terminal_reason, Some(TerminalReason::Completed)),
+            "{:?}",
+            done.terminal_reason
+        );
+        let runs = tmp.path().join("runs");
+        assert!(!runs.join("outside.txt").exists());
+        assert!(!runs
+            .join(&snap.id)
+            .join("workspace")
+            .join("pwned.txt")
+            .exists());
+    }
+
+    #[test]
+    fn an_autonomous_run_declines_questions_instead_of_parking_on_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = Script::new(vec![
+            call_turn(vec![json!({"functionCall":{"name":"ask_user","args":{
+                "question":"db?","choices":["pg","sqlite"]}}})]),
+            call_turn(vec![create_call("db.txt", "sqlite")]),
+            call_turn(vec![
+                plan_call(vec![("1", "decide without asking", "done")]),
+                complete_call("db.txt records sqlite, chosen without asking; assumption stated"),
+            ]),
+        ]);
+        let svc = Arc::new(service(tmp.path(), script));
+        let snap = begin_autonomous(&svc, "ask nobody");
+        let done = wait_terminal(&svc, &snap.id, 30_000);
+        assert_eq!(done.terminal_reason, Some(TerminalReason::Completed));
+        assert!(done
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::QuestionAsked { .. })));
+        assert!(done.events.iter().any(|e| matches!(
+            e,
+            AgentEvent::QuestionResolved {
+                answered: false,
+                ..
+            }
+        )));
+        assert!(done.pending_question.is_none());
+    }
+
+    #[test]
+    fn autonomous_mode_and_plan_approval_cannot_be_combined() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = Arc::new(service(tmp.path(), Script::new(vec![])));
+        let err = svc
+            .begin_in_workspace_with_options(
+                "both",
+                "gemini",
+                None,
+                Some(budgets()),
+                None,
+                Role::Worker,
+                RunOptions {
+                    autonomous: true,
+                    plan_mode: true,
+                    ..RunOptions::default()
+                },
+                SessionMeta::default(),
+            )
+            .unwrap_err();
+        assert!(err.contains("cannot be combined"), "{err}");
+    }
+
+    #[test]
+    fn only_vetted_workspace_calls_may_be_approved_by_autonomous_mode() {
+        let call = |tool: &str, risk: rex_tools::RiskClass| PreparedCall {
+            call_id: "c".into(),
+            tool: tool.into(),
+            summary: "s".into(),
+            risk,
+            approval_required: true,
+            policy_reason: String::new(),
+            standing_key: None,
+        };
+        use rex_tools::RiskClass::*;
+        assert!(autonomous_may_approve(&call("create_file", Write)));
+        assert!(autonomous_may_approve(&call("apply_patch", Write)));
+        assert!(autonomous_may_approve(&call("run_command", Execute)));
+        // REX cannot see what an external server does with a call.
+        assert!(!autonomous_may_approve(&call("mcp_call", Execute)));
+        // and a denied call is never approved by anyone
+        assert!(!autonomous_may_approve(&call("run_command", Denied)));
+    }
+
+    #[test]
+    fn the_choice_is_kept_in_the_immutable_brief_and_a_legacy_brief_is_not_autonomous() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = Script::new(vec![call_turn(vec![complete_call("done")])]);
+        let svc = Arc::new(service(tmp.path(), script));
+        let snap = begin_autonomous(&svc, "remember me");
+        wait_terminal(&svc, &snap.id, 30_000);
+        let brief_path = tmp
+            .path()
+            .join("runs")
+            .join(&snap.id)
+            .join("state")
+            .join("brief.json");
+        let mut brief: Value =
+            serde_json::from_str(&fs::read_to_string(&brief_path).unwrap()).unwrap();
+        assert_eq!(brief["autonomous"], json!(true));
+        brief.as_object_mut().unwrap().remove("autonomous");
+        let legacy: TaskBrief = serde_json::from_value(brief).unwrap();
+        assert!(
+            !legacy.autonomous,
+            "a brief written before this field existed"
+        );
     }
 
     #[test]
@@ -13764,6 +14090,7 @@ mod tests {
                 role: None,
                 allowed_tools: None,
                 plan_mode: false,
+                autonomous: false,
                 summarize_history: false,
                 lean: false,
                 windowed_context: true,

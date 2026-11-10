@@ -32,6 +32,8 @@ import { TerminalView } from "./components/TerminalView";
 import { WorkspaceEditor } from "./components/WorkspaceEditor";
 import { GitPanel } from "./components/GitPanel";
 import { CheckpointPanel } from "./components/CheckpointPanel";
+import { GitStatusChip, WorkspaceChip } from "./components/WorkspaceChip";
+import { WorkspaceProvider } from "./data/workspaceContext";
 import { RexTaskList, RexTaskView } from "./components/RexTaskView";
 import {
   agentCancel,
@@ -89,7 +91,17 @@ export function readInstalledAgentSelection(): { id: InstalledAgentId; label: st
 // the first run starts it settles - a brief blur + downward travel while its
 // wrapper collapses - and unmounts, leaving exactly one composer at the
 // bottom of the session. Reduced motion swaps it instantly.
+// The folder the Terminal, Editor and Git tabs work in, and its git state, are
+// shared by those tabs and the status chips, so they live above everything.
 export default function App() {
+  return (
+    <WorkspaceProvider>
+      <AppShell />
+    </WorkspaceProvider>
+  );
+}
+
+function AppShell() {
   const [operatorMode, setOperatorMode] = useState<OperatorMode | null>(() =>
     loadOperatorMode((k) => window.localStorage.getItem(k))
   );
@@ -98,6 +110,13 @@ export default function App() {
     setOperatorMode(mode);
   };
   const [view, setView] = useState<"task" | "settings" | "terminal" | "editor" | "git">("task");
+  // The Terminal, Editor and Git tabs stay mounted once shown, so going to
+  // another tab and back keeps your shell, your open file and its unsaved edits.
+  const [visited, setVisited] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    setVisited((prev) => (prev.has(view) ? prev : new Set(prev).add(view)));
+  }, [view]);
+  const mounted = (tab: string) => visited.has(tab) || view === tab;
   const [browserPhase, setBrowserPhase] = useState<"closed" | "active" | "collapsed">("closed");
   const [browserRun, setBrowserRun] = useState(0);
   const [ultra, setUltra] = useState(false);
@@ -156,6 +175,21 @@ export default function App() {
   // Plan mode: the run proposes a plan and parks in awaiting_plan until the
   // user approves it. Reset on each new run start.
   const [planMode, setPlanMode] = useState(false);
+  // Autonomous mode: no approval prompts for the custody run. Unlike Plan it is
+  // not reset by starting a run (a person running several tasks in a row should
+  // not have to confirm each), but it is never remembered across sessions, and
+  // the chip in the status row shows it whenever it is on.
+  const [autonomous, setAutonomous] = useState(false);
+  // Plan and autonomous mode exclude each other: a plan gate is a human
+  // decision, and autonomous mode is the choice not to make them.
+  const choosePlanMode = (on: boolean) => {
+    setPlanMode(on);
+    if (on) setAutonomous(false);
+  };
+  const chooseAutonomous = (on: boolean) => {
+    setAutonomous(on);
+    if (on) setPlanMode(false);
+  };
   // Opt-in per run: each history summary is an extra model call.
   const [summarizeHistory, setSummarizeHistory] = useState(false);
   // Lean prompt: null follows the provider (on for the free-tier presets), an
@@ -365,6 +399,7 @@ export default function App() {
     installedAgentLabel: installedSelection?.label ?? null,
     liveCapable,
     tourMode,
+    autonomous,
   });
 
   // Everything that says "a run is going" or "a run just ended", from every
@@ -396,6 +431,7 @@ export default function App() {
       installedAgentLabel: selection?.label ?? null,
       liveCapable,
       tourMode,
+      autonomous,
     });
     if (path.kind === "unavailable") {
       // No backend and no explicit tour: never silently animate a fake run.
@@ -496,7 +532,7 @@ export default function App() {
           const summarize = summarizeHistory;
           setPlanMode(false);
           setSummarizeHistory(false);
-          const view = await custodyBegin(label, mode, summarize, lean ?? undefined);
+          const view = await custodyBegin(label, mode, summarize, lean ?? undefined, autonomous);
           if (!stillHere()) return;
           setCustody({ grantId: view.grant_id, phase: view.phase, operator: view.operator });
           setLiveRun(view.snapshot);
@@ -668,27 +704,33 @@ export default function App() {
       <div className="ultra-status" role="status" aria-live="polite"><span>ULTRA</span><b>{ultra ? "Verification tier engaged" : "Verification tier offline"}</b><small>{ultra ? "Contract, adversary and clean-room judge active" : "No extra capabilities are active"}</small></div>
       <div className="status-wrap mx-auto w-full max-w-[820px] px-5 pt-3 sm:px-8">
         <div className="status-row">
-          <OperatorModeChip mode={operatorMode} onSwitch={chooseOperatorMode} />
+          <div className="status-group">
+            <OperatorModeChip mode={operatorMode} onSwitch={chooseOperatorMode} />
+            {autonomous && executionPath.kind === "custody" && (
+              <span className="autonomy-chip" role="status" title="Runs start without approval prompts. Turn it off in the run mode control.">
+                <i aria-hidden="true" />
+                Autonomous · no approval prompts
+              </span>
+            )}
+            <WorkspaceChip />
+            <GitStatusChip onOpen={() => setView("git")} />
+          </div>
           <BackendBadge live={liveCapable} />
         </div>
         {fableSession && <FableCountdown sessionName={fableSession} />}
       </div>
       <div className="fast-status" role="status" aria-live="polite"><span>FAST</span><b>{fast ? "TEMPO PROFILE ARMED" : "Fast preview off"}</b><small>Visual only · execution speed unchanged</small><i aria-hidden="true" /></div>
       <main className="main-spine mx-auto w-full max-w-[820px] px-5 pb-12 sm:px-8">
-        {view === "terminal" ? (
-          desktop ? <TerminalView /> : <DesktopOnly feature="terminal" />
-        ) : view === "editor" ? (
-          desktop ? <WorkspaceEditor /> : <DesktopOnly feature="editor" />
-        ) : view === "git" ? (
-          desktop ? (
-            <>
-              <GitPanel />
-              <CheckpointPanel />
-            </>
-          ) : (
-            <DesktopOnly feature="git" />
-          )
-        ) : view === "settings" ? (
+        {!desktop && (view === "terminal" || view === "editor" || view === "git") && <DesktopOnly feature={view} />}
+        {desktop && mounted("terminal") && <TerminalView active={view === "terminal"} />}
+        {desktop && mounted("editor") && <WorkspaceEditor active={view === "editor"} />}
+        {desktop && mounted("git") && (
+          <div className="git-view" hidden={view !== "git"}>
+            <GitPanel />
+            <CheckpointPanel />
+          </div>
+        )}
+        {view === "settings" && (
           <SettingsView
             motion={motion}
             setMotion={setMotion}
@@ -701,7 +743,8 @@ export default function App() {
               setMotion("system");
             }}
           />
-        ) : (
+        )}
+        {view === "task" && (
           <>
             {hero !== "gone" && (
               <div className={`hero-wrap ${hero === "settling" ? "settling" : ""}`}>
@@ -716,7 +759,9 @@ export default function App() {
                       state={state}
                       onRun={onRun}
                       planMode={planMode}
-                      setPlanMode={setPlanMode}
+                      setPlanMode={choosePlanMode}
+                      autonomous={autonomous}
+                      setAutonomous={chooseAutonomous}
                       summarizeHistory={summarizeHistory}
                       setSummarizeHistory={setSummarizeHistory}
                       lean={lean}

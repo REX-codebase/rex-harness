@@ -302,115 +302,242 @@ fn tool_call_diff(
 }
 
 // ---------------------------------------------------------------------------
-// Workspace editor: direct file read/write bound to the workspace.
+// Workspace: the folder the Terminal, Editor and Git tabs work in.
+//
+// The webview is not a trusted caller (it renders model-written text and
+// previews of generated pages), so no command below takes its word for a path.
+// Every folder goes through `WorkspaceRegistry::resolve`, which accepts only a
+// folder inside one the person opened with the native dialog, or inside the
+// runs root where REX's own sandboxes live. `workspace_pick` is the only way a
+// folder is added, and it adds only what the dialog returned.
 // ---------------------------------------------------------------------------
 
-/// Validate that `path` (relative or absolute) resolves under `workspace`.
-fn resolve_workspace_path(workspace: &str, path: &str) -> Result<PathBuf, String> {
-    let ws = PathBuf::from(workspace)
-        .canonicalize()
-        .map_err(|e| format!("workspace not found: {e}"))?;
-    let target = if PathBuf::from(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        ws.join(path)
-    };
-    // For existing files, canonicalize to resolve symlinks. For new files,
-    // canonicalize the parent.
-    let canonical = if target.exists() {
-        target
-            .canonicalize()
-            .map_err(|e| format!("cannot resolve path: {e}"))?
-    } else {
-        let parent = target.parent().ok_or("invalid path")?;
-        let canon_parent = parent
-            .canonicalize()
-            .map_err(|e| format!("parent not found: {e}"))?;
-        canon_parent.join(target.file_name().ok_or("invalid path")?)
-    };
-    if !canonical.starts_with(&ws) {
-        return Err("path escapes the workspace".to_string());
-    }
-    Ok(canonical)
+type Workspaces = Arc<rex_workspace::WorkspaceRegistry>;
+
+/// The folders the chip and its menu show.
+#[tauri::command]
+fn workspace_state(workspaces: State<'_, Workspaces>) -> rex_workspace::WorkspaceSnapshot {
+    workspaces.snapshot()
 }
 
-/// Read a workspace file for the inline editor.
-#[tauri::command]
-fn workspace_read_file(workspace: String, path: String) -> Result<String, String> {
-    let target = resolve_workspace_path(&workspace, &path)?;
-    std::fs::read_to_string(&target).map_err(|e| format!("cannot read file: {e}"))
-}
-
-/// Write a workspace file from the inline editor. The user is explicitly
-/// editing, so this does not go through the approval gate — the editor UI
-/// shows a dirty indicator and the write is the user's own action.
-#[tauri::command]
-fn workspace_write_file(workspace: String, path: String, content: String) -> Result<(), String> {
-    let target = resolve_workspace_path(&workspace, &path)?;
-    if content.len() > 2 * 1024 * 1024 {
-        return Err("file exceeds 2 MiB write limit".to_string());
-    }
-    std::fs::write(&target, content).map_err(|e| format!("cannot write file: {e}"))
-}
-
-/// List files in the workspace (non-recursive, for the editor picker).
-#[tauri::command]
-fn workspace_list_files(workspace: String) -> Result<Vec<String>, String> {
-    let ws = PathBuf::from(&workspace)
-        .canonicalize()
-        .map_err(|e| format!("workspace not found: {e}"))?;
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(&ws).map_err(|e| format!("cannot list: {e}"))? {
-        let entry = entry.map_err(|e| format!("cannot read entry: {e}"))?;
-        let path = entry.path();
-        if path.is_file() {
-            if let Ok(rel) = path.strip_prefix(&ws) {
-                files.push(rel.to_string_lossy().to_string());
-            }
+/// Ask the person for a folder with the system dialog and open it. `None` when
+/// they cancel.
+#[tauri::command(async)]
+fn workspace_pick(
+    app: tauri::AppHandle,
+    workspaces: State<'_, Workspaces>,
+) -> Result<Option<rex_workspace::WorkspaceSnapshot>, String> {
+    use tauri::Manager;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = app.clone();
+    // Native dialogs belong on the main thread (macOS requires it).
+    app.run_on_main_thread(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Open a project folder");
+        if let Some(window) = handle.get_webview_window("main") {
+            dialog = dialog.set_parent(&window);
         }
+        let _ = tx.send(dialog.pick_folder());
+    })
+    .map_err(|e| format!("cannot open the folder dialog: {e}"))?;
+    let chosen = rx
+        .recv()
+        .map_err(|_| "the folder dialog closed unexpectedly".to_string())?;
+    match chosen {
+        Some(path) => {
+            workspaces.register(&path)?;
+            Ok(Some(workspaces.snapshot()))
+        }
+        None => Ok(None),
     }
-    files.sort();
-    Ok(files)
 }
 
-// ---------------------------------------------------------------------------
-// Git integration: user-initiated from the Git panel. The user clicks Commit
-// themselves; these do not go through the model approval gate.
-// ---------------------------------------------------------------------------
-
-/// `git status --porcelain` for the workspace.
+/// Switch to a folder opened before, or to one of REX's run sandboxes.
 #[tauri::command]
-fn git_status(
-    tools: State<'_, Arc<LocalTools>>,
+fn workspace_activate(
+    workspaces: State<'_, Workspaces>,
+    path: String,
+) -> Result<rex_workspace::WorkspaceSnapshot, String> {
+    workspaces.activate(&path)?;
+    Ok(workspaces.snapshot())
+}
+
+/// Take a folder off the list. The folder itself is not touched.
+#[tauri::command]
+fn workspace_forget(
+    workspaces: State<'_, Workspaces>,
+    path: String,
+) -> Result<rex_workspace::WorkspaceSnapshot, String> {
+    workspaces.forget(&path)?;
+    Ok(workspaces.snapshot())
+}
+
+/// Every file in the folder (what git tracks plus what it does not ignore,
+/// else a walk that skips build output), for the editor's file list.
+#[tauri::command(async)]
+fn workspace_tree(
+    workspaces: State<'_, Workspaces>,
+    git: State<'_, rex_workspace::Git>,
     workspace: String,
-) -> Result<Vec<rex_tools::GitFile>, String> {
-    tools
-        .git_status(PathBuf::from(workspace).as_path())
-        .map_err(|e| e.to_string())
+) -> Result<rex_workspace::FileListing, String> {
+    let ws = workspaces.resolve(&workspace)?;
+    rex_workspace::files::list_files(&git, &ws, rex_workspace::files::MAX_LISTED)
 }
 
-/// `git diff` (unstaged + staged) for a single path.
-#[tauri::command]
-fn git_diff(
-    tools: State<'_, Arc<LocalTools>>,
+/// Read a text file for the editor.
+#[tauri::command(async)]
+fn workspace_read_file(
+    workspaces: State<'_, Workspaces>,
     workspace: String,
     path: String,
-) -> Result<String, String> {
-    tools
-        .git_diff(PathBuf::from(workspace).as_path(), &path)
-        .map_err(|e| e.to_string())
+) -> Result<rex_workspace::TextFile, String> {
+    let ws = workspaces.resolve(&workspace)?;
+    rex_workspace::files::read_text(&ws, &path)
 }
 
-/// `git add -A` + `git commit` with the user's message.
-#[tauri::command]
+/// Save a text file from the editor. The person is editing their own file, so
+/// this is not a model tool call and does not go through the approval gate.
+#[tauri::command(async)]
+fn workspace_write_file(
+    workspaces: State<'_, Workspaces>,
+    workspace: String,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let ws = workspaces.resolve(&workspace)?;
+    rex_workspace::files::write_text(&ws, &path, &content)
+}
+
+/// Create an empty file (and any folders above it) from the editor.
+#[tauri::command(async)]
+fn workspace_create_file(
+    workspaces: State<'_, Workspaces>,
+    workspace: String,
+    path: String,
+) -> Result<(), String> {
+    let ws = workspaces.resolve(&workspace)?;
+    rex_workspace::files::create_file(&ws, &path)
+}
+
+// ---------------------------------------------------------------------------
+// Git: the person acting on their own repository, with their own git and
+// configuration. Not model tool calls, so no approval gate; the commit message
+// is theirs. These run off the main thread (`async`) because git can be slow.
+// ---------------------------------------------------------------------------
+
+/// Branch, ahead/behind and every changed file, for the status chip and the
+/// Git tab. Not being in a repository is an answer (`is_repo: false`), not an error.
+#[tauri::command(async)]
+fn git_overview(
+    workspaces: State<'_, Workspaces>,
+    git: State<'_, rex_workspace::Git>,
+    workspace: String,
+) -> Result<rex_workspace::GitOverview, String> {
+    let ws = workspaces.resolve(&workspace)?;
+    Ok(git.overview(&ws))
+}
+
+/// Stage the named paths.
+#[tauri::command(async)]
+fn git_stage(
+    workspaces: State<'_, Workspaces>,
+    git: State<'_, rex_workspace::Git>,
+    workspace: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    let ws = workspaces.resolve(&workspace)?;
+    git.stage(&ws, &paths)
+}
+
+/// Stage everything.
+#[tauri::command(async)]
+fn git_stage_all(
+    workspaces: State<'_, Workspaces>,
+    git: State<'_, rex_workspace::Git>,
+    workspace: String,
+) -> Result<(), String> {
+    let ws = workspaces.resolve(&workspace)?;
+    git.stage_all(&ws)
+}
+
+/// Take the named paths out of the index, keeping the edits.
+#[tauri::command(async)]
+fn git_unstage(
+    workspaces: State<'_, Workspaces>,
+    git: State<'_, rex_workspace::Git>,
+    workspace: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    let ws = workspaces.resolve(&workspace)?;
+    git.unstage(&ws, &paths)
+}
+
+/// The diff of one path, staged or not. An untracked file is shown as added.
+#[tauri::command(async)]
+fn git_diff(
+    workspaces: State<'_, Workspaces>,
+    git: State<'_, rex_workspace::Git>,
+    workspace: String,
+    path: String,
+    staged: bool,
+) -> Result<String, String> {
+    let ws = workspaces.resolve(&workspace)?;
+    git.diff(&ws, &path, staged)
+}
+
+/// Commit what is staged, with the person's message.
+#[tauri::command(async)]
 fn git_commit(
-    tools: State<'_, Arc<LocalTools>>,
+    workspaces: State<'_, Workspaces>,
+    git: State<'_, rex_workspace::Git>,
     workspace: String,
     message: String,
+) -> Result<rex_workspace::CommitInfo, String> {
+    let ws = workspaces.resolve(&workspace)?;
+    git.commit(&ws, &message)
+}
+
+/// `git init`, for a folder that is not a repository yet.
+#[tauri::command(async)]
+fn git_init(
+    workspaces: State<'_, Workspaces>,
+    git: State<'_, rex_workspace::Git>,
+    workspace: String,
 ) -> Result<String, String> {
-    tools
-        .git_commit(PathBuf::from(workspace).as_path(), &message)
-        .map_err(|e| e.to_string())
+    let ws = workspaces.resolve(&workspace)?;
+    git.init(&ws)
+}
+
+/// The latest commits, newest first.
+#[tauri::command(async)]
+fn git_log(
+    workspaces: State<'_, Workspaces>,
+    git: State<'_, rex_workspace::Git>,
+    workspace: String,
+    limit: Option<usize>,
+) -> Result<Vec<rex_workspace::CommitSummary>, String> {
+    let ws = workspaces.resolve(&workspace)?;
+    git.log(&ws, limit.unwrap_or(20))
+}
+
+/// What Settings shows about this install, for support and for finding the data.
+#[derive(serde::Serialize)]
+struct AppInfo {
+    version: &'static str,
+    data_dir: String,
+    runs_root: String,
+    platform: &'static str,
+    git_available: bool,
+}
+
+#[tauri::command]
+fn app_info(git: State<'_, rex_workspace::Git>) -> AppInfo {
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        data_dir: rex_workspace::display_path(&config_dir()),
+        runs_root: rex_workspace::display_path(&config_dir().join("agent-runs")),
+        platform: std::env::consts::OS,
+        git_available: git.available(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,19 +548,23 @@ fn git_commit(
 #[tauri::command]
 fn checkpoint_create(
     checkpoints: State<'_, Arc<checkpoint::CheckpointStore>>,
+    workspaces: State<'_, Workspaces>,
     workspace: String,
     label: String,
 ) -> Result<checkpoint::Checkpoint, String> {
-    checkpoints.create(PathBuf::from(workspace).as_path(), &label)
+    let ws = workspaces.resolve(&workspace)?;
+    checkpoints.create(ws.as_path(), &label)
 }
 
 /// List checkpoints for the workspace, newest first.
 #[tauri::command]
 fn checkpoint_list(
     checkpoints: State<'_, Arc<checkpoint::CheckpointStore>>,
+    workspaces: State<'_, Workspaces>,
     workspace: String,
 ) -> Result<Vec<checkpoint::Checkpoint>, String> {
-    checkpoints.list(PathBuf::from(workspace).as_path())
+    let ws = workspaces.resolve(&workspace)?;
+    checkpoints.list(ws.as_path())
 }
 
 /// Restore a checkpoint. Auto-snapshots the current state first and returns
@@ -441,10 +572,12 @@ fn checkpoint_list(
 #[tauri::command]
 fn checkpoint_restore(
     checkpoints: State<'_, Arc<checkpoint::CheckpointStore>>,
+    workspaces: State<'_, Workspaces>,
     workspace: String,
     id: String,
 ) -> Result<checkpoint::Checkpoint, String> {
-    checkpoints.restore(PathBuf::from(workspace).as_path(), &id)
+    let ws = workspaces.resolve(&workspace)?;
+    checkpoints.restore(ws.as_path(), &id)
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +865,7 @@ fn custody_begin(
     provider: Option<String>,
     model: Option<String>,
     plan_mode: Option<bool>,
+    autonomous: Option<bool>,
     summarize_history: Option<bool>,
     lean: Option<bool>,
     windowed_context: Option<bool>,
@@ -742,7 +876,7 @@ fn custody_begin(
     // service refuses explicit workspaces outside it.
     let workspace = config_dir().join("agent-runs").join(&task_id);
     std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
-    let mut req = rex_providers::ui_managed_request(
+    let req = rex_providers::ui_managed_request(
         task_id,
         task,
         rex_custody::OperatorIdentity::Human,
@@ -751,6 +885,10 @@ fn custody_begin(
         workspace,
         plan_mode.unwrap_or(false),
     );
+    // Autonomous mode: the person turned off approval prompts for this run in
+    // the UI. Off unless the UI sends an explicit true; custody refuses it
+    // for anyone but the human operator, which this command always is.
+    let mut req = req.with_autonomous(autonomous.unwrap_or(false));
     // Opt-in; off unless the UI asks, because each summary spends tokens.
     req.summarize_history = summarize_history.unwrap_or(false);
     // Opt-in too: the lean profile gives up web access, skills and memory.
@@ -991,25 +1129,22 @@ fn fable_mcp_probe(server_command: String) -> Result<FableMcpLink, String> {
 // Interactive terminal: PTY sessions bound to the workspace.
 // ---------------------------------------------------------------------------
 
-/// Spawn a terminal in `workspace` (must sit under the agent runs root).
-/// Returns the terminal ID. Output arrives as `terminal-output-{id}` events.
+/// Spawn a terminal in `workspace`, a folder the person opened (or one of REX's
+/// run sandboxes). Returns the terminal ID. Output arrives as
+/// `terminal-output-{id}` events and the end as `terminal-exit-{id}`.
 #[tauri::command]
 fn terminal_spawn(
     app: tauri::AppHandle,
     terminals: State<'_, terminal::SharedTerminals>,
+    workspaces: State<'_, Workspaces>,
     workspace: String,
     cols: Option<u16>,
     rows: Option<u16>,
 ) -> Result<String, String> {
-    let runs_root = config_dir().join("agent-runs");
-    let id = terminals.spawn(
-        PathBuf::from(workspace),
-        &runs_root,
-        cols.unwrap_or(80),
-        rows.unwrap_or(24),
-    )?;
+    let cwd = workspaces.resolve(&workspace)?;
+    let id = terminals.spawn(cwd, cols.unwrap_or(80), rows.unwrap_or(24))?;
 
-    // Drain the PTY in a background thread; forward bytes as events.
+    // Drain the PTY in a background thread; forward text as events.
     // The event name embeds the terminal ID so the UI routes correctly.
     let event_name = format!("terminal-output-{id}");
     let terminals_clone = terminals.inner().clone();
@@ -1020,18 +1155,26 @@ fn terminal_spawn(
             Err(_) => return,
         };
         let mut buf = [0u8; 8192];
+        // A character can straddle two reads; decode across them.
+        let mut text = terminal::Utf8Stream::default();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF: child exited
                 Ok(n) => {
-                    // Lossy conversion is fine for terminal output; the
-                    // alternative is dropping undecodable bytes entirely.
-                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let _ = app.emit(&event_name, text);
+                    let chunk = text.push(&buf[..n]);
+                    if !chunk.is_empty() {
+                        let _ = app.emit(&event_name, chunk);
+                    }
                 }
                 Err(_) => break,
             }
         }
+        let rest = text.finish();
+        if !rest.is_empty() {
+            let _ = app.emit(&event_name, rest);
+        }
+        // The shell ended: reap it and drop the session so it does not linger.
+        let _ = terminals_clone.kill(&id_clone);
         let _ = app.emit(&format!("terminal-exit-{id_clone}"), ());
     });
 
@@ -1066,17 +1209,6 @@ fn terminal_kill(
     id: String,
 ) -> Result<(), String> {
     terminals.kill(&id)
-}
-
-/// The default workspace for new terminals: the agent runs root.
-/// The UI passes this to `terminal_spawn`; the backend re-validates it.
-#[tauri::command]
-fn terminal_default_workspace() -> Result<String, String> {
-    let root = config_dir().join("agent-runs");
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    root.to_str()
-        .map(|s| s.to_string())
-        .ok_or("workspace path is not UTF-8".to_string())
 }
 
 /// Current custody phase for a grant (active, verifying, released, ...).
@@ -1485,6 +1617,12 @@ fn main() {
         InstalledAgentManager::new(config_dir().join("installed-agent-runs"))
             .expect("could not open installed-agent run store"),
     );
+    // The folders the Terminal, Editor and Git tabs may work in: only ones the
+    // person opened through the native dialog, plus REX's own run sandboxes.
+    let workspaces: Workspaces = Arc::new(rex_workspace::WorkspaceRegistry::open(
+        &config_dir(),
+        config_dir().join("agent-runs"),
+    ));
     let agent = Arc::new(AutonomousRunService::new(
         ProviderService::new(
             FileSecretStore::new(config_dir()).expect("could not open the credential store"),
@@ -1527,6 +1665,8 @@ fn main() {
         .manage(custody_runs)
         .manage(installed_runs)
         .manage(terminal::SharedTerminals::default())
+        .manage(workspaces)
+        .manage(rex_workspace::Git::system())
         .manage(Arc::new(
             checkpoint::CheckpointStore::new(&config_dir()).expect("checkpoint store"),
         ))
@@ -1565,12 +1705,23 @@ fn main() {
             tool_execute,
             tool_cancel,
             tool_call_diff,
+            workspace_state,
+            workspace_pick,
+            workspace_activate,
+            workspace_forget,
+            workspace_tree,
             workspace_read_file,
             workspace_write_file,
-            workspace_list_files,
-            git_status,
+            workspace_create_file,
+            app_info,
+            git_overview,
+            git_stage,
+            git_stage_all,
+            git_unstage,
             git_diff,
             git_commit,
+            git_init,
+            git_log,
             checkpoint_create,
             checkpoint_list,
             checkpoint_restore,
@@ -1616,7 +1767,6 @@ fn main() {
             terminal_write,
             terminal_resize,
             terminal_kill,
-            terminal_default_workspace,
             rex_task_begin,
             rex_task_follow_up,
             rex_tasks,

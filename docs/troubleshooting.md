@@ -74,6 +74,33 @@ otherwise lets the system choose one.
 data folder (the default on Windows; set `REX_STATE_DIR` on macOS and Linux). See
 [data-and-storage.md](data-and-storage.md#sharing-a-sign-in-between-the-app-and-the-cli).
 
+## The Terminal, Editor and Git tabs
+
+**"Open a folder to …".** These tabs need a project folder. Use the folder chip in the
+status row, or **Open folder…** on the tab. A path cannot be typed: it has to be chosen
+in the system dialog. See [workspace.md](workspace.md).
+
+**The git chip says "Git not installed".** Install git from https://git-scm.com and
+reopen REX. It looks in the usual places as well as `PATH`, so a desktop app started
+from the Dock or Start menu still finds it.
+
+**A commit fails with "Git does not know who you are".** Run
+`git config --global user.name "Your Name"` and
+`git config --global user.email "you@example.com"` in a terminal, then commit again.
+
+**The git chip says "Git unavailable" and shows a message about ownership.** Git
+refuses a repository owned by a different user. Follow the command in the message
+(`git config --global --add safe.directory <folder>`).
+
+**The Editor will not open a file.** It opens only UTF-8 text files up to 2 MB, and
+says which rule the file broke. Use the Terminal for anything else.
+
+**The Editor shows "Loading editor…" for a long time.** The editor is bundled and
+needs no network. If it never appears, restart the app and report it.
+
+**The shell exited.** Press **Restart** on the Terminal tab; it starts a new shell in
+the same folder.
+
 ## Running tasks
 
 **A run is "waiting on approval" and nothing happens.** It is waiting for you.

@@ -38,7 +38,8 @@ Explorer, type `%LOCALAPPDATA%\rex-harness` in the address bar.
 | `active/` | One small marker per run in flight (for `rex ps`) | No |
 | `sessions/` | Named sessions and their compacted history | Describes your tasks |
 | `agent-runs/` | Each run's working copy, state, evidence and ledger | Contains your code |
-| `checkpoints/` | Workspace snapshots (desktop app) | Contains your code |
+| `checkpoints/` | Workspace snapshots (desktop app); not `node_modules`, `target`, `dist` and similar | Contains your code |
+| `workspaces.json` | The folders you opened for the Terminal, Editor and Git tabs, and the active one | Lists your folder paths |
 | `config.json` | Operator settings such as `max_parallel_runs` | No |
 | `mcp.json`, `mcp_servers.json` | External MCP server definitions | `env` values are clear text |
 | `cost.json`, `search-index.json`, `fable-sessions/` | Cost records, the local search index, Fable gate sessions (desktop app) | Describes your work |

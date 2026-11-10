@@ -44,7 +44,3 @@ export function onTerminalExit(
 ): Promise<UnlistenFn> {
   return listen(`terminal-exit-${id}`, () => handler());
 }
-
-export async function terminalDefaultWorkspace(): Promise<string> {
-  return invoke<string>("terminal_default_workspace");
-}

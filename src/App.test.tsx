@@ -34,6 +34,7 @@ vi.mock("./data/agentRun", async (importOriginal) => ({
 }));
 
 import App from "./App";
+import { resetAutonomyAcknowledgement } from "./data/autonomy";
 
 function snapshot(partial: Partial<AgentSnapshot>): AgentSnapshot {
   return {
@@ -84,6 +85,7 @@ beforeEach(() => {
   bridge.agentSnapshot.mockReset();
   bridge.agentTeardown.mockReset().mockResolvedValue({ ok: true });
   window.localStorage.clear();
+  resetAutonomyAcknowledgement();
   window.localStorage.setItem("rex-operator-mode", "human");
   Element.prototype.scrollIntoView = vi.fn();
 });
@@ -114,6 +116,45 @@ describe("with no backend connected", () => {
 describe("with a backend connected", () => {
   beforeEach(() => {
     bridge.available = true;
+  });
+
+  it("never turns approvals off unless the person chose Auto and confirmed", async () => {
+    bridge.custodyBegin.mockResolvedValue(custodyView(snapshot({})));
+    bridge.agentSnapshot.mockResolvedValue(snapshot({}));
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Backend connected")).toBeTruthy());
+    await typeTask("a normal run");
+    fireEvent.click(runButton());
+    await screen.findByLabelText("Autonomous run");
+    // (task, planMode, summarizeHistory, lean, autonomous)
+    expect(bridge.custodyBegin.mock.calls[0][4]).toBe(false);
+    expect(screen.queryByText(/Autonomous · no approval prompts/)).toBeNull();
+  });
+
+  it("sends autonomous: true after Auto is confirmed, shows it, and Plan switches it off", async () => {
+    bridge.custodyBegin.mockResolvedValue(custodyView(snapshot({ autonomous: true, auto_approved: 2 })));
+    bridge.agentSnapshot.mockResolvedValue(snapshot({ autonomous: true, auto_approved: 2 }));
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Backend connected")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+    fireEvent.click(screen.getByRole("button", { name: "Turn on autonomous mode" }));
+    expect(screen.getByText("Autonomous · no approval prompts")).toBeTruthy();
+    expect(screen.getByText("Autonomous run")).toBeTruthy();
+
+    // Plan and Auto exclude each other.
+    fireEvent.click(screen.getByRole("radio", { name: "Plan" }));
+    expect(screen.queryByText("Autonomous · no approval prompts")).toBeNull();
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+    expect(screen.getByText("Autonomous · no approval prompts")).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "Plan" }).getAttribute("aria-checked")).toBe("false");
+
+    await typeTask("work on your own");
+    fireEvent.click(screen.getByRole("button", { name: "Run task autonomously" }));
+    await screen.findByLabelText("Autonomous run");
+    expect(bridge.custodyBegin.mock.calls[0][1]).toBe(false); // not a plan run
+    expect(bridge.custodyBegin.mock.calls[0][4]).toBe(true);
+    expect(await screen.findByText(/2 actions ran without asking/)).toBeTruthy();
   });
 
   it("does not list invented sample runs next to the person's real work", async () => {

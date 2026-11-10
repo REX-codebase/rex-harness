@@ -21,7 +21,8 @@ Defined in [local-tools.md](local-tools.md) and enforced in `crates/rex-tools`:
 - One explicit **workspace root**, canonicalised. Relative paths only: `..`,
   absolute paths, canonical escapes and symlink components are refused.
 - Reads are bounded (2 MiB). **Every write and every command needs a visible
-  approval** bound to the stored request, not to a flag the model can set.
+  approval** bound to the stored request, not to a flag the model can set, unless
+  the person started the run in autonomous mode (below).
   Edits are exact-match and fail on stale or ambiguous content.
 - Commands are **argv, never a shell string**. Shells, interpreters, network
   clients, privilege tools, destructive file and process commands, and command
@@ -35,8 +36,22 @@ Defined in [local-tools.md](local-tools.md) and enforced in `crates/rex-tools`:
 - Agents work on a **disposable copy** of your workspace. Changes are promoted
   only after review.
 
-`--yes` turns approvals off for a run. Use it only in a sandbox or CI you
-control; it is the single flag that lets a model act without you.
+`--yes` (command line) and **Autonomous mode** (desktop app) turn the approval
+prompts off for a run. Use them only for work you would let run unattended. They are
+the two ways a model acts without you asking first, and both are a choice the person
+makes when starting the run, never one the model can make. Neither removes a limit:
+the tool runtime still refuses what it refuses, the budgets still end the run, and
+Cancel still works. Autonomous mode also declines the model's questions, still asks
+about calls into external MCP servers, is refused for an agent operator, and cannot be
+combined with plan approval. See [autonomous-mode.md](autonomous-mode.md).
+
+### Folders the app's tabs may use
+
+The Terminal, Editor and Git tabs act on a folder the person opened with the system
+folder dialog (or one of REX's own run sandboxes). The app's page is not trusted to
+name one: every path it sends is resolved and refused unless it lies inside such a
+folder, symlinks included. The terminal's environment is an allowlist, so a key in the
+app's own environment does not reach the shell. See [workspace.md](workspace.md).
 
 ## Custody, budgets and proof
 
@@ -83,8 +98,8 @@ Be clear-eyed about these:
 - **Malware or another program running as you.** It can read your files and ask
   the OS to decrypt what REX encrypted. File permissions and DPAPI separate
   *users*, not programs in one session.
-- **A model you ask to run code, with approvals off.** With `--yes` the model can
-  do whatever the tool policy allows, unattended.
+- **A model you ask to run code, with approvals off.** With `--yes` or Autonomous
+  mode the model can do whatever the tool policy allows, unattended.
 - **Prompt injection.** Text in files, web pages and tool output is bracketed as
   untrusted data and the model is instructed to treat it so, but no model is
   immune. Read approvals; they are the backstop.
