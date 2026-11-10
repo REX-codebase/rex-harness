@@ -695,6 +695,13 @@ fn route(
                 .get("plan_mode")
                 .and_then(|p| p.as_bool())
                 .unwrap_or(false);
+            // Autonomous mode: no approval prompts for vetted calls. Only an
+            // explicit `true` turns it on, and custody refuses it for an agent
+            // operator (see `ManagedTaskRequest::autonomous`).
+            let autonomous = parsed
+                .get("autonomous")
+                .and_then(|p| p.as_bool())
+                .unwrap_or(false);
             // Opt-in history summary; it spends tokens, so only an explicit
             // `true` turns it on.
             let summarize_history = parsed
@@ -762,6 +769,7 @@ fn route(
                     );
                     req.summarize_history = summarize_history;
                     req.lean = lean;
+                    let req = req.with_autonomous(autonomous);
                     let req = if windowed_context {
                         req.with_windowed_context(context_window)
                     } else {

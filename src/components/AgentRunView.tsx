@@ -236,6 +236,16 @@ export function AgentRunView({
             </span>
           )}
         </p>
+        {run.autonomous && (
+          <p className="autonomy-line" role="note">
+            <b>Autonomous</b>
+            <span>
+              No approval prompts
+              {typeof run.auto_approved === "number" ? ` · ${run.auto_approved} action${run.auto_approved === 1 ? "" : "s"} ran without asking` : ""}
+              {" · Cancel stops it at any time"}
+            </span>
+          </p>
+        )}
         <RunMeters meters={runMeters(run)} />
       </header>
 

@@ -2,7 +2,7 @@
 
 <p align="center">
   <b>AI coding agents you can supervise, budget and verify.</b><br>
-  You approve every change. Every run has hard limits. Every result is a signed receipt.<br>
+  You approve every change by default. Every run has hard limits. Every result is a signed receipt.<br>
   Open source. Runs on your computer. No account, no server.
 </p>
 
@@ -31,7 +31,9 @@ of**:
 
 - **You decide.** The agent works on a disposable copy of your folder. It
   proposes a plan, then each file write and command appears as an approval with
-  the exact diff or argument list. Nothing is applied until you review it.
+  the exact diff or argument list. Nothing is applied until you review it. If you
+  would rather not be asked, **Autonomous mode** removes the prompts for a run and
+  none of the limits ([how it works](docs/autonomous-mode.md)).
 - **Hard budgets.** Steps, tool calls, tokens and time are limits, not
   suggestions. `--bid` prints the worst-case dollar ceiling before anything runs.
 - **Proof, not promises.** A run finishes only when its evidence gates pass; the
@@ -116,7 +118,7 @@ untouched: [Windowed context](docs/context-management.md).
 | --- | --- |
 | **Use it** | [Getting started](docs/getting-started.md) · [Install](INSTALL.md) · [CLI](docs/cli.md) · [Continue with ChatGPT](docs/chatgpt-sign-in.md) · [Troubleshooting](docs/troubleshooting.md) |
 | **Trust it** | [Where your data lives](docs/data-and-storage.md) · [Security model](docs/security.md) · [Account policy](docs/subscription-policy.md) · [Security policy](SECURITY.md) |
-| **Understand it** | [Architecture](docs/architecture.md) · [Local tools](docs/local-tools.md) · [Prompt architecture](docs/prompt-architecture.md) · [Ultra mode](docs/ultra-mode.md) |
+| **Understand it** | [Architecture](docs/architecture.md) · [Local tools](docs/local-tools.md) · [Autonomous mode](docs/autonomous-mode.md) · [Folders, Terminal, Editor and Git](docs/workspace.md) · [Prompt architecture](docs/prompt-architecture.md) · [Ultra mode](docs/ultra-mode.md) |
 | **Build on it** | [MCP server](docs/rex-mcp.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md) |
 
 The full index is [docs/README.md](docs/README.md).

@@ -48,6 +48,7 @@ export type AgentEvent =
   | { state: "approval_resolved"; call_id: string; approved: boolean }
   | { state: "standing_approval_granted"; call_id: string; command: string }
   | { state: "approved_by_standing"; call_id: string; command: string }
+  | { state: "auto_approved"; call_id: string; command: string }
   | { state: "plan_approval_required"; items: PlanItem[] }
   | { state: "plan_approval_resolved"; approved: boolean }
   | { state: "question_asked"; question: PendingQuestion }
@@ -96,6 +97,10 @@ export interface AgentSnapshot {
   preview: AgentPreview | null;
   completion_summary: string | null;
   error: string | null;
+  /** The run started in autonomous mode; absent on older sidecars. */
+  autonomous?: boolean;
+  /** Calls that ran without an approval prompt; absent on older sidecars. */
+  auto_approved?: number;
 }
 
 export interface PendingQuestion {

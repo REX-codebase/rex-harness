@@ -12,6 +12,8 @@ what you are trying to do.
 | [The `rex` command line](cli.md) | Every command, option, exit code and environment variable. |
 | [Continue with ChatGPT](chatgpt-sign-in.md) | Use your ChatGPT plan instead of an API key: how it works and what it will not do. |
 | [Which accounts REX can use](subscription-policy.md) | The provider-by-provider verdicts, with sources, on subscriptions and API keys. |
+| [Autonomous mode](autonomous-mode.md) | Run without approval prompts: what it removes, what stays enforced, the exceptions. |
+| [Folders, Terminal, Editor and Git](workspace.md) | Open a project folder; the shell, the editor, git status and commit; checkpoints. |
 | [Troubleshooting](troubleshooting.md) | Symptom, cause, fix. |
 
 ## Your data and your safety

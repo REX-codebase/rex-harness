@@ -52,7 +52,7 @@ export function selectedModel(): { provider: string; model?: string } {
 // extra model call on the user's key.
 // `lean` left undefined follows the provider: on for the free-tier presets,
 // whose token budgets are small, off elsewhere. An explicit choice wins.
-export const custodyBegin = (task: string, planMode = false, summarizeHistory = false, lean?: boolean) => {
+export const custodyBegin = (task: string, planMode = false, summarizeHistory = false, lean?: boolean, autonomous = false) => {
   const { provider, model } = selectedModel();
   const leanProfile = lean ?? defaultLean(provider);
   // Tauri reads camelCase args, the sidecar snake_case; each transport
@@ -63,6 +63,7 @@ export const custodyBegin = (task: string, planMode = false, summarizeHistory = 
     model,
     planMode,
     plan_mode: planMode,
+    autonomous,
     summarizeHistory,
     summarize_history: summarizeHistory,
     lean: leanProfile,

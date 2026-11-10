@@ -7,7 +7,75 @@ change behaviour).
 
 ## [Unreleased]
 
-## [0.1.2] - 2026-11-10
+Autonomous mode, a working Git status, and the Terminal, Editor, Git and Settings
+tabs brought up to production quality. Several of them did not work in a default
+install before; the Fixed list says what and why.
+
+### Added
+- **Autonomous mode.** The run-mode control under the task box is now
+  **Build · Plan · Auto**. Auto removes the per-action approval prompts for a run
+  and none of its limits: the tool runtime still refuses what it refused, the
+  budgets and Cancel still apply, each action is logged as *Ran without asking* and
+  counted in the run header, and questions to you are declined so the model decides.
+  It asks you to confirm once per session (Cancel is the default button), is shown by
+  a chip in the status row, cannot be combined with Plan, is refused for an agent
+  operator, and still asks before calling external MCP servers. See
+  [docs/autonomous-mode.md](docs/autonomous-mode.md).
+- **Git status on every tab.** A chip in the status row shows the branch, how far
+  ahead or behind its upstream it is, and how many files changed; it turns amber for
+  changes and red for conflicts, and opens the Git tab.
+- **A folder you choose.** A folder chip and menu open a project folder through the
+  system dialog and switch between recent folders and REX's run sandboxes. The
+  Terminal, Editor and Git tabs all work in it. See
+  [docs/workspace.md](docs/workspace.md).
+- **Git tab:** conflicts, staged, changed and untracked files with per-file stage and
+  unstage, coloured diffs (new files shown as added), commit with Ctrl+Enter,
+  *Initialize repository*, recent commits, and an explanation with the fix when git
+  does not know who you are.
+- **Editor tab:** every file in the folder (following `.gitignore`), a filter, new
+  file, Ctrl+S, and a warning before unsaved edits are lost.
+- **Terminal tab:** *Restart* when the shell exits, and a status line.
+- **Settings:** an About section with the version and where your data lives (with
+  Copy), and the keyboard list now includes Ctrl+S and committing from the Git tab.
+
+### Changed
+- The Terminal, Editor and Git tabs stay alive when you switch tabs: your shell, its
+  scrollback, the open file and its unsaved edits are still there when you return.
+  Before, each tab was destroyed on leaving it.
+- The editor and the approval diff use a Monaco bundled with the app (dark theme)
+  instead of loading it from a CDN.
+- Settings text is accurate about approvals, about what *Reset to defaults* resets
+  (the motion preference only), and shows the real version instead of "Preview build".
+- `rex-tools` no longer contains the Git panel's old git functions.
+
+### Fixed
+- **The Git tab could not work in a default install.** It required the folder to sit
+  under the tool runtime's root, while the tab handed it the runs root; it also ran
+  git through the model sandbox, which replaces `HOME` and hides your commit
+  identity, could not show a diff for a new file, and never showed the branch. It is
+  rewritten against your own git, with the logic in a new tested crate,
+  `rex-workspace`.
+- **The Terminal, Editor and Git tabs worked on an empty app-data folder**, not on
+  your project, and the Editor listed only top-level files. They now use the folder
+  you open.
+- **A shell without `HOME`, `SystemRoot` or a locale.** The terminal's environment
+  was `PATH` only, which breaks git and npm everywhere and a Windows shell outright.
+  It is now an allowlist of what a shell needs; keys and tokens in the app's own
+  environment still do not reach it.
+- **Accented and non-Latin terminal output could be corrupted** where a character was
+  split across two reads. Output is decoded across reads.
+- **Exited shells were never cleaned up** until you left the tab; they are reaped.
+- **Checkpoints could copy gigabytes and delete through a symlink.** A snapshot
+  copied `node_modules` and `target`, followed symlinks (so a restore could delete
+  files outside the folder), and a folder holding REX's own data would snapshot its
+  own snapshots. Snapshots now skip build folders (and a restore leaves them alone),
+  never follow symlinks, refuse folders over 20,000 files or 256 MB, and say so if a
+  restore stops part-way.
+- **The webview could name any folder** for the editor, git and checkpoint commands.
+  Every folder now goes through a registry that only the native dialog can add to.
+- **The editor and the approval diff needed internet access** (Monaco was loaded from
+  cdn.jsdelivr.net) and showed a spinner without it.
+ - 2026-11-10
 
 Run-lifecycle fixes in the task screen, one folder for delegated tasks on
 Windows, and an installer that can be run from a fresh clone. New tests cover the

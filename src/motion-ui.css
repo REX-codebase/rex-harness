@@ -433,3 +433,7 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--color-te
 @media (prefers-reduced-motion: reduce) {
   .motion-system *, .motion-system *::before, .motion-system *::after { animation-delay: 0s !important; transition-delay: 0s !important; }
 }
+
+/* Autonomous mode keeps the sliding pill and tints it amber. */
+.task-field.is-auto .mode-seg[data-ind] > button.is-on { background: transparent; box-shadow: none; }
+.task-field.is-auto .mode-seg[data-ind]::before { background: color-mix(in srgb, var(--color-blocked) 18%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-blocked) 48%, transparent); }

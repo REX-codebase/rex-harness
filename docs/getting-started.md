@@ -49,7 +49,9 @@ Once connected, the model menu lists the provider's real models, fetched live.
    tests, and show the tests pass"*, and press **Ctrl+Enter**.
 3. REX proposes a **plan** and waits. Read it, then approve or reject.
 4. As it works, every file write and command is shown as an **approval** with the
-   exact diff or argument list. Allow or deny each one.
+   exact diff or argument list. Allow or deny each one. (To skip the prompts for a
+   run, choose **Auto** beside Build and Plan. It keeps every limit; see
+   [autonomous-mode.md](autonomous-mode.md).)
 5. It finishes with a plain-language result, then the **evidence**: the steps it
    took, the checks it ran and how long they took, and a **receipt**.
 
@@ -65,6 +67,11 @@ rex exec --task "add a function that parses ISO dates, with tests" \
 
 (`--yes` auto-approves every tool call and plan. Use it in CI, not on code you
 have not reviewed.)
+
+## Your own folder: terminal, editor and git
+
+The **Terminal**, **Editor** and **Git** tabs work on a project folder you open with
+the folder chip in the status row. See [workspace.md](workspace.md).
 
 ## 4. Check the receipt
 

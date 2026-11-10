@@ -22,6 +22,13 @@ rex-installed-agents = { path = "../crates/rex-installed-agents" }
 rex-custody = { path = "../crates/rex-custody" }
 rex-mcp = { path = "../crates/rex-mcp" }
 rex-fable = { path = "../crates/rex-fable" }
+rex-workspace = { path = "../crates/rex-workspace" }
+# The native folder dialog: the only way a folder gets added to the ones the
+# Terminal, Editor and Git tabs may work in. Used directly, on the main thread,
+# rather than through tauri-plugin-dialog: that plugin's releases move the whole
+# tauri-utils/wry/tao set, and Tauri refuses to build when the crate versions
+# and the npm @tauri-apps packages disagree.
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 
 [features]
 default = ["custom-protocol"]

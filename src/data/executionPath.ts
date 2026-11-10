@@ -35,6 +35,8 @@ export interface PathInputs {
   installedAgentLabel: string | null;
   liveCapable: boolean;
   tourMode: boolean;
+  /** Autonomous mode is on. Only the custody path honours it. */
+  autonomous?: boolean;
 }
 
 export function resolveExecutionPath(inputs: PathInputs): ExecutionPath {
@@ -45,6 +47,7 @@ export function resolveExecutionPath(inputs: PathInputs): ExecutionPath {
     installedAgentLabel,
     liveCapable,
     tourMode,
+    autonomous,
   } = inputs;
   if (!liveCapable && !tourMode) {
     return {
@@ -79,6 +82,13 @@ export function resolveExecutionPath(inputs: PathInputs): ExecutionPath {
       kind: "ultra",
       label: "Ultra · verified pipeline",
       detail: "Contract → build → adversary → judge → promotion. Slower, verified.",
+    };
+  }
+  if (autonomous) {
+    return {
+      kind: "custody",
+      label: "Autonomous run",
+      detail: "REX works on its own inside its sandbox without asking, within hard limits, and leaves a receipt.",
     };
   }
   return {

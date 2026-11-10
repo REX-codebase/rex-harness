@@ -124,6 +124,8 @@ function Row({ event, skipText, latestTool }: { event: AgentEvent; skipText?: Ag
       return <li className="tl-row tl-wait">Allowed for this run · {event.command}</li>;
     case "approved_by_standing":
       return <li className="tl-row tl-wait">Ran under your approval for this run · {event.command}</li>;
+    case "auto_approved":
+      return <li className="tl-row tl-wait">Ran without asking · {event.command}</li>;
     case "plan_approval_required":
       return <li className="tl-row tl-wait">Plan proposed · {event.items.length} step{event.items.length === 1 ? "" : "s"} awaiting your approval</li>;
     case "plan_approval_resolved":

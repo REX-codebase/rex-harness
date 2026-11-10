@@ -6,6 +6,8 @@ import { useSlideIndicator } from "./Fx";
 import { defaultLean } from "../data/providers";
 import { selectedModel } from "../data/custodyRun";
 import { SEARCH_PREVIEW, loadSearchStatus, type SearchStatus } from "../data/searchStatus";
+import { acknowledgeAutonomy, autonomyAcknowledged, autonomyAppliesTo } from "../data/autonomy";
+import { AutonomyConfirm } from "./AutonomyConfirm";
 
 // The headline arrives word by word; REX itself catches a single sheen.
 const HEADLINE = ["Tell", "REX", "what", "to", "do."];
@@ -20,7 +22,7 @@ export function planShortcut(e: { altKey: boolean; ctrlKey: boolean; metaKey: bo
   return null;
 }
 
-export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, summarizeHistory = false, setSummarizeHistory, lean = null, setLean, fableGate, setFableGate, executionPath, locked = false }: { task: string; setTask: (t: string) => void; state: RunState; onRun: () => void; planMode: boolean; setPlanMode: (v: boolean) => void; summarizeHistory?: boolean; setSummarizeHistory?: (v: boolean) => void; lean?: boolean | null; setLean?: (v: boolean) => void; fableGate: boolean; setFableGate: (v: boolean) => void; executionPath: ExecutionPath; locked?: boolean }) {
+export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, summarizeHistory = false, setSummarizeHistory, lean = null, setLean, fableGate, setFableGate, executionPath, locked = false, autonomous = false, setAutonomous }: { task: string; setTask: (t: string) => void; state: RunState; onRun: () => void; planMode: boolean; setPlanMode: (v: boolean) => void; summarizeHistory?: boolean; setSummarizeHistory?: (v: boolean) => void; lean?: boolean | null; setLean?: (v: boolean) => void; fableGate: boolean; setFableGate: (v: boolean) => void; executionPath: ExecutionPath; locked?: boolean; autonomous?: boolean; setAutonomous?: (v: boolean) => void }) {
   // `state` is the simulated tour's progress; `locked` is a real run (any
   // engine) that is still going. Either one holds the composer: a second run
   // started over a live one would orphan it.
@@ -29,7 +31,28 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const optionsRef = useRef<HTMLDivElement>(null);
   const modeRef = useRef<HTMLDivElement>(null);
-  useSlideIndicator(modeRef, planMode, ".is-on");
+  // Build asks before each action, Plan asks once for the plan, Auto does not
+  // ask. They exclude one another, so they are one control, not three switches.
+  // Autonomy only counts where the run type honours it: if the person then
+  // picks an installed agent, the screen must not keep claiming "autonomous".
+  const autoAvailable = !!setAutonomous && autonomyAppliesTo(executionPath.kind);
+  const runMode: "build" | "plan" | "auto" = autonomous && autoAvailable ? "auto" : planMode ? "plan" : "build";
+  useSlideIndicator(modeRef, runMode, ".is-on");
+  const [confirmingAuto, setConfirmingAuto] = useState(false);
+  const chooseMode = (mode: "build" | "plan" | "auto") => {
+    if (mode === "auto") {
+      // The first time in a session asks; after that the choice is the switch.
+      if (!autonomyAcknowledged()) {
+        setConfirmingAuto(true);
+        return;
+      }
+      setPlanMode(false);
+      setAutonomous?.(true);
+      return;
+    }
+    setAutonomous?.(false);
+    setPlanMode(mode === "plan");
+  };
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [search, setSearch] = useState<SearchStatus>(SEARCH_PREVIEW);
   useEffect(() => {
@@ -78,7 +101,7 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
         <p className="mt-3 max-w-[54ch] text-sm leading-relaxed text-muted">One clear request. REX will work through it, verify the result, and leave a receipt.</p>
       </div>
 
-      <div className={`task-field ${planMode ? "is-plan" : ""} ${busy ? "is-busy" : ""}`} data-glow>
+      <div className={`task-field ${runMode === "plan" ? "is-plan" : ""} ${runMode === "auto" ? "is-auto" : ""} ${busy ? "is-busy" : ""}`} data-glow>
         <textarea
           id="task-input"
           ref={areaRef}
@@ -91,11 +114,11 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
             const next = planShortcut(e, planMode);
             if (next !== null) {
               e.preventDefault();
-              setPlanMode(next);
+              chooseMode(next ? "plan" : "build");
             }
           }}
           aria-label="Task description"
-          placeholder={planMode ? "What should REX plan? Nothing runs until you approve." : "What needs to get done?"}
+          placeholder={runMode === "plan" ? "What should REX plan? Nothing runs until you approve." : runMode === "auto" ? "What should REX do on its own? It will not stop to ask." : "What needs to get done?"}
           spellCheck={false}
           className="task-input"
         />
@@ -104,9 +127,22 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
             <ModelStatus />
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <div ref={modeRef} className="mode-seg" role="radiogroup" aria-label="Run mode" title="Alt+P switches mode">
-              <button type="button" role="radio" aria-checked={!planMode} disabled={busy} onClick={() => setPlanMode(false)} className={!planMode ? "is-on" : ""}>Build</button>
-              <button type="button" role="radio" aria-checked={planMode} disabled={busy} onClick={() => setPlanMode(true)} className={planMode ? "is-on" : ""}>Plan</button>
+            <div ref={modeRef} className="mode-seg" role="radiogroup" aria-label="Run mode" title="Alt+P switches between Build and Plan">
+              <button type="button" role="radio" aria-checked={runMode === "build"} disabled={busy} onClick={() => chooseMode("build")} className={runMode === "build" ? "is-on" : ""} title="Build: REX asks before each file write and command">Build</button>
+              <button type="button" role="radio" aria-checked={runMode === "plan"} disabled={busy} onClick={() => chooseMode("plan")} className={runMode === "plan" ? "is-on" : ""} title="Plan: REX proposes a plan and waits for your approval before anything runs">Plan</button>
+              {setAutonomous && (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={runMode === "auto"}
+                  disabled={busy || !autoAvailable}
+                  onClick={() => chooseMode("auto")}
+                  className={runMode === "auto" ? "is-on" : ""}
+                  title={autoAvailable ? "Auto: REX works on its own without asking for approval, within its hard limits" : "Autonomous mode runs through the custody loop; this run type has its own gates"}
+                >
+                  Auto
+                </button>
+              )}
             </div>
             <div className="relative" ref={optionsRef}>
               <button type="button" className={`options-button ${optionsOpen ? "is-open" : ""}`} aria-haspopup="dialog" aria-expanded={optionsOpen} aria-label={`Run options${extrasOn ? `, ${extrasOn} on` : ""}`} onClick={() => setOptionsOpen((v) => !v)}>
@@ -135,8 +171,8 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
                 </div>
               )}
             </div>
-            <button type="button" onClick={onRun} disabled={!canRun} title={!task.trim() ? "Describe a task first" : busy ? "A run is in progress" : `${planMode ? "Draft the plan" : "Start the run"} (Ctrl+Enter)`} className="run-button" data-busy={busy ? "" : undefined} aria-label={busy ? "Run in progress" : planMode ? "Plan task" : "Run task"}>
-              <span>{busy ? "Running" : planMode ? "Plan" : "Run"}</span>
+            <button type="button" onClick={onRun} disabled={!canRun} title={!task.trim() ? "Describe a task first" : busy ? "A run is in progress" : `${runMode === "plan" ? "Draft the plan" : runMode === "auto" ? "Start the run; it will not ask for approval" : "Start the run"} (Ctrl+Enter)`} className="run-button" data-busy={busy ? "" : undefined} aria-label={busy ? "Run in progress" : runMode === "plan" ? "Plan task" : runMode === "auto" ? "Run task autonomously" : "Run task"}>
+              <span>{busy ? "Running" : runMode === "plan" ? "Plan" : "Run"}</span>
               <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9m-3.5-3.5L12.5 8 9 11.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
             </button>
           </div>
@@ -148,10 +184,23 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
           <span className={`execution-path-dot execution-path-dot--${executionPath.kind}`} aria-hidden="true" />
           {executionPath.label}
         </span>
-        {planMode && <span className="composer-meta-item text-muted">Plan mode: nothing runs until you approve the plan</span>}
+        {runMode === "plan" && <span className="composer-meta-item text-muted">Plan mode: nothing runs until you approve the plan</span>}
+        {runMode === "auto" && <span className="composer-meta-item composer-meta-auto">Autonomous: no approval prompts. Cancel stops it.</span>}
         <span className="composer-meta-item" title={search.title}>{search.label}</span>
         <span className="composer-meta-keys hidden sm:inline-flex"><kbd>Ctrl</kbd><kbd>Enter</kbd> run<span className="mx-1.5 text-line">·</span><kbd>Alt</kbd><kbd>P</kbd> plan</span>
       </div>
+
+      {confirmingAuto && (
+        <AutonomyConfirm
+          onCancel={() => setConfirmingAuto(false)}
+          onConfirm={() => {
+            acknowledgeAutonomy();
+            setConfirmingAuto(false);
+            setPlanMode(false);
+            setAutonomous?.(true);
+          }}
+        />
+      )}
 
       {state === "idle" && task.trim() === "" && (
         <button type="button" onClick={() => { setTask(EXAMPLE_TASKS[0]); areaRef.current?.focus(); }} className="example-prompt">

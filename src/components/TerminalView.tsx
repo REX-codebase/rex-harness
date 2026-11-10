@@ -1,138 +1,156 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import {
-  terminalSpawn,
-  terminalWrite,
-  terminalResize,
-  terminalKill,
-  terminalDefaultWorkspace,
-  onTerminalOutput,
-  onTerminalExit,
-} from "../data/terminal";
+import { terminalSpawn, terminalWrite, terminalResize, terminalKill, onTerminalOutput, onTerminalExit } from "../data/terminal";
+import { errorText } from "../data/runLifecycle";
+import { useWorkspace } from "../data/workspaceContext";
+import { NoWorkspace } from "./NoWorkspace";
 
-// Interactive terminal bound to a workspace. The PTY lives in the Rust
-// backend (workspace-validated, clean env); xterm.js only renders.
-// The terminal opens on mount and is killed on unmount. If no workspace is
-// given, it opens in the agent runs root.
-export function TerminalView({ workspace }: { workspace?: string }) {
+type Status = "starting" | "running" | "exited" | "failed";
+
+// An interactive terminal in the open folder. The shell lives in the Rust
+// backend (folder vetted against the ones you opened, environment rebuilt from
+// an allowlist); xterm.js only draws it.
+//
+// The app keeps this mounted once it has been shown, so switching to another
+// tab and back does not kill your shell or lose its scrollback. `active` says
+// whether it is the tab on screen, which is when it needs to refit and focus.
+export function TerminalView({ active }: { active: boolean }) {
+  const ws = useWorkspace();
+  const workspace = ws.active?.path ?? null;
+  if (!workspace) return active ? <NoWorkspace feature="terminal" /> : null;
+  // a new folder is a new shell, so the session is keyed by folder
+  return <TerminalSession key={workspace} workspace={workspace} folderName={ws.active?.name ?? ""} active={active} />;
+}
+
+function TerminalSession({ workspace, folderName, active }: { workspace: string; folderName: string; active: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [terminalId, setTerminalId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [exited, setExited] = useState(false);
-  const [resolvedWorkspace, setResolvedWorkspace] = useState<string | null>(
-    workspace ?? null,
-  );
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const idRef = useRef<string | null>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const [status, setStatus] = useState<Status>("starting");
+  const [detail, setDetail] = useState<string | null>(null);
+  // Bumping this starts a fresh shell in the same folder ("Restart").
+  const [session, setSession] = useState(0);
+
+  const refit = useCallback(() => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    const el = containerRef.current;
+    // a hidden tab has no size; fitting it would squash the shell to nothing
+    if (!term || !fit || !el || el.clientWidth === 0 || el.clientHeight === 0) return;
+    try {
+      fit.fit();
+    } catch {
+      return;
+    }
+    const id = idRef.current;
+    if (id) terminalResize(id, term.cols, term.rows).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     let alive = true;
-    if (!workspace) {
-      terminalDefaultWorkspace()
-        .then((w) => {
-          if (alive) setResolvedWorkspace(w);
-        })
-        .catch((e) => {
-          if (alive) setError(String(e));
-        });
-    }
-    return () => {
-      alive = false;
-    };
-  }, [workspace]);
-
-  useEffect(() => {
-    let term: Terminal | null = null;
-    let fit: FitAddon | null = null;
-    let id: string | null = null;
     let unlistenOutput: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
-    let alive = true;
-    let resizeObserver: ResizeObserver | null = null;
+    let observer: ResizeObserver | null = null;
+    const el = containerRef.current;
+    if (!el) return;
 
-    if (!resolvedWorkspace) return;
+    const term = new Terminal({
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+      scrollback: 5000,
+      theme: { background: "#0d1117", foreground: "#e6edf3", cursor: "#e6edf3", selectionBackground: "#264f78" },
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(el);
+    termRef.current = term;
+    fitRef.current = fit;
+    setStatus("starting");
+    setDetail(null);
 
-    const setup = async () => {
-      if (!containerRef.current) return;
-      const ws = resolvedWorkspace;
+    const start = async () => {
       try {
-        term = new Terminal({
-          cursorBlink: true,
-          fontSize: 13,
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-          theme: {
-            background: "#0d1117",
-            foreground: "#e6edf3",
-            cursor: "#e6edf3",
-          },
-        });
-        fit = new FitAddon();
-        term.loadAddon(fit);
-        term.open(containerRef.current);
-        fit.fit();
-
-        // Spawn the PTY with the fitted dimensions.
-        id = await terminalSpawn(ws, term.cols, term.rows);
+        if (el.clientWidth > 0) fit.fit();
+        const id = await terminalSpawn(workspace, term.cols, term.rows);
         if (!alive) {
-          await terminalKill(id);
+          await terminalKill(id).catch(() => undefined);
           return;
         }
-        setTerminalId(id);
-        const tid = id;
-
-        unlistenOutput = await onTerminalOutput(tid, (data) => {
-          term?.write(data);
+        idRef.current = id;
+        unlistenOutput = await onTerminalOutput(id, (data) => term.write(data));
+        unlistenExit = await onTerminalExit(id, () => {
+          if (!alive) return;
+          idRef.current = null;
+          setStatus("exited");
         });
-        unlistenExit = await onTerminalExit(tid, () => {
-          if (alive) setExited(true);
-        });
-
-        // Pipe user input to the PTY.
         term.onData((data) => {
-          terminalWrite(tid, data).catch(() => {});
+          const live = idRef.current;
+          if (live) terminalWrite(live, data).catch(() => undefined);
         });
-
-        // Keep the PTY sized to the view.
-        resizeObserver = new ResizeObserver(() => {
-          if (!term || !fit || !alive) return;
-          fit.fit();
-          terminalResize(tid, term.cols, term.rows).catch(() => {});
-        });
-        if (containerRef.current) resizeObserver.observe(containerRef.current);
+        setStatus("running");
+        if (activeRef.current) term.focus();
+        observer = new ResizeObserver(() => refit());
+        observer.observe(el);
       } catch (e) {
-        if (alive) setError(String(e));
+        if (alive) {
+          setStatus("failed");
+          setDetail(errorText(e));
+        }
       }
     };
-
-    setup();
+    void start();
 
     return () => {
       alive = false;
-      resizeObserver?.disconnect();
+      observer?.disconnect();
       unlistenOutput?.();
       unlistenExit?.();
-      const killId = id;
-      if (killId) terminalKill(killId).catch(() => {});
-      term?.dispose();
+      const id = idRef.current;
+      idRef.current = null;
+      if (id) terminalKill(id).catch(() => undefined);
+      term.dispose();
+      termRef.current = null;
+      fitRef.current = null;
     };
-  }, [resolvedWorkspace]);
+  }, [workspace, session, refit]);
 
-  if (error) {
-    return (
-      <div className="terminal-view terminal-view--error" role="alert">
-        <p className="eyebrow">Terminal</p>
-        <p>Could not open a terminal in this workspace: {error}</p>
-      </div>
-    );
-  }
+  // Coming back to the tab: the container has a size again, so fit and focus.
+  useEffect(() => {
+    if (!active) return;
+    const frame = window.requestAnimationFrame(() => {
+      refit();
+      termRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [active, refit]);
 
   return (
-    <div className="terminal-view" aria-label="Workspace terminal">
+    <div className="terminal-view" aria-label="Workspace terminal" hidden={!active}>
       <div className="terminal-view-bar">
         <span className="eyebrow">Terminal</span>
-        {terminalId && <span className="terminal-view-id">{terminalId}</span>}
-        {exited && <span className="terminal-view-exited">shell exited</span>}
+        <span className="terminal-view-folder" title={workspace}>
+          {folderName}
+        </span>
+        <span className={`terminal-view-state is-${status}`} role="status">
+          {status === "starting" ? "starting…" : status === "running" ? "running" : status === "exited" ? "shell exited" : "could not start"}
+        </span>
+        {(status === "exited" || status === "failed") && (
+          <button type="button" className="reset-button" onClick={() => setSession((n) => n + 1)}>
+            Restart
+          </button>
+        )}
       </div>
+      {status === "failed" && (
+        <p className="terminal-view-error" role="alert">
+          Could not open a terminal in this folder: {detail}
+        </p>
+      )}
       <div ref={containerRef} className="terminal-view-body" />
     </div>
   );
