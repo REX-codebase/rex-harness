@@ -1,11 +1,365 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>REX Harness - work that proves itself</title><link rel="stylesheet" href="style.css"></head><body data-thesis="custody">
-<header><a class="brand" href="#top" aria-label="REX Harness home"><img src="rex-logo.svg"><span>Harness</span></a><nav><a href="#ultra">Ultra</a><a href="#runtime">Runtime</a><a href="#open">Open source</a></nav><a class="top-cta" href="#build">See the loop <span>↓</span></a></header>
-<main id="top"><section class="hero"><div class="hero-copy"><p class="eyebrow"><i></i> A desktop agent, not a chatbot</p><h1>Hand off the work.<br><em>Keep the proof.</em></h1><p class="dek">REX gives an agent a real workspace, bounded tools, durable state and a verification path that cannot grade its own homework.</p><div class="hero-actions"><a class="button" href="#ultra">Enter Ultra <b>↘</b></a><span>Built in Rust · Tauri 2</span></div></div>
-<div class="custody" aria-label="Animated REX task custody loop"><div class="orbit orbit-a"></div><div class="orbit orbit-b"></div><div class="core"><img src="rex-logo.svg"><span>one task</span></div><div class="node n1"><b>01</b><span>PLAN</span></div><div class="node n2"><b>02</b><span>BUILD</span></div><div class="node n3"><b>03</b><span>ATTACK</span></div><div class="node n4"><b>04</b><span>PROVE</span></div><svg class="traces" viewBox="0 0 600 600"><circle cx="300" cy="300" r="220"/><circle cx="300" cy="300" r="153"/></svg></div>
-<div class="scroll-cue">SCROLL TO FOLLOW THE RECEIPT <span></span></div></section>
-<section class="manifesto" id="runtime"><p class="section-no">01 / CUSTODY</p><h2>One task moves through<br>a system of <em>consequences.</em></h2><div class="manifest-grid"><p>REX keeps the plan, work state and evidence outside the model's context window. The agent can move fast without losing the thread.</p><div class="receipt"><span class="pulse"></span><div><small>LIVE RECEIPT</small><strong>Candidate written</strong></div><code>sha256 · 6fc93e…</code></div></div></section>
-<section class="ultra" id="ultra"><div class="ultra-head"><p class="section-no">02 / ULTRA</p><h2>Competition before<br><em>confidence.</em></h2><p>Ultra freezes the contract, isolates competing candidates, attacks them, replays the proof, then promotes only a survivor.</p></div><div class="stage" id="stage"><div class="stage-rail"><span>CONTRACT FROZEN</span><i></i><span>PROOF-CARRYING PROMOTION</span></div><div class="candidate c-a"><small>CANDIDATE A</small><b>BUILD</b><span class="score">functional</span></div><div class="candidate c-b"><small>CANDIDATE B</small><b>ATTACK</b><span class="score">rejected</span></div><div class="candidate c-c selected"><small>CANDIDATE C</small><b>PROVE</b><span class="score">promoted</span></div><div class="gate g1">ADVERSARY</div><div class="gate g2">PIXEL</div><div class="gate g3">REPLAY</div><div class="beam"></div></div></section>
-<section class="tools" id="build"><p class="section-no">03 / THE WORKSPACE</p><div class="tools-title"><h2>Real tools.<br><em>Human boundaries.</em></h2><p>Reads run. Writes and commands wait for trusted approval. Every action leaves a receipt. Human Stop remains available throughout.</p></div><div class="tool-run"><div class="tool-nav"><span class="active">PLAN</span><span>TOOLS</span><span>EVIDENCE</span></div><div class="terminal"><div class="line"><i>●</i><code>read</code><span>src/runtime.rs</span><b>automatic</b></div><div class="line"><i>●</i><code>edit</code><span>exact patch · 42 lines</span><b class="approval">approved</b></div><div class="line current"><i>●</i><code>verify</code><span>cargo test --workspace</span><b>running</b></div><div class="meter"><span></span></div></div><aside><small>DURABLE TASK STATE</small><strong>Resume without<br>starting over.</strong><p>The task survives a restart. Same-task follow-up keeps its context and custody.</p></aside></div></section>
-<section class="principles"><article><span>01</span><h3>One surface</h3><p>The browser appears inside the active task only when the agent needs it.</p></article><article><span>02</span><h3>One accent</h3><p>Purple marks action and focus. The rest stays calm enough for the work.</p></article><article><span>03</span><h3>One truth</h3><p>Claims come from executed evidence, not from the host saying the gate passed.</p></article></section>
-<section class="open" id="open"><div class="halo"></div><p class="section-no">04 / BUILT IN THE OPEN</p><h2>The harness is the product.</h2><p>REX is open source and donation-funded. The core is Rust. The interface gets out of the way. The receipts stay.</p><a class="button ghost" href="#top">Back to the task <b>↑</b></a></section></main>
-<footer><div class="brand"><img src="rex-logo.svg"><span>Harness</span></div><p>Agent work, with custody.</p><span>REX · 2026</span></footer><script src="app.js"></script></body></html>
+<!doctype html>
+<html lang="en" class="no-js">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>REX Harness — AI coding agents you can supervise, budget and verify</title>
+<meta name="description" content="Run AI coding agents you can supervise, budget and verify: approvals by default, hard limits on every run, signed receipts. Open source and local first.">
+<meta name="theme-color" content="#06050a">
+<meta name="color-scheme" content="dark">
+<link rel="canonical" href="https://rex-codebase.github.io/rex-harness/">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="img/apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="REX Harness">
+<meta property="og:title" content="REX Harness — vast power, held in orbit">
+<meta property="og:description" content="AI coding agents you can supervise, budget and verify. Approvals by default, hard limits on every run, signed receipts. Open source, local first.">
+<meta property="og:url" content="https://rex-codebase.github.io/rex-harness/">
+<meta property="og:image" content="https://rex-codebase.github.io/rex-harness/img/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:alt" content="A glowing violet star held inside four precision-machined gyroscopic rings, in deep space.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="REX Harness — vast power, held in orbit">
+<meta name="twitter:description" content="AI coding agents you can supervise, budget and verify. Open source, local first.">
+<meta name="twitter:image" content="https://rex-codebase.github.io/rex-harness/img/og.jpg">
+
+<link rel="preload" href="fonts/orbitron-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/inter-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="modulepreload" href="vendor/three.min.js">
+<link rel="stylesheet" href="css/site.css">
+<script>document.documentElement.className = 'js';</script>
+<script type="importmap">{"imports":{"three":"./vendor/three.min.js"}}</script>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "REX Harness",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Windows, Linux, macOS",
+  "softwareVersion": "0.1.2",
+  "description": "A desktop app, command line and local server that run an AI model against your code under rules the model cannot talk its way out of: approvals, hard budgets and signed receipts.",
+  "license": "https://github.com/REX-codebase/rex-harness#license",
+  "isAccessibleForFree": true,
+  "codeRepository": "https://github.com/REX-codebase/rex-harness",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+</head>
+
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<canvas id="stage" aria-hidden="true"></canvas>
+<div class="fallback-sky" aria-hidden="true"></div>
+<div class="veil" aria-hidden="true"></div>
+<div id="labels" class="labels" aria-hidden="true"></div>
+
+<header class="nav" id="nav">
+  <a class="brand" href="#top" aria-label="REX Harness, back to top">
+    <span class="rex-word" aria-hidden="true"><span>R</span><span>E</span><span>X</span></span>
+    <span class="brand__name">Harness</span>
+  </a>
+  <nav class="nav__links" id="nav-links" aria-label="Sections">
+    <a href="#custody">Custody</a>
+    <a href="#limits">Limits</a>
+    <a href="#proof">Proof</a>
+    <a href="#ultra">Ultra</a>
+    <a href="#models">Models</a>
+    <a href="#release">What’s new</a>
+  </nav>
+  <div class="nav__end">
+    <a class="pill" href="#release" title="Current version">v<span data-rex-stamp>0.1.2</span></a>
+    <a class="btn btn--small" href="#install">Install</a>
+    <button class="nav__toggle" id="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-links" aria-label="Menu"><i></i><i></i></button>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- HERO ─────────────────────────────────────────────────────────────── -->
+<section class="chapter chapter--hero" id="top" data-chapter="hero" aria-labelledby="h-hero" style="--len:135svh">
+  <div class="chapter__stick">
+    <div class="hero">
+      <a class="eyebrow eyebrow--live reveal" href="#release" style="--i:0"><i class="dot"></i> Release 0.1.2<span class="hide-sm"> · Autonomous mode is here</span></a>
+      <h1 id="h-hero" class="display reveal" style="--i:1">Vast power,<br><span class="grad">held in orbit.</span></h1>
+      <p class="lede reveal" style="--i:2">REX Harness runs an AI coding agent under rules it cannot talk its way out of. You approve every change by default. Every run has hard limits. Every result is a signed receipt.</p>
+      <div class="cta reveal" style="--i:3">
+        <a class="btn btn--primary" href="https://github.com/REX-codebase/rex-harness/releases/latest">Download for Windows</a>
+        <a class="btn btn--ghost" href="https://github.com/REX-codebase/rex-harness">Read the code <span aria-hidden="true">↗</span></a>
+      </div>
+      <ul class="trust reveal" style="--i:4" aria-label="At a glance">
+        <li><b>Open source</b> MIT OR Apache-2.0</li>
+        <li><b>Local first</b> no account, no server</li>
+        <li><b>No telemetry</b> in the app or on this page</li>
+      </ul>
+    </div>
+    <a class="cue" href="#custody" aria-label="Scroll to the first chapter"><span>Enter orbit</span><i></i></a>
+  </div>
+</section>
+
+<!-- 01 CUSTODY ───────────────────────────────────────────────────────── -->
+<section class="chapter chapter--left" id="custody" data-chapter="custody" aria-labelledby="h-custody" style="--len:190svh">
+  <div class="chapter__stick">
+    <div class="panel">
+      <p class="eyebrow reveal" style="--i:0"><span class="num">01</span> Custody</p>
+      <h2 id="h-custody" class="h2 reveal" style="--i:1">You decide.</h2>
+      <p class="lede reveal" style="--i:2">The agent works on a <strong>disposable copy</strong> of your folder. It proposes a plan, then each file write and command appears as an approval with the exact diff or argument list. Nothing is applied until you review it.</p>
+
+      <div class="demo reveal" id="demo-custody" style="--i:3">
+        <div class="demo__bar">
+          <span class="tag">Illustration · not a live run</span>
+          <div class="seg" role="radiogroup" aria-label="Run mode">
+            <button type="button" role="radio" aria-checked="true" data-mode="build">Build <small>ask first</small></button>
+            <button type="button" role="radio" aria-checked="false" data-mode="auto">Auto <small>don’t ask</small></button>
+          </div>
+        </div>
+        <div class="confirm" id="auto-confirm" hidden role="group" aria-labelledby="auto-confirm-t">
+          <p id="auto-confirm-t"><strong>Run without asking?</strong> Auto removes the approval prompts for this run, and none of the limits.</p>
+          <div class="confirm__row">
+            <button type="button" class="btn btn--small btn--primary" data-confirm="keep">Keep asking me</button>
+            <button type="button" class="btn btn--small btn--ghost" data-confirm="auto">Turn on Auto</button>
+          </div>
+        </div>
+        <div class="proposal" id="proposal" aria-live="polite">
+          <p class="proposal__wait">Waiting for the agent to propose something…</p>
+        </div>
+        <div class="status-row">
+          <span class="chip chip--amber" id="auto-chip" hidden>Autonomous · no approval prompts</span>
+          <span class="chip" id="auto-count" hidden>Ran without asking · <b>0</b></span>
+        </div>
+        <ol class="runlog" id="runlog" aria-label="Run activity"></ol>
+      </div>
+      <p class="more reveal" style="--i:4"><a href="https://github.com/REX-codebase/rex-harness/blob/main/docs/autonomous-mode.md">How Autonomous mode works <span aria-hidden="true">→</span></a></p>
+    </div>
+  </div>
+</section>
+
+<!-- 02 LIMITS ────────────────────────────────────────────────────────── -->
+<section class="chapter chapter--right" id="limits" data-chapter="limits" aria-labelledby="h-limits" style="--len:200svh">
+  <div class="chapter__stick">
+    <div class="panel">
+      <p class="eyebrow reveal" style="--i:0"><span class="num">02</span> Limits</p>
+      <h2 id="h-limits" class="h2 reveal" style="--i:1">Limits, not suggestions.</h2>
+      <p class="lede reveal" style="--i:2">Steps, tool calls, tokens and time are hard limits. When one is reached, the run stops and says why.</p>
+
+      <div class="demo reveal" id="demo-limits" style="--i:3">
+        <div class="demo__bar"><span class="tag">Illustration · example limits</span></div>
+        <div class="meters">
+          <div class="meter" data-limit="steps"><span class="meter__k">Steps</span><span class="meter__v">0 / 40</span><i class="meter__bar"><b></b></i><code>--max-steps</code></div>
+          <div class="meter" data-limit="tools"><span class="meter__k">Tool calls</span><span class="meter__v">0 / 80</span><i class="meter__bar"><b></b></i><code>--max-tool-calls</code></div>
+          <div class="meter" data-limit="tokens"><span class="meter__k">Tokens</span><span class="meter__v">0 / 200,000</span><i class="meter__bar"><b></b></i><code>--max-tokens</code></div>
+          <div class="meter" data-limit="time"><span class="meter__k">Time</span><span class="meter__v">0:00 / 10:00</span><i class="meter__bar"><b></b></i><code>--timeout-secs</code></div>
+        </div>
+        <div class="demo__actions">
+          <button type="button" class="btn btn--small btn--primary" id="run-start">Start a run</button>
+          <button type="button" class="btn btn--small btn--ghost" id="run-reset">Reset</button>
+          <span class="status" id="run-status" role="status" aria-live="polite">Idle. Four rings, four limits.</span>
+        </div>
+      </div>
+
+      <div class="code reveal" style="--i:4">
+        <pre><code>rex exec --task "refactor the parser" --workspace . \
+  --model claude-sonnet-5-5 --bid
+<span class="c"># agree to the bid, and it runs:  … --bid --accept-bid</span></code></pre>
+        <button type="button" class="copy" data-copy='rex exec --task "refactor the parser" --workspace . --model claude-sonnet-5-5 --bid' aria-label="Copy the --bid command">Copy</button>
+      </div>
+      <p class="note reveal" style="--i:5"><code>--bid</code> prints the binding bid, the worst-case dollar ceiling, and stops. The run goes ahead only with <code>--accept-bid</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 03 PROOF ─────────────────────────────────────────────────────────── -->
+<section class="chapter chapter--left" id="proof" data-chapter="proof" aria-labelledby="h-proof" style="--len:200svh">
+  <div class="chapter__stick">
+    <div class="panel">
+      <p class="eyebrow reveal" style="--i:0"><span class="num">03</span> Proof</p>
+      <h2 id="h-proof" class="h2 reveal" style="--i:1">Proof, not promises.</h2>
+      <p class="lede reveal" style="--i:2">A run finishes only when its evidence gates pass; the model cannot declare itself done. Every run leaves a receipt signed with your machine’s <strong>Ed25519</strong> key, and REX checks it <strong>offline</strong>.</p>
+
+      <div class="code code--term reveal" style="--i:3" id="term">
+        <pre><code><span class="p">$</span> rex exec --task "add --verbose" --workspace . --json &gt; receipt.json
+<span class="c"># exactly what the machine that ran it produced?</span>
+<span class="p">$</span> rex verify receipt.json
+<span class="c"># does every claim follow from its own evidence?</span>
+<span class="p">$</span> rex replay receipt.json</code></pre>
+        <button type="button" class="copy" data-copy="rex verify receipt.json" aria-label="Copy the verify command">Copy</button>
+      </div>
+
+      <div class="reveal" style="--i:4">
+        <p class="micro">A receipt carries</p>
+        <ul class="chips chips--static" aria-label="What a receipt carries">
+          <li>run id &amp; task</li><li>provider &amp; model</li><li>status &amp; reason</li><li>steps, tool calls, tokens vs. budgets</li><li>elapsed time</li><li>prompt version &amp; hash</li><li>per-file provenance</li><li>accepted bid &amp; outcome</li><li>evaluated policy</li><li>Ed25519 certificate</li>
+        </ul>
+        <p class="note">Neither check needs the original workspace.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 04 ULTRA ─────────────────────────────────────────────────────────── -->
+<section class="chapter chapter--right chapter--ultra" id="ultra" data-chapter="ultra" aria-labelledby="h-ultra" style="--len:520svh">
+  <div class="chapter__stick">
+    <div class="panel panel--wide">
+      <p class="eyebrow reveal" style="--i:0"><span class="num">04</span> Ultra</p>
+      <h2 id="h-ultra" class="h2 reveal" style="--i:1">Competition before confidence.</h2>
+      <p class="lede reveal" style="--i:2">Ultra is the same worker model wrapped in a verification institution. Simple asks <em>“does it work?”</em> Ultra asks <em>“how can this be wrong while every green check still passes?”</em> and then goes after those gaps.</p>
+      <ol class="steps" id="ultra-steps">
+        <li data-step="0"><b>Contract</b><span>The worker turns the task into machine-checkable obligations. Empty, duplicated or unexecutable proofs are rejected.</span></li>
+        <li data-step="1"><b>Candidates</b><span>Up to four start from one immutable pre-run state, each in its own isolated worktree or copy.</span></li>
+        <li data-step="2"><b>Adversary</b><span>A separate run whose only job is to find concrete ways the builder’s result is wrong.</span></li>
+        <li data-step="3"><b>Verifier</b><span>Not a model: deterministic Rust re-executes every proof against the real workspace. A clean-room judge sees the contract and the evidence, never the builder’s story.</span></li>
+        <li data-step="4"><b>Promotion</b><span>Qualified candidates only, then fewest repairs, fewest tokens, original order. One survivor is promoted.</span></li>
+      </ol>
+      <p class="note reveal">The choreography is a diagram of the pipeline in <a href="https://github.com/REX-codebase/rex-harness/blob/main/docs/ultra-mode.md">docs/ultra-mode.md</a>, not a recording of a run.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 05 MODELS ────────────────────────────────────────────────────────── -->
+<section class="chapter chapter--left" id="models" data-chapter="models" aria-labelledby="h-models" style="--len:170svh">
+  <div class="chapter__stick">
+    <div class="panel">
+      <p class="eyebrow reveal" style="--i:0"><span class="num">05</span> Models</p>
+      <h2 id="h-models" class="h2 reveal" style="--i:1">Your models, your accounts.</h2>
+      <p class="lede reveal" style="--i:2">Bring an API key, point REX at a local server, or use your ChatGPT plan with <em>Continue with ChatGPT</em>. Keys, sign-in, run history and receipts live in one folder on your machine. REX has no server and no telemetry.</p>
+      <ul class="chips reveal" style="--i:3" id="providers" aria-label="Supported model routes">
+        <li><button type="button" data-provider="chatgpt">ChatGPT plan</button></li>
+        <li><button type="button" data-provider="anthropic">Anthropic</button></li>
+        <li><button type="button" data-provider="openai">OpenAI</button></li>
+        <li><button type="button" data-provider="gemini">Gemini</button></li>
+        <li><button type="button" data-provider="xai">xAI</button></li>
+        <li><button type="button" data-provider="deepseek">DeepSeek</button></li>
+        <li><button type="button" data-provider="kimi">Kimi</button></li>
+        <li><button type="button" data-provider="qwen">Qwen</button></li>
+        <li><button type="button" data-provider="glm">GLM</button></li>
+        <li><button type="button" data-provider="nim">NVIDIA NIM</button></li>
+        <li><button type="button" data-provider="groq">Groq</button></li>
+        <li><button type="button" data-provider="openrouter">OpenRouter</button></li>
+        <li><button type="button" data-provider="local">Local server</button></li>
+      </ul>
+      <p class="note reveal" style="--i:4">REX connects an account only where the provider’s own documentation allows third-party tools, and says why when it does not. <a href="https://github.com/REX-codebase/rex-harness/blob/main/docs/subscription-policy.md">Account policy →</a></p>
+    </div>
+  </div>
+</section>
+
+<!-- 06 RELEASE ───────────────────────────────────────────────────────── -->
+<section class="chapter chapter--release" id="release" data-chapter="release" aria-labelledby="h-release" style="--len:175svh">
+  <div class="chapter__stick chapter__stick--top">
+    <div class="release">
+      <div class="release__head">
+        <p class="eyebrow reveal" style="--i:0"><span class="num">06</span> Release 0.1.2 · 2026-11-10</p>
+        <h2 id="h-release" class="h2 reveal" style="--i:1">What’s new.</h2>
+        <p class="lede reveal" style="--i:2">Autonomous mode, a working Git status, and the Terminal, Editor, Git and Settings tabs brought up to production quality. The first release since 0.1.1.</p>
+      </div>
+      <div class="bento">
+        <article class="card reveal" style="--i:0"><h3>Autonomous mode</h3><p>Build · Plan · <b>Auto</b>. Auto removes the per-action prompts for a run, and none of its limits. Every action is logged as <em>Ran without asking</em>.</p></article>
+        <article class="card reveal" style="--i:1"><h3>Git status, everywhere</h3><p>A chip on every tab: branch, ahead and behind, changed files. Amber for changes, red for conflicts.</p></article>
+        <article class="card reveal" style="--i:2"><h3>Your folder, your tabs</h3><p>Terminal, Editor and Git work in the project you open, and stay alive when you switch tabs.</p></article>
+        <article class="card reveal" style="--i:3"><h3>A prebuilt <code>rex</code></h3><p>Linux x86_64 and Windows, each with a SHA-256 beside it. No Rust toolchain needed.</p></article>
+        <article class="card reveal" style="--i:4"><h3>A way back</h3><p><em>New task</em> after every run, and a notice when the backend stops answering instead of “Working” forever.</p></article>
+        <article class="card reveal" style="--i:5"><h3>An installer that installs</h3><p>Runs from a fresh clone, with <code>--build</code>, <code>--no-app</code> and <code>--help</code>, and CI that tests it.</p></article>
+      </div>
+      <figure class="device reveal" id="device" style="--i:2">
+        <div class="device__frame"><img id="device-img" src="img/ui-home.webp" width="1440" height="896" alt="The REX Harness task screen: a task box, a model menu, and a Build, Plan and Auto run-mode control." loading="lazy" decoding="async"><i class="device__glare" aria-hidden="true"></i></div>
+        <figcaption>The real interface, shown without a backend connected, so it runs on labelled sample data.</figcaption>
+      </figure>
+      <p class="more reveal"><a href="https://github.com/REX-codebase/rex-harness/blob/main/CHANGELOG.md">Read the full changelog <span aria-hidden="true">→</span></a></p>
+    </div>
+  </div>
+</section>
+
+<!-- 07 INSTALL ───────────────────────────────────────────────────────── -->
+<section class="chapter chapter--install" id="install" data-chapter="install" aria-labelledby="h-install" style="--len:150svh">
+  <div class="chapter__stick chapter__stick--top">
+    <div class="install">
+      <p class="eyebrow reveal" style="--i:0"><span class="num">07</span> Install</p>
+      <h2 id="h-install" class="h2 reveal" style="--i:1">Take it home.</h2>
+      <div class="tabs reveal" style="--i:2">
+        <div class="tabs__list" role="tablist" aria-label="Install method">
+          <button type="button" role="tab" id="tab-win" aria-selected="true" aria-controls="pane-win">Windows</button>
+          <button type="button" role="tab" id="tab-src" aria-selected="false" aria-controls="pane-src" tabindex="-1">From source</button>
+          <button type="button" role="tab" id="tab-cli" aria-selected="false" aria-controls="pane-cli" tabindex="-1">Command line</button>
+        </div>
+        <div class="tabs__pane" role="tabpanel" id="pane-win" aria-labelledby="tab-win">
+          <p>Download the <code>…x64-setup.exe</code> from the latest release and run the setup wizard.</p>
+          <p><a class="btn btn--primary" href="https://github.com/REX-codebase/rex-harness/releases/latest">Download latest release</a></p>
+          <p class="note">It is not code-signed yet, so SmartScreen may ask: choose <em>More info → Run anyway</em>. <a href="https://github.com/REX-codebase/rex-harness/blob/main/INSTALL.md">Details →</a></p>
+        </div>
+        <div class="tabs__pane" role="tabpanel" id="pane-src" aria-labelledby="tab-src" hidden>
+          <p>Any platform. Needs Rust, Node.js 20+ and the Tauri prerequisites.</p>
+          <div class="code"><pre><code>git clone https://github.com/REX-codebase/rex-harness
+cd rex-harness
+./quickstart.sh</code></pre><button type="button" class="copy" data-copy="git clone https://github.com/REX-codebase/rex-harness&#10;cd rex-harness&#10;./quickstart.sh" aria-label="Copy the source install commands">Copy</button></div>
+          <p class="note">Installs dependencies and the <code>rex</code> CLI, then starts the app. <code>--build</code> for a production build, <code>--no-app</code> for the CLI only.</p>
+        </div>
+        <div class="tabs__pane" role="tabpanel" id="pane-cli" aria-labelledby="tab-cli" hidden>
+          <p>Linux x86_64. No Rust needed.</p>
+          <div class="code"><pre><code>curl -fsSL https://raw.githubusercontent.com/REX-codebase/rex-harness/main/scripts/install.sh | sh</code></pre><button type="button" class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/REX-codebase/rex-harness/main/scripts/install.sh | sh" aria-label="Copy the CLI install command">Copy</button></div>
+          <p class="note">It checks the download against its published SHA-256 before installing. The script also targets macOS Apple Silicon, but v0.1.2 has no macOS binary attached yet, so build from source there. Windows and other platforms: <a href="https://github.com/REX-codebase/rex-harness/blob/main/INSTALL.md#command-line-only-rex">INSTALL.md →</a></p>
+        </div>
+      </div>
+
+      <div class="status-card reveal" style="--i:3">
+        <h3>Honest status</h3>
+        <p>REX Harness is <code>0.x</code>: it works and is tested, but expect rough edges.</p>
+        <ul>
+          <li><b>Continue with ChatGPT</b> has not been exercised against OpenAI’s live service yet. It is tested against scripted endpoints and follows OpenAI’s published contract.</li>
+          <li>The <b>Windows installer is unsigned</b> and has had little testing on real machines.</li>
+          <li>The v0.1.2 release attaches a <b>Windows installer</b> and <code>rex</code> for <b>Windows and Linux x86_64</b>. There is no macOS binary on it yet.</li>
+          <li>With no backend connected, the web UI is a <b>labelled preview on sample data</b>. It never pretends to run anything.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="foot__grid">
+    <div>
+      <a class="brand" href="#top" aria-label="REX Harness, back to top"><span class="rex-word" aria-hidden="true"><span>R</span><span>E</span><span>X</span></span><span class="brand__name">Harness</span></a>
+      <p class="foot__tag">AI coding agents you can supervise, budget and verify.</p>
+    </div>
+    <nav aria-label="Project">
+      <h3>Project</h3>
+      <a href="https://github.com/REX-codebase/rex-harness">GitHub</a>
+      <a href="https://github.com/REX-codebase/rex-harness/releases/latest">Releases</a>
+      <a href="https://github.com/REX-codebase/rex-harness/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/REX-codebase/rex-harness/blob/main/ROADMAP.md">Roadmap</a>
+    </nav>
+    <nav aria-label="Learn">
+      <h3>Learn</h3>
+      <a href="https://github.com/REX-codebase/rex-harness/blob/main/docs/getting-started.md">Getting started</a>
+      <a href="https://github.com/REX-codebase/rex-harness/blob/main/docs/cli.md">CLI reference</a>
+      <a href="https://github.com/REX-codebase/rex-harness/blob/main/docs/security.md">Security model</a>
+      <a href="https://github.com/REX-codebase/rex-harness/blob/main/docs/ultra-mode.md">Ultra mode</a>
+    </nav>
+    <nav aria-label="Ecosystem">
+      <h3>Ecosystem</h3>
+      <a href="https://github.com/REX-codebase/rex-mcp">REX MCP</a>
+      <a href="https://github.com/REX-codebase/rex-harness/blob/main/docs/rex-mcp.md">MCP server docs</a>
+      <a href="https://github.com/REX-codebase/rex-harness/blob/main/SECURITY.md">Report a vulnerability</a>
+    </nav>
+  </div>
+  <div class="foot__base">
+    <p>Licensed under MIT OR Apache-2.0. No cookies, no analytics, no third-party requests on this page.</p>
+    <button type="button" class="linklike" id="vitals-toggle" aria-controls="vitals" aria-expanded="false">Page vitals</button>
+  </div>
+</footer>
+
+<aside class="vitals" id="vitals" hidden aria-label="Live page vitals">
+  <h2>Page vitals <small>this page, measured</small></h2>
+  <dl id="vitals-list"></dl>
+</aside>
+
+<noscript><p class="noscript">This page works without JavaScript, but the 3D scene and the interactive illustrations need it. Everything here is also in the <a href="https://github.com/REX-codebase/rex-harness#readme">README</a>.</p></noscript>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
