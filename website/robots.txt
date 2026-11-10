@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://rex-codebase.github.io/rex-harness/sitemap.xml

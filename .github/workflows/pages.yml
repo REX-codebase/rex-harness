@@ -1,0 +1,59 @@
+name: Website
+
+# Publishes website/ to GitHub Pages (https://rex-codebase.github.io/rex-harness/).
+# One-time setup: Settings → Pages → Build and deployment → Source: "GitHub Actions".
+# The site is static, so there is no build step: this checks it, stamps the current
+# version into the nav pill, and uploads the folder as it is.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - ".github/workflows/pages.yml"
+      - "package.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check the site
+        run: node website/tools/check.mjs
+
+      - name: Stamp the current version
+        # Only the nav pill and the structured data follow package.json. Release
+        # notes and headlines stay human-written, so they can never claim a version
+        # whose changes they do not describe.
+        run: |
+          v=$(node -p "require('./package.json').version")
+          echo "Stamping version $v"
+          sed -i -E "s|(data-rex-stamp>)[^<]*|\1${v}|g; s|(\"softwareVersion\": \")[^\"]*|\1${v}|" website/index.html
+          grep -n "data-rex-stamp\|softwareVersion" website/index.html
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
