@@ -29,7 +29,7 @@ node tools/render-comp.mjs --plates "$OUT/plates" --out "$OUT/frames"
 echo "5/5  encode"
 ffmpeg -y -loglevel error -framerate 30 -i "$OUT/frames/%05d.jpg" -i "$OUT/score.wav" \
   -c:v libx264 -preset slow -crf 19 -pix_fmt yuv420p -profile:v high -tune film \
-  -c:a aac -b:a 192k -af "loudnorm=I=-16:TP=-1.5:LRA=11" \
+  -c:a aac -b:a 192k -af "volume=1.8dB,alimiter=limit=0.89:level=disabled" \
   -movflags +faststart -shortest rex-harness-launch.mp4
 ffmpeg -y -loglevel error -ss 10.1 -i rex-harness-launch.mp4 -frames:v 1 -q:v 2 rex-harness-launch-poster.jpg
 echo "done: rex-harness-launch.mp4"
