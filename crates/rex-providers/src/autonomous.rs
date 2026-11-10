@@ -1747,7 +1747,8 @@ fn setup_mcp(workspace: &Path) -> McpSetup {
     };
     // No config at all is normal: external tools are simply absent. A
     // config file that exists but fails to parse is worth a warning.
-    let state_dir = rex_mcp_ext::state_dir();
+    // The same folder `rex mcp` reads, from the one shared resolver.
+    let state_dir = crate::paths::data_dir(crate::paths::Flavor::Cli);
     let (_cfg_path, servers) = match rex_mcp_ext::load_config(Some(workspace), &state_dir) {
         Ok(found) => found,
         Err(e) => {
@@ -11405,7 +11406,10 @@ mod tests {
         assert!(reply.contains(r#"\"answer\":\"pg\""#), "{reply}");
         assert!(reply.contains(r#"\"status\":\"declined\""#), "{reply}");
         assert!(reply.contains(r#"\"answer\":\"token\""#), "{reply}");
-        assert!(!reply.contains("extra"), "{reply}");
+        // The entry past the batch is not forwarded. Match the answer field,
+        // not the bare word: the state also lists the machine's own skills,
+        // and a description containing "extracting" must not fail this test.
+        assert!(!reply.contains(r#"\"answer\":\"extra\""#), "{reply}");
         assert!(!reply.contains(r#"\"status\":\"timeout\""#), "{reply}");
     }
 

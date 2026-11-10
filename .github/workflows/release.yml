@@ -6,6 +6,10 @@ name: Release
 #  * run this workflow by hand (Actions > Release > Run workflow) with the tag to
 #    create. By default that builds and PUBLISHES the Windows installer only.
 #
+# Either way the `rex` command line is built for Linux, macOS and Windows and
+# attached as rex-<target>.tar.gz / .zip with a .sha256 next to each, which is
+# what scripts/install.sh downloads.
+#
 # The tag MUST be `v` + the `version` in src-tauri/tauri.conf.json (which must
 # match package.json and src-tauri/Cargo.toml); the first job checks it.
 on:
@@ -16,7 +20,7 @@ on:
       tag:
         description: "Release tag, e.g. v0.1.1 (created on this commit if it does not exist)"
         required: true
-        default: "v0.1.1"
+        default: "v0.1.2"
       all_platforms:
         description: "Also build the macOS and Linux bundles"
         type: boolean
@@ -73,6 +77,8 @@ jobs:
             **Windows:** download the `x64-setup.exe` below and run it. It is a normal setup wizard (licence, install location, Start menu, launch at the end).
 
             The installer is **not code-signed yet**, so Windows SmartScreen may say "Windows protected your PC": click **More info**, then **Run anyway**. Check the download against the `.sha256` file on this page if you want to be sure it is intact.
+
+            **Command line only (Linux x86_64, macOS Apple Silicon):** `curl -fsSL https://raw.githubusercontent.com/REX-codebase/rex-harness/main/scripts/install.sh | sh` installs `rex` after checking its SHA-256. Windows: `rex-x86_64-pc-windows-msvc.zip` below.
 
             REX Harness is open source under MIT OR Apache-2.0. "Continue with ChatGPT" lets you use your ChatGPT plan instead of an API key. See INSTALL.md for macOS and Linux.
           releaseDraft: ${{ github.event_name == 'push' || inputs.draft }}
@@ -138,3 +144,58 @@ jobs:
           releaseDraft: ${{ github.event_name == 'push' || inputs.draft }}
           prerelease: false
           args: --bundles ${{ matrix.bundles }}
+
+  # The `rex` command line, prebuilt. Always runs (it is small), so the
+  # `releases/latest/download/rex-<target>` URLs scripts/install.sh uses exist
+  # for every release, not only the ones that built every desktop platform.
+  cli:
+    name: rex CLI (${{ matrix.target }})
+    needs: windows
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked -p rex-cli
+
+      - name: Package, checksum and attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/stage
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp target/release/rex.exe dist/stage/
+            archive="rex-$TARGET.zip"
+          else
+            cp target/release/rex dist/stage/
+            archive="rex-$TARGET.tar.gz"
+          fi
+          cp LICENSE-MIT LICENSE-APACHE dist/stage/
+          (
+            cd dist/stage
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              7z a -tzip "../$archive" rex.exe LICENSE-MIT LICENSE-APACHE
+            else
+              # Members at the archive root (no ./ prefix): install.sh extracts `rex` by name.
+              tar -czf "../$archive" rex LICENSE-MIT LICENSE-APACHE
+            fi
+          )
+          (
+            cd dist
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum "$archive" > "$archive.sha256"
+            else shasum -a 256 "$archive" > "$archive.sha256"; fi
+            cat "$archive.sha256"
+          )
+          gh release upload "$RELEASE_TAG" "dist/$archive" "dist/$archive.sha256" --clobber --repo "$GITHUB_REPOSITORY"

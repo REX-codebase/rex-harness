@@ -360,6 +360,13 @@ mod tests {
         store.set_key("a", "k1").unwrap();
         // no new files can be made in the folder
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+        // Root (a container, some CI) ignores directory permissions, so the
+        // write below would succeed and prove nothing. Say so and stop.
+        if fs::File::create(dir.join("probe")).is_ok() {
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+            eprintln!("skipped: this user can write into a read-only folder (running as root?)");
+            return;
+        }
         let failed = store.set_key("b", "k2").is_err();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(failed);

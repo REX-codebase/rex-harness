@@ -5,6 +5,13 @@
 # that directory is the only durable record of tasks, custody and audits).
 set -euo pipefail
 DEST="${REX_INSTALL_DIR:-$HOME/.rex/bin}"
-rm -f "$DEST/rex-mcp"
-echo "Removed $DEST/rex-mcp"
+removed=0
+for name in rex-mcp rex-mcp.exe; do
+  if [ -e "$DEST/$name" ]; then
+    rm -f "$DEST/$name"
+    echo "Removed $DEST/$name"
+    removed=1
+  fi
+done
+[ "$removed" = 1 ] || echo "Nothing to remove: no rex-mcp in $DEST."
 echo "State kept at ${REX_STATE_DIR:-$HOME/.rex/harness} (remove manually if unwanted)."

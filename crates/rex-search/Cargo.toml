@@ -1,6 +1,6 @@
 [package]
 name = "rex-search"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Provider-independent, robots-aware live web evidence retrieval for REX agents"
 license = "MIT OR Apache-2.0"

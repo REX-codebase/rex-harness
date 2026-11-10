@@ -24,7 +24,7 @@ import { AgentRunView } from "./components/AgentRunView";
 import { UltraRunView } from "./components/UltraRunView";
 import { ultraBegin, ultraSnapshot, ultraDecide, ultraCancel, type UltraSnapshot } from "./data/ultraRun";
 import { liveRunAvailable } from "./data/liveRun";
-import { custodyBegin, custodyDecidePlan, custodyStop } from "./data/custodyRun";
+import { custodyBegin, custodyDecidePlan, custodyStop, selectedModel } from "./data/custodyRun";
 import { rexTaskBegin } from "./data/rexTasks";
 import { FableCountdown } from "./components/FableCountdown";
 import { loadFableSessionName, saveFableSessionName, fableCreateSession } from "./data/fable";
@@ -59,6 +59,15 @@ import { loadOperatorMode, saveOperatorMode, type OperatorMode } from "./data/op
 import { SetupChecklist } from "./components/SetupChecklist";
 import type { InstalledAgentId } from "./data/backend";
 import { resolveExecutionPath, type ExecutionPath } from "./data/executionPath";
+import {
+  FAILED_RUN_ID,
+  LOST_CONTACT_AFTER,
+  errorText,
+  failedInstalledRun,
+  failedRunSnapshot,
+  runFinished,
+  runInProgress,
+} from "./data/runLifecycle";
 
 const TOUR_KEY = "rex-tour-mode";
 
@@ -154,6 +163,15 @@ export default function App() {
   const [lean, setLean] = useState<boolean | null>(null);
   const [planDeciding, setPlanDeciding] = useState(false);
   const livePoll = useRef<number | null>(null);
+  // Bumped whenever the screen lets go of its runs. A poll or a start that
+  // answers after that belongs to a run the person already moved on from, and
+  // is ignored instead of bringing the old run back.
+  const runGen = useRef(0);
+  // Set while a run is being started, before the render that disables Run, so
+  // a second click or Ctrl+Enter in the same moment cannot start another run.
+  const startGuard = useRef(false);
+  // The backend stopped answering polls for a run that was still going.
+  const [lostContact, setLostContact] = useState(false);
   const [installedRun, setInstalledRun] = useState<InstalledRunSnapshot | null>(null);
   const [installedStarting, setInstalledStarting] = useState(false);
   const [installedDeciding, setInstalledDeciding] = useState(false);
@@ -233,57 +251,83 @@ export default function App() {
       cancel.current?.();
       if (settleTimer.current !== null) window.clearTimeout(settleTimer.current);
       if (fastTimer.current !== null) window.clearTimeout(fastTimer.current);
+      if (checklistTimer.current !== null) window.clearTimeout(checklistTimer.current);
       if (livePoll.current !== null) window.clearInterval(livePoll.current);
+      if (ultraPoll.current !== null) window.clearInterval(ultraPoll.current);
       if (installedPoll.current !== null) window.clearInterval(installedPoll.current);
     },
     []
   );
 
-  const startInstalledPolling = (id: string) => {
-    if (installedPoll.current !== null) window.clearInterval(installedPoll.current);
-    installedPoll.current = window.setInterval(() => {
-      installedAgentSnapshot(id)
-        .then((snap) => {
-          setInstalledRun(snap);
-          if (snap.status !== "running" && installedPoll.current !== null) {
-            window.clearInterval(installedPoll.current);
-            installedPoll.current = null;
+  // One poll loop for every engine; the snapshot is the whole truth, so
+  // rendering never depends on event timing. Each loop remembers which
+  // generation of runs it was started for (see `runGen`) and goes quiet when
+  // the screen has moved on. After LOST_CONTACT_AFTER failed polls in a row it
+  // says so, instead of leaving a stale "Working" on screen forever.
+  const follow = <T,>(
+    slot: { current: number | null },
+    fetchSnapshot: () => Promise<T>,
+    apply: (snapshot: T) => void,
+    finished: (snapshot: T) => boolean,
+  ) => {
+    if (slot.current !== null) window.clearInterval(slot.current);
+    const gen = runGen.current;
+    let misses = 0;
+    const timer: number = window.setInterval(() => {
+      fetchSnapshot()
+        .then((snapshot) => {
+          if (gen !== runGen.current) return;
+          misses = 0;
+          setLostContact(false);
+          apply(snapshot);
+          if (finished(snapshot)) {
+            window.clearInterval(timer);
+            if (slot.current === timer) slot.current = null;
           }
         })
-        .catch(() => undefined);
+        .catch(() => {
+          if (gen !== runGen.current) return;
+          misses += 1;
+          if (misses >= LOST_CONTACT_AFTER) setLostContact(true);
+        });
     }, 900);
+    slot.current = timer;
   };
+  const startInstalledPolling = (id: string) =>
+    follow(installedPoll, () => installedAgentSnapshot(id), setInstalledRun, (snap) => snap.status !== "running");
+  const startUltraPolling = (id: string) =>
+    follow(ultraPoll, () => ultraSnapshot(id), setUltraRun, (snap) => Boolean(snap.terminal));
+  const startPolling = (id: string) => follow(livePoll, () => agentSnapshot(id), setLiveRun, terminalActive);
 
-  // Poll the Rust loop while it is non-terminal; the snapshot is the whole
-  // truth, so rendering never depends on event timing.
-  const startUltraPolling = (id: string) => {
-    if (ultraPoll.current !== null) window.clearInterval(ultraPoll.current);
-    ultraPoll.current = window.setInterval(() => {
-      ultraSnapshot(id)
-        .then((snap) => {
-          setUltraRun(snap);
-          if (snap.terminal && ultraPoll.current !== null) {
-            window.clearInterval(ultraPoll.current);
-            ultraPoll.current = null;
-          }
-        })
-        .catch(() => undefined);
-    }, 900);
-  };
-
-  const startPolling = (id: string) => {
-    if (livePoll.current !== null) window.clearInterval(livePoll.current);
-    livePoll.current = window.setInterval(() => {
-      agentSnapshot(id)
-        .then((snap) => {
-          setLiveRun(snap);
-          if (terminalActive(snap) && livePoll.current !== null) {
-            window.clearInterval(livePoll.current);
-            livePoll.current = null;
-          }
-        })
-        .catch(() => undefined);
-    }, 900);
+  // Let go of every run on screen: stop following it and drop its state. Called
+  // before a new run starts and by "New task", so a run from one engine can
+  // never sit under the next run's view (an Ultra result used to stay above a
+  // later custody run), and nothing is left polling.
+  //
+  // `release` also frees the finished run's live preview. Pass false to only
+  // detach this screen ("Stop watching"): the backend's teardown cancels a run
+  // that is still going, which is the opposite of what that button says.
+  const clearRuns = (release = true) => {
+    runGen.current += 1;
+    for (const slot of [livePoll, ultraPoll, installedPoll]) {
+      if (slot.current !== null) window.clearInterval(slot.current);
+      slot.current = null;
+    }
+    if (release && liveRun && liveRun.id !== FAILED_RUN_ID) agentTeardown(liveRun.id).catch(() => undefined);
+    setLostContact(false);
+    setLiveRun(null);
+    setCustody(null);
+    setUltraRun(null);
+    setInstalledRun(null);
+    setRexTaskId(null);
+    setNativePreviewDir(null);
+    setLiveStarting(false);
+    setInstalledStarting(false);
+    setLiveDeciding(false);
+    setLiveCancelling(false);
+    setPlanDeciding(false);
+    setInstalledDeciding(false);
+    setInstalledCancelling(false);
   };
 
   const latest = session?.turns[session.turns.length - 1];
@@ -306,7 +350,9 @@ export default function App() {
   };
 
   const nativeProject = nativePreviewDir ?? new URLSearchParams(window.location.search).get("native-preview");
-  const previewTask = /(?:html|react|next\.?js|vite|astro|svelte|website|ui|interface|dashboard|landing page|app)/i.test(task);
+  // Whole words only: unanchored, "ui" matched "build" and "guide", and "app"
+  // matched "mapping", so almost any task read as a web-page task.
+  const previewTask = /\b(?:html|react|next\.?js|vite|astro|svelte|website|ui|interface|dashboard|landing page|app)\b/i.test(task);
 
   // One default execution path: the custody loop. Every alternative is an
   // explicit opt-in resolved here, so the Composer label and onRun below can
@@ -321,10 +367,25 @@ export default function App() {
     tourMode,
   });
 
+  // Everything that says "a run is going" or "a run just ended", from every
+  // engine, in one place (see data/runLifecycle.ts).
+  const runStates = {
+    starting: liveStarting || installedStarting,
+    agent: liveRun,
+    ultra: ultraRun,
+    installed: installedRun,
+  };
+  const runBusy = runInProgress(runStates);
+  const runDone = runFinished(runStates);
+
   const onRun = async () => {
     cancel.current?.();
     const label = task.trim();
-    if (!label) return;
+    // Run and Ctrl+Enter are disabled while a run is going; this also covers a
+    // second press that lands before the screen has re-rendered. Starting over
+    // a running run would orphan it: still spending budget, with an approval
+    // nobody can see.
+    if (!label || runBusy || startGuard.current) return;
     // Re-resolve at click time: the settings selection may have changed
     // since the last render.
     const selection = readInstalledAgentSelection();
@@ -338,11 +399,11 @@ export default function App() {
     });
     if (path.kind === "unavailable") {
       // No backend and no explicit tour: never silently animate a fake run.
-      // Pulse the setup checklist instead — it is already rendered above.
+      // Pulse the setup checklist instead — it is already rendered above. The
+      // composer stays: settling it away here left nothing to type into.
       setChecklistHot(true);
       if (checklistTimer.current) window.clearTimeout(checklistTimer.current);
       checklistTimer.current = window.setTimeout(() => setChecklistHot(false), 1600);
-      beginSettle();
       return;
     }
     if (path.kind === "tour") {
@@ -355,189 +416,103 @@ export default function App() {
       beginSettle();
       return;
     }
-    // Fable gate: when enabled, open a native fable session for this task
-    // before the run starts. The session's authority timer and unlock rule
-    // are enforced in Rust; the countdown appears above the run. If the
-    // gate fails to open, the run does not start ungated.
-    if (fableGate && liveCapable) {
-      const sessionName = `fable-${Date.now().toString(36)}`;
-      try {
-        await fableCreateSession(sessionName, label);
-        saveFableSessionName(sessionName);
-        setFableSession(sessionName);
-      } catch (e) {
-        console.error("Fable gate failed to open:", e);
-        setChecklistHot(true);
-        if (checklistTimer.current) window.clearTimeout(checklistTimer.current);
-        checklistTimer.current = window.setTimeout(() => setChecklistHot(false), 1600);
-        beginSettle();
-        return;
+
+    // Every live engine starts the same way: release whatever is on screen,
+    // show that a start is under way, then ask its backend. The composer stays
+    // where it is (locked while the run goes) because live runs have no
+    // composer of their own below them.
+    startGuard.current = true;
+    clearRuns();
+    const gen = runGen.current;
+    const stillHere = () => gen === runGen.current;
+    const { provider } = selectedModel();
+    const installedBackend = path.kind === "installed" ? selection?.id : undefined;
+    if (installedBackend) setInstalledStarting(true);
+    else setLiveStarting(true);
+    try {
+      // Fable gate: when enabled, open a native fable session for this task
+      // before the run starts. The session's authority timer and unlock rule
+      // are enforced in Rust; the countdown appears above the run. If the
+      // gate fails to open, the run does not start ungated — and says so
+      // where the run would be (the setup checklist is not on screen when a
+      // backend is connected, so pulsing it showed nothing).
+      if (fableGate) {
+        const sessionName = `fable-${Date.now().toString(36)}`;
+        try {
+          await fableCreateSession(sessionName, label);
+          saveFableSessionName(sessionName);
+          setFableSession(sessionName);
+        } catch (e) {
+          if (stillHere()) {
+            setLiveRun(
+              failedRunSnapshot(label, `the Fable gate could not open (${errorText(e)}), so the run was not started`, {
+                provider,
+                kind: "blocked",
+              }),
+            );
+          }
+          return;
+        }
       }
-    }
-    if (path.kind === "installed") {
-      // Settings integration: the vendor CLI runs the task on an isolated
-      // workspace while REX streams its events, applies the completion gate,
-      // and holds any source changes for reviewed promotion.
-      const installedBackend = selection?.id ?? installedSelection?.id;
-      if (!installedBackend) return;
-      const options = loadInstalledAgentOptions();
-      setInstalledRun(null);
-      setInstalledStarting(true);
-      beginSettle();
-      installedAgentBegin(installedBackend, label, options.workspace.trim())
-        .then((snap) => {
+      if (path.kind === "installed") {
+        // Settings integration: the vendor CLI runs the task on an isolated
+        // workspace while REX streams its events, applies the completion gate,
+        // and holds any source changes for reviewed promotion.
+        if (!installedBackend) return;
+        const options = loadInstalledAgentOptions();
+        try {
+          const snap = await installedAgentBegin(installedBackend, label, options.workspace.trim());
+          if (!stillHere()) return;
           setInstalledRun(snap);
           if (snap.status === "running") startInstalledPolling(snap.id);
-        })
-        .catch((e) => setInstalledRun({
-          id: "run-failed",
-          backend: installedBackend,
-          status: "failed",
-          prompt: label,
-          workspace: "",
-          staging_workspace: "",
-          preview_dir: "",
-          model: null,
-          effort: null,
-          created_at_ms: Date.now(),
-          updated_at_ms: Date.now(),
-          exit_code: null,
-          events: [],
-          stderr_tail: "",
-          diff: null,
-          promotion: "not_required",
-          completion: null,
-          error: String(e),
-        }))
-        .finally(() => setInstalledStarting(false));
-      return;
-    }
-    if (path.kind === "ultra") {
-      // Explicit verified-pipeline mode: contract -> build -> verify ->
-      // adversary -> judge. A separate backend, chosen deliberately via the
-      // Ultra toggle — not a silent branch.
-      setUltraRun(null);
-      setLiveRun(null);
-      setLiveStarting(true);
-      beginSettle();
-      ultraBegin(label)
-        .then((snap) => {
+        } catch (e) {
+          if (stillHere()) setInstalledRun(failedInstalledRun(installedBackend, label, errorText(e)));
+        }
+        return;
+      }
+      try {
+        if (path.kind === "ultra") {
+          // Explicit verified-pipeline mode: contract -> build -> verify ->
+          // adversary -> judge. A separate backend, chosen deliberately via the
+          // Ultra toggle — not a silent branch.
+          const snap = await ultraBegin(label);
+          if (!stillHere()) return;
           setUltraRun(snap);
           startUltraPolling(snap.id);
-        })
-        .catch((e) => {
-          setUltraRun(null);
-          setLiveRun({
-            id: "run-failed",
-            task: label,
-            status: "failed",
-            terminal_reason: { kind: "provider_error", detail: String(e) },
-            provider: "gemini",
-            model: "",
-            plan: [],
-            step: 0,
-            max_steps: 0,
-            tool_calls: 0,
-            max_tool_calls: 0,
-            tokens_used: 0,
-            max_tokens: 0,
-            elapsed_ms: 0,
-            max_wall_ms: 0,
-            pending_approval: null,
-            events: [],
-            preview: null,
-            completion_summary: null,
-            error: String(e),
-          });
-        })
-        .finally(() => setLiveStarting(false));
-      return;
-    }
-    if (path.kind === "delegate") {
-      // Explicit "delegate to external host": opens a durable REX task an
-      // external host drives through rex-mcp; this UI supervises with the
-      // permanent human Stop.
-      setLiveRun(null);
-      setCustody(null);
-      setLiveStarting(true);
-      beginSettle();
-      rexTaskBegin(label, ultra)
-        .then((res) => {
-          const id = res?.task_id;
-          if (id) {
-            setRexTaskId(id);
-          } else {
-            throw new Error("rex-mcp returned no task id");
-          }
-        })
-        .catch((e) =>
-          setLiveRun({
-            id: "run-failed",
-            task: label,
-            status: "failed",
-            terminal_reason: { kind: "provider_error", detail: String(e) },
-            provider: "gemini",
-            model: "",
-            plan: [],
-            step: 0,
-            max_steps: 0,
-            tool_calls: 0,
-            max_tool_calls: 0,
-            tokens_used: 0,
-            max_tokens: 0,
-            elapsed_ms: 0,
-            max_wall_ms: 0,
-            pending_approval: null,
-            events: [],
-            preview: null,
-            completion_summary: null,
-            error: String(e),
-          })
-        )
-        .finally(() => setLiveStarting(false));
-      return;
-    }
-    // Default: the custody autonomous loop plans, acts through trusted
-    // approvals, verifies its own work against gates, and stops truthfully.
-    {
-      // Capture the plan-mode choice for this run, then reset the checkbox so
-      // the next run starts in the default execution mode unless the user
-      // opts in again.
-      const mode = planMode;
-      const summarize = summarizeHistory;
-      setPlanMode(false);
-      setSummarizeHistory(false);
-      custodyBegin(label, mode, summarize, lean ?? undefined)
-        .then((view) => {
+        } else if (path.kind === "delegate") {
+          // Explicit "delegate to external host": opens a durable REX task an
+          // external host drives through rex-mcp; this UI supervises with the
+          // permanent human Stop.
+          const res = await rexTaskBegin(label, ultra);
+          if (!res?.task_id) throw new Error("rex-mcp returned no task id");
+          if (stillHere()) setRexTaskId(res.task_id);
+        } else {
+          // Default: the custody autonomous loop plans, acts through trusted
+          // approvals, verifies its own work against gates, and stops
+          // truthfully. Capture the plan-mode choice for this run, then reset
+          // the checkbox so the next run starts in the default execution mode
+          // unless the user opts in again.
+          const mode = planMode;
+          const summarize = summarizeHistory;
+          setPlanMode(false);
+          setSummarizeHistory(false);
+          const view = await custodyBegin(label, mode, summarize, lean ?? undefined);
+          if (!stillHere()) return;
           setCustody({ grantId: view.grant_id, phase: view.phase, operator: view.operator });
           setLiveRun(view.snapshot);
           startPolling(view.snapshot.id);
-        })
-        .catch((e) =>
-          setLiveRun({
-            id: "run-failed",
-            task: label,
-            status: "failed",
-            terminal_reason: { kind: "provider_error", detail: String(e) },
-            provider: "gemini",
-            model: "",
-            plan: [],
-            step: 0,
-            max_steps: 0,
-            tool_calls: 0,
-            max_tool_calls: 0,
-            tokens_used: 0,
-            max_tokens: 0,
-            elapsed_ms: 0,
-            max_wall_ms: 0,
-            pending_approval: null,
-            events: [],
-            preview: null,
-            completion_summary: null,
-            error: String(e),
-          })
-        )
-        .finally(() => setLiveStarting(false));
+        }
+      } catch (e) {
+        // The reason is shown where the run would have been, naming the
+        // provider that was actually selected.
+        if (stillHere()) setLiveRun(failedRunSnapshot(label, errorText(e), { provider }));
+      }
+    } finally {
+      startGuard.current = false;
+      if (stillHere()) {
+        setLiveStarting(false);
+        setInstalledStarting(false);
+      }
     }
   };
 
@@ -645,26 +620,13 @@ export default function App() {
   const onNewTask = () => {
     cancel.current?.();
     if (settleTimer.current !== null) window.clearTimeout(settleTimer.current);
-    if (livePoll.current !== null) {
-      window.clearInterval(livePoll.current);
-      livePoll.current = null;
-    }
-    if (installedPoll.current !== null) {
-      window.clearInterval(installedPoll.current);
-      installedPoll.current = null;
-    }
-    if (liveRun && !liveRun.id.startsWith("run-failed")) agentTeardown(liveRun.id).catch(() => undefined);
-    setInstalledRun(null);
-    setInstalledStarting(false);
-    setInstalledDeciding(false);
-    setNativePreviewDir(null);
-    setLiveRun(null);
-    setLiveStarting(false);
-    setLiveDeciding(false);
+    clearRuns();
     setSession(null);
     setTask("");
     setHero("shown");
     setBrowserPhase("closed");
+    // The composer is the next thing the person wants; put the caret there.
+    window.requestAnimationFrame(() => document.getElementById("task-input")?.focus());
   };
 
   const desktop = isDesktopRuntime();
@@ -762,6 +724,7 @@ export default function App() {
                       fableGate={fableGate}
                       setFableGate={toggleFableGate}
                       executionPath={executionPath}
+                      locked={runBusy}
                     />
                   </div>
                 </div>
@@ -821,6 +784,22 @@ export default function App() {
                 onAllowForRun={allowForRunOk ? onAllowForRun : undefined}
               />
             )}
+            {lostContact && runBusy && (
+              <p className="run-notice" role="alert">
+                <span>Lost contact with the backend. The run may still be going; this screen cannot tell.</span>
+                <button type="button" className="setup-link" onClick={() => clearRuns(false)}>
+                  Stop watching
+                </button>
+              </p>
+            )}
+            {runDone && (
+              <div className="run-next">
+                <button type="button" className="newtask-button" onClick={onNewTask}>
+                  <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.5v9M1.5 6h9" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+                  New task
+                </button>
+              </div>
+            )}
             {rexTaskId && (
               <RexTaskView taskId={rexTaskId} onClose={() => setRexTaskId(null)} />
             )}
@@ -855,7 +834,7 @@ export default function App() {
                 <span>Review</span>
               </button>
             )}
-            {!liveRun && !liveStarting && (session ? (
+            {!liveRun && !liveStarting && !ultraRun && !installedRun && !installedStarting && !rexTaskId && (session ? (
               <SessionView
                 key={session.id}
                 session={session}
@@ -870,15 +849,20 @@ export default function App() {
                 <p>Receipts and checks will appear here after a run.</p>
               </div>
             ))}
-            <HistoryList
-              sessions={PAST_SESSIONS}
-              selectedId={session?.id}
-              onSelect={(s) => {
-                cancel.current?.();
-                setSession(s);
-                beginSettle();
-              }}
-            />
+            {/* Sample history belongs to the no-backend preview. With a backend
+                connected it listed invented runs ("Publish the billing webhook
+                to production") under the person's real one. */}
+            {backendProbed && !liveCapable && (
+              <HistoryList
+                sessions={PAST_SESSIONS}
+                selectedId={session?.id}
+                onSelect={(s) => {
+                  cancel.current?.();
+                  setSession(s);
+                  beginSettle();
+                }}
+              />
+            )}
           </>
         )}
       </main>

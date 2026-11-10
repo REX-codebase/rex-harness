@@ -74,18 +74,70 @@ fn the_wizard_points_at_real_files_and_shows_both_licences() {
     assert_eq!(nsis["languages"], serde_json::json!(["English"]));
 }
 
+/// The version a manifest declares: the first `version = "x"` line of a
+/// Cargo.toml or Gradle file, or the `version` field of a JSON file.
+fn declared_version(path: &std::path::Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    if path.extension().is_some_and(|e| e == "json") {
+        let v: Value = serde_json::from_str(&text).unwrap();
+        return v["version"].as_str().unwrap().to_string();
+    }
+    text.lines()
+        .find_map(|l| l.strip_prefix("version = \"")?.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("{}: no version line", path.display()))
+        .to_string()
+}
+
+/// Crates that version themselves (the prompt contract is `rex-prompt 1.0.0`),
+/// so they are deliberately not tied to the release.
+const OWN_VERSION: &[&str] = &["rex-prompt"];
+
 #[test]
 fn every_manifest_carries_the_same_version_the_release_tag_must_equal() {
     let conf = conf();
     let version = conf["version"].as_str().unwrap();
     let root = tauri_dir().join("..");
-    let pkg: Value =
-        serde_json::from_str(&std::fs::read_to_string(root.join("package.json")).unwrap()).unwrap();
-    assert_eq!(pkg["version"], version, "package.json");
-    let cargo = std::fs::read_to_string(tauri_dir().join("Cargo.toml")).unwrap();
-    let cargo_version = cargo
-        .lines()
-        .find_map(|l| l.strip_prefix("version = \"")?.strip_suffix('"'))
-        .unwrap();
-    assert_eq!(cargo_version, version, "src-tauri/Cargo.toml");
+
+    let mut manifests: Vec<PathBuf> = vec![
+        root.join("package.json"),
+        tauri_dir().join("Cargo.toml"),
+        root.join("examples/rex-ultra-scripted-host/Cargo.toml"),
+        root.join("packages/rex-mcp-npm/package.json"),
+        root.join("extensions/vscode/package.json"),
+        root.join("extensions/jetbrains/build.gradle.kts"),
+    ];
+    // Every crate, so a new one cannot be forgotten at the next release.
+    for entry in std::fs::read_dir(root.join("crates")).unwrap() {
+        let dir = entry.unwrap().path();
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        if !OWN_VERSION.contains(&name.as_str()) {
+            manifests.push(dir.join("Cargo.toml"));
+        }
+    }
+    let wrong: Vec<String> = manifests
+        .iter()
+        .filter(|m| declared_version(m) != version)
+        .map(|m| format!("{} says {}", m.display(), declared_version(m)))
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "these do not match tauri.conf.json ({version}): {wrong:#?}"
+    );
+
+    // The lockfile's root entry, which `npm ci` checks against package.json.
+    let lock: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("package-lock.json")).unwrap())
+            .unwrap();
+    assert_eq!(lock["version"], version, "package-lock.json");
+    assert_eq!(
+        lock["packages"][""]["version"], version,
+        "package-lock.json root package"
+    );
+
+    // The manual-release form defaults to the tag this version needs.
+    let release = std::fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
+    assert!(
+        release.contains(&format!("default: \"v{version}\"")),
+        "release.yml's default tag is not v{version}"
+    );
 }

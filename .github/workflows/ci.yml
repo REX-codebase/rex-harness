@@ -58,6 +58,16 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # The install scripts: option handling, the task-store downgrade guard, and
+  # scripts/install.sh against a fake release (checksum verified, a tampered
+  # archive refused). Pure shell; no build, no network.
+  installers:
+    name: Install scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/test-installers.sh
+
   vscode-extension:
     name: VS Code extension (tsc)
     runs-on: ubuntu-latest
