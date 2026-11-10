@@ -47,8 +47,8 @@ node tools/render-comp.mjs --plates "$OUT/plates" --legacy "$OUT/legacy" --meta 
 
 echo "8/8  encode"
 ffmpeg -y -loglevel error -framerate 24 -i "$OUT/frames/%05d.jpg" -i "$OUT/score.wav" \
-  -c:v libx264 -preset slow -crf 18 -pix_fmt yuv420p -profile:v high -tune film \
-  -c:a aac -b:a 192k -af "volume=2dB,alimiter=limit=0.84:level=disabled" \
+  -c:v libx264 -preset slow -crf 22 -pix_fmt yuv420p -profile:v high -tune film \
+  -c:a aac -b:a 192k -af "volume=1.2dB,alimiter=limit=0.7:level=disabled" \
   -movflags +faststart -shortest rex-harness-launch.mp4
 ffmpeg -y -loglevel error -ss 73.6 -i rex-harness-launch.mp4 -frames:v 1 -q:v 2 rex-harness-launch-poster.jpg
 echo "done: rex-harness-launch.mp4"

@@ -79,10 +79,10 @@ export const PLATES = {
     },
     pulse: lockPulse(u) + 0.12,
   }),
-  // Calm. Held in orbit.
+  // Calm. Held in orbit. The entity eases aside to make room for the title.
   finale: (u, d) => ({
     chapter: 'hero', p: lerp(0.5, 1.0, u / d), rings: ringsAt(1e9),
-    cam: { dolly: lerp(0.62, 1.2, easeInOut(u / d)), yaw: lerp(0.4, 0.1, u / d), lift: lerp(0.4, 0.0, u / d), sx: lerp(0.08, 0.2, easeInOut(u / d)), sy: 0, shake: 0 },
+    cam: { dolly: lerp(0.62, 1.2, easeInOut(u / d)), yaw: lerp(0.4, 0.1, u / d), lift: lerp(0.4, 0.0, u / d), sx: 0.27 * easeInOut((u - 0.3) / 1.4), sy: 0, shake: 0 },
     pulse: 0.1 + 0.9 * decay(u, 0.2, 0.5),
   }),
 };

@@ -32,6 +32,12 @@ Every claim is from the repository (`README.md`, `docs/cli.md`, `docs/autonomous
 `CHANGELOG.md`). The film says *by default* about approvals because Autonomous mode, new in 0.1.2, removes the
 prompts for a run and none of the limits. The narration is dramatic; the product claims in it are not.
 
+## The output
+
+`rex-harness-launch.mp4`: 1920 x 1080 (2.39:1 picture with the subtitles in the letterbox), 24 fps, 77.5 s, H.264 and AAC,
+about 87 MB, -16.6 LUFS with -1.6 dBTP of headroom. The MP4 is git-ignored (it is rebuilt by `./build.sh`);
+`rex-harness-launch-poster.jpg` is the title-card frame.
+
 ## Build it
 
 ```bash
