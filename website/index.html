@@ -260,7 +260,7 @@
         <article class="card reveal" style="--i:0"><h3>Autonomous mode</h3><p>Build · Plan · <b>Auto</b>. Auto removes the per-action prompts for a run, and none of its limits. Every action is logged as <em>Ran without asking</em>.</p></article>
         <article class="card reveal" style="--i:1"><h3>Git status, everywhere</h3><p>A chip on every tab: branch, ahead and behind, changed files. Amber for changes, red for conflicts.</p></article>
         <article class="card reveal" style="--i:2"><h3>Your folder, your tabs</h3><p>Terminal, Editor and Git work in the project you open, and stay alive when you switch tabs.</p></article>
-        <article class="card reveal" style="--i:3"><h3>A prebuilt <code>rex</code></h3><p>Linux x86_64, macOS Apple Silicon and Windows, each with a checksum. No Rust toolchain needed.</p></article>
+        <article class="card reveal" style="--i:3"><h3>A prebuilt <code>rex</code></h3><p>Linux x86_64 and Windows, each with a SHA-256 beside it. No Rust toolchain needed.</p></article>
         <article class="card reveal" style="--i:4"><h3>A way back</h3><p><em>New task</em> after every run, and a notice when the backend stops answering instead of “Working” forever.</p></article>
         <article class="card reveal" style="--i:5"><h3>An installer that installs</h3><p>Runs from a fresh clone, with <code>--build</code>, <code>--no-app</code> and <code>--help</code>, and CI that tests it.</p></article>
       </div>
@@ -298,9 +298,9 @@ cd rex-harness
           <p class="note">Installs dependencies and the <code>rex</code> CLI, then starts the app. <code>--build</code> for a production build, <code>--no-app</code> for the CLI only.</p>
         </div>
         <div class="tabs__pane" role="tabpanel" id="pane-cli" aria-labelledby="tab-cli" hidden>
-          <p>Linux x86_64 and macOS Apple Silicon. No Rust needed.</p>
+          <p>Linux x86_64. No Rust needed.</p>
           <div class="code"><pre><code>curl -fsSL https://raw.githubusercontent.com/REX-codebase/rex-harness/main/scripts/install.sh | sh</code></pre><button type="button" class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/REX-codebase/rex-harness/main/scripts/install.sh | sh" aria-label="Copy the CLI install command">Copy</button></div>
-          <p class="note">It checks the download against its published SHA-256 before installing. Windows and other platforms: <a href="https://github.com/REX-codebase/rex-harness/blob/main/INSTALL.md#command-line-only-rex">INSTALL.md →</a></p>
+          <p class="note">It checks the download against its published SHA-256 before installing. The script also targets macOS Apple Silicon, but v0.1.2 has no macOS binary attached yet, so build from source there. Windows and other platforms: <a href="https://github.com/REX-codebase/rex-harness/blob/main/INSTALL.md#command-line-only-rex">INSTALL.md →</a></p>
         </div>
       </div>
 
@@ -310,6 +310,7 @@ cd rex-harness
         <ul>
           <li><b>Continue with ChatGPT</b> has not been exercised against OpenAI’s live service yet. It is tested against scripted endpoints and follows OpenAI’s published contract.</li>
           <li>The <b>Windows installer is unsigned</b> and has had little testing on real machines.</li>
+          <li>The v0.1.2 release attaches a <b>Windows installer</b> and <code>rex</code> for <b>Windows and Linux x86_64</b>. There is no macOS binary on it yet.</li>
           <li>With no backend connected, the web UI is a <b>labelled preview on sample data</b>. It never pretends to run anything.</li>
         </ul>
       </div>
