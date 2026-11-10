@@ -1,0 +1,10 @@
+{
+  "name": "rex-harness-launch-film",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Source for the REX Harness 0.1.2 launch film: renders the website's real WebGL scene frame by frame, composites the motion graphics, and synthesizes the score.",
+  "license": "MIT OR Apache-2.0",
+  "scripts": { "build": "./build.sh" },
+  "devDependencies": { "playwright": "^1.63.0" }
+}
