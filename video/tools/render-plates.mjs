@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Renders the REX Harness website's real WebGL scene, frame by frame, at 1080p.
 //
-//   node tools/render-plates.mjs --out DIR [--shots hook,title] [--frames 0:90] [--quality high]
+//   node tools/render-plates.mjs --out DIR [--shots open,reveal] [--frames 0:90] [--quality high]
+//   node tools/render-plates.mjs --legacy --out DIR      (the 16:9, 30 fps footage the film re-cuts: limits, custody, proof, ultra, models)
+//   node tools/render-plates.mjs --probe '{"chapter":"hero","cam":{"dolly":0.14}}' --out DIR   (one test frame)
 //
 // How it stays deterministic and fast on a machine with no GPU:
 //   - requestAnimationFrame and performance.now are replaced by a virtual clock; one call to
@@ -20,8 +22,9 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SHOTS, FPS, W, H, shotFrames } from '../src/script.mjs';
+import { SHOTS, FPS, W, H, PH, shotFrames } from '../src/script.mjs';
 import { PLATES } from '../src/plates.mjs';
+import { LEGACY_PLATES } from '../src/plates_legacy.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
@@ -32,7 +35,7 @@ const SITE = path.resolve(HERE, '../../website');
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, all) => (a.startsWith('--') ? [a.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : '1'] : null)).filter(Boolean));
 const OUT = path.resolve(args.out || path.join(HERE, '../out/plates'));
 const QUALITY = args.quality || 'high';
-const only = args.shots ? args.shots.split(',') : SHOTS.map((s) => s.id);
+const only = args.shots ? args.shots.split(',') : SHOTS.filter((s) => !s.plate.legacy).map((s) => s.id);
 const [fromF, toF] = args.frames ? args.frames.split(':').map(Number) : [0, Infinity];
 const SPEED = 1.8; // the limits demo runs this much faster than on the page, so a run fits in a shot
 
@@ -75,10 +78,12 @@ const INIT = () => {
   Math.random = () => { s |= 0; s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 };
 
-const PAGE_FRAME = async ({ spec, T0, first, quality }) => {
+const PAGE_FRAME = async ({ spec, T0, first, quality, fps }) => {
   const r = window.__rex;
   if (!window.__core) window.__core = await import('./js/core.js');
   const { emit, sim } = window.__core;
+  if (!window.__U) window.__U = (await import('./js/scene/state.js')).U;
+  const U = window.__U;
   if (first) {
     r.state.t = T0; r.state.flowT = T0;
     const rig = r.rig, orig = rig.update;
@@ -91,6 +96,7 @@ const PAGE_FRAME = async ({ spec, T0, first, quality }) => {
       if (c.yaw) { const co = Math.cos(c.yaw), si = Math.sin(c.yaw); const x = off.x * co + off.z * si, z = -off.x * si + off.z * co; off.x = x; off.z = z; }
       if (c.lift) off.y += c.lift;
       if (c.dolly != null) off.multiplyScalar(c.dolly);
+      if (c.shake) { const tt = r.state.t; off.x += c.shake * (Math.sin(tt * 41.3) + 0.6 * Math.sin(tt * 97.1 + 1)); off.y += c.shake * (Math.sin(tt * 37.7 + 2) + 0.6 * Math.sin(tt * 83.9)); off.z += c.shake * 0.5 * Math.sin(tt * 53.3 + 4); }
       cam.position.copy(look).add(off);
       cam.lookAt(look);
       if (c.sx != null) cam.setViewOffset(w, h, -c.sx * w, (c.sy || 0) * h, w, h);
@@ -100,6 +106,13 @@ const PAGE_FRAME = async ({ spec, T0, first, quality }) => {
     };
   }
   window.__cam = spec.cam || null;
+  if (spec.rings) spec.rings.forEach((st, i) => {
+    const ring = r.parts.rings.rings[i];
+    ring.group.visible = st.visible;
+    ring.group.scale.setScalar(Math.max(0.001, st.scale));
+    ring.group.rotation.set(ring.L.tilt[0] + st.rot[0], ring.L.tilt[1] + st.rot[1], ring.L.tilt[2] + st.rot[2]);
+  });
+  if (spec.pulse != null) U.uPulse.value = spec.pulse;
   const it = r.chapters.items.find((c) => c.id === spec.chapter);
   scrollTo({ top: it.a + spec.p * Math.max(0, it.b - it.a - innerHeight), behavior: 'instant' });
   for (const ev of spec.fire || []) {
@@ -108,7 +121,7 @@ const PAGE_FRAME = async ({ spec, T0, first, quality }) => {
     else if (ev.type === 'mode') { sim.mode = ev.mode; emit('mode', ev.mode); }
     else if (ev.type === 'click') document.querySelector(ev.sel).click();
   }
-  window.__step(1000 / 30);
+  window.__step(1000 / fps);
   const canvas = document.getElementById('stage');
   const img = canvas.toDataURL('image/jpeg', 0.95);
   const tags = [];
@@ -125,14 +138,44 @@ const PAGE_FRAME = async ({ spec, T0, first, quality }) => {
 
 const browser = await chromium.launch({ args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--enable-webgl'] });
 
-for (const shot of SHOTS.filter((s) => only.includes(s.id))) {
-  const dir = path.join(OUT, shot.id);
-  fs.mkdirSync(dir, { recursive: true });
-  const n = shotFrames(shot);
-  const dur = shot.t1 - shot.t0;
+// ── probe: render test frames from JSON specs, for lining up a shot before committing to it ──
+if (args.probe) {
+  const specs = [].concat(JSON.parse(args.probe));
+  const ctx = await browser.newContext({ viewport: { width: W, height: PH }, deviceScaleFactor: 1 });
+  const page = await ctx.newPage();
+  await page.addInitScript(INIT);
+  await page.route('**/js/ui.js', async (route) => route.fulfill({ contentType: 'text/javascript', body: patchUi(fs.readFileSync(path.join(SITE, 'js/ui.js'), 'utf8')) }));
+  await page.goto(`${BASE}/index.html?snap&q=${QUALITY}`, { waitUntil: 'load' });
+  await page.waitForFunction(() => window.__ready === true, null, { timeout: 240000, polling: 250 });
+  await page.addStyleTag({ content: 'body *{visibility:hidden!important} #stage{visibility:visible!important;opacity:1!important}' });
+  fs.mkdirSync(OUT, { recursive: true });
+  for (const [i, spec] of specs.entries()) {
+    spec.chapter ||= 'hero'; spec.p ??= 0; spec.fire = [];
+    if (spec.rings === 'hidden') spec.rings = [0, 1, 2, 3].map(() => ({ visible: false, scale: 3, rot: [0, 0, 0] }));
+    if (spec.rings === 'home') spec.rings = [0, 1, 2, 3].map(() => ({ visible: true, scale: 1, rot: [0, 0, 0] }));
+    let out;
+    for (let k = 0; k < 2; k++) out = await page.evaluate(PAGE_FRAME, { spec, T0: 3, first: i === 0 && k === 0, quality: QUALITY, fps: FPS });
+    fs.writeFileSync(path.join(OUT, `probe_${i}.jpg`), Buffer.from(out.img.split(',')[1], 'base64'));
+    console.log(`probe_${i}.jpg`, JSON.stringify(spec.cam || {}));
+  }
+  await browser.close(); server.close(); process.exit(0);
+}
+
+// A job is one continuous take. The film's own shots render at 1920 x 804 and 24 fps; the legacy footage
+// (re-cut in the limits, gate, proof, ultra and models shots) rendered at 1920 x 1080 and 30 fps.
+const LEGACY_JOBS = [['custody', 11.8, 11.6], ['limits', 10.6, 23.4], ['proof', 10.6, 34.0], ['ultra', 8.4, 44.6], ['models', 4.6, 53.0]]
+  .map(([dir, dur, T0]) => ({ id: dir, dir, dur, T0, n: Math.round(dur * 30), fps: 30, h: H, program: LEGACY_PLATES[dir] }));
+const NEW_JOBS = SHOTS.filter((s) => !s.plate.legacy && only.includes(s.id))
+  .map((s) => ({ id: s.id, dir: s.plate.dir, dur: s.t1 - s.t0, T0: s.t0, n: shotFrames(s), fps: FPS, h: PH, program: PLATES[s.id] }));
+const JOBS = args.legacy ? LEGACY_JOBS.filter((j) => !args.shots || only.includes(j.id)) : NEW_JOBS;
+
+for (const shot of JOBS) {
+  fs.mkdirSync(path.join(OUT, shot.dir), { recursive: true });
+  const n = shot.n, dur = shot.dur;
+  const dir = path.join(OUT, shot.dir);
   if (fs.existsSync(path.join(dir, '.done')) && fromF === 0 && toF === Infinity) { console.log(`${shot.id}: already rendered`); continue; }
 
-  const ctx = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
+  const ctx = await browser.newContext({ viewport: { width: W, height: shot.h }, deviceScaleFactor: 1 });
   const page = await ctx.newPage();
   page.on('console', (m) => { if (m.type() === 'error') console.log(`[${shot.id}] page error:`, m.text().slice(0, 240)); });
   await page.addInitScript(INIT);
@@ -145,16 +188,16 @@ for (const shot of SHOTS.filter((s) => only.includes(s.id))) {
   const fired = new Set();
   const t0 = Date.now();
   for (let f = 0; f < n; f++) {
-    const u = f / FPS;
-    const spec = PLATES[shot.id](u, dur);
+    const u = f / shot.fps;
+    const spec = shot.program(u, dur);
     spec.fire = (spec.events || []).filter((e, i) => !fired.has(i) && u >= e.at - 1e-9).map((e) => { fired.add((spec.events || []).indexOf(e)); return e; });
     if (args.preview && f >= toF) break;
     if (f < fromF || f >= toF) { // frames outside the requested window are still simulated, so state matches a full render
-      await page.evaluate(PAGE_FRAME, { spec, T0: shot.t0, first: f === 0, quality: QUALITY });
+      await page.evaluate(PAGE_FRAME, { spec, T0: shot.T0, first: f === 0, quality: QUALITY, fps: shot.fps });
       tracks.push(null);
       continue;
     }
-    const out = await page.evaluate(PAGE_FRAME, { spec, T0: shot.t0, first: f === 0, quality: QUALITY });
+    const out = await page.evaluate(PAGE_FRAME, { spec, T0: shot.T0, first: f === 0, quality: QUALITY, fps: shot.fps });
     fs.writeFileSync(path.join(dir, `${String(f).padStart(5, '0')}.jpg`), Buffer.from(out.img.split(',')[1], 'base64'));
     tracks.push({ tags: out.tags, run: out.run, mode: out.mode });
     if (f === 0 && out.tier !== QUALITY) throw new Error(`scene booted at tier ${out.tier}, wanted ${QUALITY}`);

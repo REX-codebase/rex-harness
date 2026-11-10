@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 // Composites the film: loads src/comp.html and screenshots it once per frame.
 //
-//   node tools/render-comp.mjs --plates DIR --out DIR [--frames 0:300] [--every 15] [--shots title,cta]
+//   node tools/render-comp.mjs --plates DIR --legacy DIR --meta DIR --out DIR [--frames 0:300] [--every 15] [--shots open,cta]
+//
+//   --plates DIR   the film's own 3D plates (open, reveal, tension, harness, finale)
+//   --legacy DIR   the earlier 16:9 plates the film re-cuts (limits, custody, proof, ultra, models)
+//   --meta DIR     cues.json and vo.json (tools/print-cues.mjs, tools/narrate.py)
 //
 //   --frames a:b   render only frames a..b-1
 //   --every n      render every nth frame (contact sheets and reviews)
@@ -22,6 +26,8 @@ const ROOT = path.resolve(HERE, '..');
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, all) => (a.startsWith('--') ? [a.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : '1'] : null)).filter(Boolean));
 const PLATES = path.resolve(args.plates || path.join(ROOT, 'out/plates'));
+const LEGACY = path.resolve(args.legacy || path.join(ROOT, 'out/legacy'));
+const META = path.resolve(args.meta || path.join(ROOT, 'out'));
 const OUT = path.resolve(args.out || path.join(ROOT, 'out/frames'));
 const [from, to] = args.frames ? args.frames.split(':').map(Number) : [0, TOTAL_FRAMES];
 const every = +(args.every || 1);
@@ -32,8 +38,9 @@ const list = args.list ? args.list.split(',').map(Number) : null;
 const MOUNTS = [
   ['/src/', path.join(ROOT, 'src')],
   ['/fonts/', path.resolve(ROOT, '../website/fonts')],
-  ['/img/', path.resolve(ROOT, '../docs/images')],
   ['/plates/', PLATES],
+  ['/legacy/', LEGACY],
+  ['/meta/', META],
 ];
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.woff2': 'font/woff2', '.jpg': 'image/jpeg', '.png': 'image/png', '.json': 'application/json' };
 const server = http.createServer((req, res) => {
