@@ -92,8 +92,9 @@ pub(crate) fn usage() -> &'static str {
      \n\
      credentials: $REX_<PROVIDER>_API_KEY wins, then $REX_API_KEY;\n\
      otherwise the file credential store under $REX_STATE_DIR\n\
-     (default ~/.rex/harness) is used. `openai-chatgpt` uses your ChatGPT\n\
-     plan through `rex login chatgpt` (never a pasted key).\n\
+     (default ~/.rex/harness; %LOCALAPPDATA%\\rex-harness on Windows) is used.\n\
+     `openai-chatgpt` uses your ChatGPT plan through `rex login chatgpt`\n\
+     (never a pasted key).\n\
      \n\
      exit codes: 0 completed · 2 usage/config/approval needed ·\n\
      \x203 run ended without completing · 1 internal error\n"

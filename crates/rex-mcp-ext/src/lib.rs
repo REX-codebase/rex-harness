@@ -48,19 +48,6 @@ pub struct ExtTool {
     pub input_schema: Value,
 }
 
-/// The REX state directory: `$REX_STATE_DIR`, else `~/.rex/harness`.
-pub fn state_dir() -> PathBuf {
-    std::env::var_os("REX_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".rex")
-                .join("harness")
-        })
-}
-
 /// Load the external-server config. Workspace config wins; the state-dir
 /// config is the fallback. Returns the config path used and the servers.
 pub fn load_config(

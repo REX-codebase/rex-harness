@@ -127,9 +127,20 @@ pub fn load_user() -> Option<ProjectInstructions> {
     load_user_from(&config_dir()?)
 }
 
+/// The user's home directory: `HOME`, else `USERPROFILE`.
+///
+/// Windows does not set `HOME`, so reading only that variable meant no home
+/// directory there: user-level skills and instructions were never found, and
+/// the rule that a git root which *is* the home directory (a dotfiles repo) is
+/// not trusted as a project root never applied.
 pub(crate) fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
+    home_from(&|name| std::env::var_os(name))
+}
+
+fn home_from(env: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    ["HOME", "USERPROFILE"]
+        .iter()
+        .find_map(|name| env(name).filter(|v| !v.is_empty()))
         .map(PathBuf::from)
 }
 
@@ -270,6 +281,29 @@ mod tests {
         fs::write(home.join("AGENTS.md"), "dotfiles rules").unwrap();
         assert!(load_with_home(&sub, Some(&home)).is_none());
         assert!(load_with_home(&sub, None).is_some());
+    }
+
+    #[test]
+    fn home_falls_back_to_userprofile_for_windows_and_ignores_empty_values() {
+        use std::ffi::OsString;
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| OsString::from(v))
+            }
+        };
+        // Unix: HOME wins even when USERPROFILE is also present.
+        let both = env(&[("HOME", "/home/a"), ("USERPROFILE", "/Users/a")]);
+        assert_eq!(home_from(&both), Some(PathBuf::from("/home/a")));
+        // Windows: no HOME, so the profile folder is the home directory.
+        let windows = env(&[("USERPROFILE", "C:/Users/a")]);
+        assert_eq!(home_from(&windows), Some(PathBuf::from("C:/Users/a")));
+        // An empty HOME does not count as set.
+        let empty = env(&[("HOME", ""), ("USERPROFILE", "C:/Users/a")]);
+        assert_eq!(home_from(&empty), Some(PathBuf::from("C:/Users/a")));
+        assert_eq!(home_from(&env(&[])), None);
     }
 
     #[test]

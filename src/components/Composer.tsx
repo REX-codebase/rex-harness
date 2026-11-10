@@ -5,6 +5,7 @@ import type { ExecutionPath } from "../data/executionPath";
 import { useSlideIndicator } from "./Fx";
 import { defaultLean } from "../data/providers";
 import { selectedModel } from "../data/custodyRun";
+import { SEARCH_PREVIEW, loadSearchStatus, type SearchStatus } from "../data/searchStatus";
 
 // The headline arrives word by word; REX itself catches a single sheen.
 const HEADLINE = ["Tell", "REX", "what", "to", "do."];
@@ -19,14 +20,27 @@ export function planShortcut(e: { altKey: boolean; ctrlKey: boolean; metaKey: bo
   return null;
 }
 
-export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, summarizeHistory = false, setSummarizeHistory, lean = null, setLean, fableGate, setFableGate, executionPath }: { task: string; setTask: (t: string) => void; state: RunState; onRun: () => void; planMode: boolean; setPlanMode: (v: boolean) => void; summarizeHistory?: boolean; setSummarizeHistory?: (v: boolean) => void; lean?: boolean | null; setLean?: (v: boolean) => void; fableGate: boolean; setFableGate: (v: boolean) => void; executionPath: ExecutionPath }) {
-  const busy = state === "working" || state === "verifying";
+export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, summarizeHistory = false, setSummarizeHistory, lean = null, setLean, fableGate, setFableGate, executionPath, locked = false }: { task: string; setTask: (t: string) => void; state: RunState; onRun: () => void; planMode: boolean; setPlanMode: (v: boolean) => void; summarizeHistory?: boolean; setSummarizeHistory?: (v: boolean) => void; lean?: boolean | null; setLean?: (v: boolean) => void; fableGate: boolean; setFableGate: (v: boolean) => void; executionPath: ExecutionPath; locked?: boolean }) {
+  // `state` is the simulated tour's progress; `locked` is a real run (any
+  // engine) that is still going. Either one holds the composer: a second run
+  // started over a live one would orphan it.
+  const busy = state === "working" || state === "verifying" || locked;
   const canRun = task.trim().length > 0 && !busy;
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const optionsRef = useRef<HTMLDivElement>(null);
   const modeRef = useRef<HTMLDivElement>(null);
   useSlideIndicator(modeRef, planMode, ".is-on");
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [search, setSearch] = useState<SearchStatus>(SEARCH_PREVIEW);
+  useEffect(() => {
+    let active = true;
+    void loadSearchStatus().then((status) => {
+      if (active) setSearch(status);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
   // Lean follows the selected provider until the person decides; the switch
   // shows what the next run will actually do.
   const leanOn = lean ?? defaultLean(selectedModel().provider);
@@ -135,7 +149,7 @@ export function Composer({ task, setTask, state, onRun, planMode, setPlanMode, s
           {executionPath.label}
         </span>
         {planMode && <span className="composer-meta-item text-muted">Plan mode: nothing runs until you approve the plan</span>}
-        <span className="composer-meta-item" title="REX-search is the in-house zero-cost engine; it is not connected in this preview.">REX-search not connected</span>
+        <span className="composer-meta-item" title={search.title}>{search.label}</span>
         <span className="composer-meta-keys hidden sm:inline-flex"><kbd>Ctrl</kbd><kbd>Enter</kbd> run<span className="mx-1.5 text-line">·</span><kbd>Alt</kbd><kbd>P</kbd> plan</span>
       </div>
 

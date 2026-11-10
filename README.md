@@ -58,9 +58,18 @@ choose *More info → Run anyway* ([details](INSTALL.md)).
 git clone https://github.com/REX-codebase/rex-harness
 cd rex-harness
 ./quickstart.sh            # installs dependencies and the `rex` CLI, starts the app
+                           # (--build for a production build, --no-app for the CLI only)
 ```
 
-**Command line only:** `cargo install --path crates/rex-cli`.
+**Command line only** (Linux x86_64, macOS Apple Silicon; no Rust needed):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/REX-codebase/rex-harness/main/scripts/install.sh | sh
+```
+
+It checks the download against its published SHA-256 before installing. Windows and
+other platforms: [INSTALL.md](INSTALL.md#command-line-only-rex), or build it with
+`cargo install --path crates/rex-cli --locked`.
 
 ## Try it
 

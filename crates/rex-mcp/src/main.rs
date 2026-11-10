@@ -11,9 +11,9 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let state = std::env::var_os("REX_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".rex").join("harness"));
+    // `REX_STATE_DIR`, else the per-user default (shared with the desktop app's
+    // supervision of host tasks; see `rex_mcp::client::default_state_dir`).
+    let state = rex_mcp::client::default_state_dir();
     let workspace = std::env::var_os("REX_WORKSPACE")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
@@ -33,10 +33,4 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::io::stdout().lock(),
     )?;
     Ok(())
-}
-
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
 }

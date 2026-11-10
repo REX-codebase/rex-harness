@@ -151,12 +151,15 @@ pub fn call_tool_once(
 
 /// Same default the `rex-mcp` binary uses, so the shell supervises the same
 /// durable store hosts write to.
+///
+/// This is the one resolver in `rex_providers::paths` (the command-line
+/// flavour, which is where `rex-mcp` has always kept its store), so it honours
+/// `REX_STATE_DIR` and works on Windows, where `HOME` is normally unset. It
+/// used to read `HOME` itself and fall back to the current directory, which on
+/// Windows put the task store in a `.rex` folder next to wherever the app
+/// happened to be started from, and ignored `REX_STATE_DIR` entirely.
 pub fn default_state_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".rex")
-        .join("harness")
+    rex_providers::paths::data_dir(rex_providers::paths::Flavor::Cli)
 }
 
 /// Locate the server binary: explicit override first, then the sibling of
@@ -181,5 +184,65 @@ pub fn rex_mcp_bin() -> Result<PathBuf, String> {
             "rex-mcp binary not found next to {}; set REX_MCP_BIN",
             exe.display()
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Restores the environment variables a test edits, even if it panics.
+    struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl EnvGuard {
+        fn new(keys: &[&'static str]) -> Self {
+            EnvGuard(keys.iter().map(|k| (*k, std::env::var_os(k))).collect())
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// The shell, `rex-mcp` and `rex-dev-server` must agree on one folder: the
+    /// one the shared resolver picks. It used to read `HOME` itself, so it
+    /// ignored `REX_STATE_DIR`, and with no `HOME` (Windows) it was a folder
+    /// relative to whatever directory the app was started from.
+    ///
+    /// One test, because it edits the process environment.
+    #[test]
+    fn the_default_state_dir_honours_rex_state_dir_and_never_depends_on_the_current_directory() {
+        let _restore = EnvGuard::new(&[
+            "REX_STATE_DIR",
+            "HOME",
+            "USERPROFILE",
+            "LOCALAPPDATA",
+            "APPDATA",
+        ]);
+
+        std::env::set_var("REX_STATE_DIR", "/shared/rex");
+        assert_eq!(default_state_dir(), PathBuf::from("/shared/rex"));
+
+        std::env::remove_var("REX_STATE_DIR");
+        for key in ["HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"] {
+            std::env::remove_var(key);
+        }
+        let without_home = default_state_dir();
+        assert!(without_home.is_absolute(), "{without_home:?}");
+        assert!(
+            without_home.starts_with(std::env::temp_dir()),
+            "{without_home:?}"
+        );
+
+        std::env::set_var("HOME", "/home/a");
+        assert_eq!(
+            default_state_dir(),
+            rex_providers::paths::data_dir(rex_providers::paths::Flavor::Cli)
+        );
     }
 }

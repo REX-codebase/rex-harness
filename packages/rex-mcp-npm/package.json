@@ -1,6 +1,6 @@
 {
   "name": "@rex-codebase/rex-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "One-command launcher for the local REX Harness MCP server",
   "license": "MIT OR Apache-2.0",
   "private": false,
