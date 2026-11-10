@@ -7,8 +7,15 @@ change behaviour).
 
 ## [Unreleased]
 
-Autonomous mode, a working Git status, and the Terminal, Editor, Git and Settings
-tabs brought up to production quality. Several of them did not work in a default
+## [0.1.2] - 2026-11-10
+
+Autonomous mode, a working Git status, the Terminal, Editor, Git and Settings tabs
+brought up to production quality, run-lifecycle fixes in the task screen, one folder
+for delegated tasks on Windows, and an installer that can be run from a fresh clone.
+This is the first release since 0.1.1: a 0.1.2 was prepared but never published, so
+its changes ship here too. New tests cover the task screen (they drive the real
+`App`), the new tabs, autonomous mode, the install scripts, the state-folder
+resolution and the version check. Several of the tabs did not work in a default
 install before; the Fixed list says what and why.
 
 ### Added
@@ -37,6 +44,23 @@ install before; the Fixed list says what and why.
 - **Terminal tab:** *Restart* when the shell exits, and a status line.
 - **Settings:** an About section with the version and where your data lives (with
   Copy), and the keyboard list now includes Ctrl+S and committing from the Git tab.
+- **Prebuilt `rex` command line on every release**: `rex-<platform>.tar.gz`
+  (Linux x86_64, macOS Apple Silicon) and a `.zip` for Windows, each with a
+  `.sha256` beside it. `scripts/install.sh` downloads the right one, refuses it if
+  the checksum does not match and installs `rex` to `~/.local/bin`, so the CLI no
+  longer needs a Rust toolchain. See [INSTALL.md](INSTALL.md#command-line-only-rex).
+- **A way back after a run.** A finished run now offers **New task**, which
+  releases the run's sandbox, clears the task box and puts the caret in it. Before,
+  only the simulated tour had one.
+- **A notice when the backend stops answering** while a run is going (after about
+  seven seconds of failed polls), with **Stop watching**. It used to show "Working"
+  forever.
+- `quickstart.sh --build`, `--no-app` (dependencies and the CLI only) and `--help`;
+  `scripts/rex-mcp-install.sh --check-store` and `--print-config`.
+- `scripts/test-installers.sh` and a CI job for it, and a version check that now
+  covers every manifest and the release workflow's default tag, not three of them.
+- A favicon, description and theme colour for the page; a DMG window that lays out
+  the drag-to-Applications icons; Debian package section and priority.
 
 ### Changed
 - The Terminal, Editor and Git tabs stay alive when you switch tabs: your shell, its
@@ -47,6 +71,11 @@ install before; the Fixed list says what and why.
 - Settings text is accurate about approvals, about what *Reset to defaults* resets
   (the motion preference only), and shows the real version instead of "Preview build".
 - `rex-tools` no longer contains the Git panel's old git functions.
+- The composer says which search engine is in use ("Search · REX-search") instead
+  of always "REX-search not connected", which was untrue in the desktop app.
+- The "Recent" list of sample runs appears only when no backend is connected. With
+  one connected it listed invented runs under the person's real one.
+- `rex --help` names the Windows data folder.
 
 ### Fixed
 - **The Git tab could not work in a default install.** It required the folder to sit
@@ -75,40 +104,6 @@ install before; the Fixed list says what and why.
   Every folder now goes through a registry that only the native dialog can add to.
 - **The editor and the approval diff needed internet access** (Monaco was loaded from
   cdn.jsdelivr.net) and showed a spinner without it.
- - 2026-11-10
-
-Run-lifecycle fixes in the task screen, one folder for delegated tasks on
-Windows, and an installer that can be run from a fresh clone. New tests cover the
-task screen (they drive the real `App`), the install scripts, the state-folder
-resolution and the version check.
-
-### Added
-- **Prebuilt `rex` command line on every release**: `rex-<platform>.tar.gz`
-  (Linux x86_64, macOS Apple Silicon) and a `.zip` for Windows, each with a
-  `.sha256` beside it. `scripts/install.sh` downloads the right one, refuses it if
-  the checksum does not match and installs `rex` to `~/.local/bin`, so the CLI no
-  longer needs a Rust toolchain. See [INSTALL.md](INSTALL.md#command-line-only-rex).
-- **A way back after a run.** A finished run now offers **New task**, which
-  releases the run's sandbox, clears the task box and puts the caret in it. Before,
-  only the simulated tour had one.
-- **A notice when the backend stops answering** while a run is going (after about
-  seven seconds of failed polls), with **Stop watching**. It used to show "Working"
-  forever.
-- `quickstart.sh --build`, `--no-app` (dependencies and the CLI only) and `--help`;
-  `scripts/rex-mcp-install.sh --check-store` and `--print-config`.
-- `scripts/test-installers.sh` and a CI job for it, and a version check that now
-  covers every manifest and the release workflow's default tag, not three of them.
-- A favicon, description and theme colour for the page; a DMG window that lays out
-  the drag-to-Applications icons; Debian package section and priority.
-
-### Changed
-- The composer says which search engine is in use ("Search · REX-search") instead
-  of always "REX-search not connected", which was untrue in the desktop app.
-- The "Recent" list of sample runs appears only when no backend is connected. With
-  one connected it listed invented runs under the person's real one.
-- `rex --help` names the Windows data folder.
-
-### Fixed
 - **`./quickstart.sh` failed with "Permission denied"** on a fresh clone: it was
   committed without its executable bit, and the README's first command is
   `./quickstart.sh`.
