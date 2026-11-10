@@ -2,7 +2,7 @@
 // End-to-end verification in a real browser. Serves website/ itself, then runs the
 // page through the situations a landing page has to survive and asserts on them:
 //
-//   node website/tools/verify.mjs [--out DIR] [--only desktop,laptop,short,phone,nowebgl,reduced,demos] [--chapters hero,custody,...]
+//   node website/tools/verify.mjs [--out DIR] [--only desktop,laptop,short,phone,nowebgl,reduced,demos] [--chapters hero,custody,...] [--prefix /rex-harness/]
 //
 // Needs Playwright (a devDependency of the repo root: `npm ci`). Software GL is
 // forced when there is no GPU, so frames are slow but real; this is a correctness
@@ -21,12 +21,16 @@ const site = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(`--${k}`); return i >= 0 ? args[i + 1] : d; };
 const out = resolve(opt('out', join(process.env.TMPDIR || '/tmp', 'rex-site-verify')));
+// GitHub Pages serves a project site under /<repo>/, not at the root. Serving the same way
+// catches any root-absolute URL, which a root-served test would never notice.
+const prefix = opt('prefix', '/rex-harness/');
 const only = (opt('only', 'desktop,laptop,short,phone,nowebgl,reduced,demos')).split(',');
 mkdirSync(out, { recursive: true });
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.webp': 'image/webp', '.woff2': 'font/woff2', '.txt': 'text/plain', '.xml': 'application/xml', '.webmanifest': 'application/manifest+json' };
 const server = createServer((req, res) => {
   let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  if (prefix !== '/') { if (!p.startsWith(prefix)) { res.writeHead(404); res.end('not found (outside the Pages prefix)'); return; } p = '/' + p.slice(prefix.length); }
   if (p.endsWith('/')) p += 'index.html';
   const f = join(site, p);
   if (!f.startsWith(site) || !existsSync(f) || statSync(f).isDirectory()) { res.writeHead(404); res.end('not found'); return; }
@@ -34,7 +38,8 @@ const server = createServer((req, res) => {
   res.end(readFileSync(f));
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
-const base = `http://127.0.0.1:${server.address().port}`;
+const origin = `http://127.0.0.1:${server.address().port}`;
+const base = origin + prefix.replace(/\/$/, '');
 
 const SCENARIOS = {
   desktop: { viewport: { width: 1440, height: 900 }, query: 'q=high&snap', webgl: true, panels: true },
@@ -60,7 +65,7 @@ for (const name of only) {
   page.on('console', (m) => { if (m.type() === 'error' || (m.type() === 'warning' && /THREE|WebGL/.test(m.text()))) errors.push(m.text().slice(0, 300)); });
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('requestfailed', (r) => failedReq.push(r.url()));
-  page.on('request', (r) => { if (!r.url().startsWith(base) && !r.url().startsWith('data:') && !r.url().startsWith('blob:')) external.push(r.url()); });
+  page.on('request', (r) => { if (!r.url().startsWith(origin) && !r.url().startsWith('data:') && !r.url().startsWith('blob:')) external.push(r.url()); });
 
   await page.goto(`${base}/index.html?${S.query}`, { waitUntil: 'load' });
   if (S.webgl) {
